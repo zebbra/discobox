@@ -36,12 +36,28 @@ from discobox import NetboxClient, NetdiscoClient, sync_device, validate_ip
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(name)s  %(message)s",
-    datefmt="%Y-%m-%dT%H:%M:%S",
-)
+_LOG_FMT = "%(asctime)s %(levelname)-8s %(name)-20s %(message)s"
+_LOG_DATE = "%Y-%m-%dT%H:%M:%S"
+
+logging.basicConfig(level=logging.INFO, format=_LOG_FMT, datefmt=_LOG_DATE)
 logger = logging.getLogger("discobox.server")
+
+# Rename uvicorn.error → uvicorn (the name is misleading; it's their general logger)
+logging.getLogger("uvicorn.error").name = "uvicorn"
+# Suppress per-request access lines — sync results are logged by _run_sync
+logging.getLogger("uvicorn.access").propagate = False
+
+_UVICORN_LOG_CONFIG = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {"discobox": {"format": _LOG_FMT, "datefmt": _LOG_DATE}},
+    "handlers": {"default": {"class": "logging.StreamHandler", "formatter": "discobox"}},
+    "loggers": {
+        "uvicorn":        {"handlers": ["default"], "level": "INFO",    "propagate": False},
+        "uvicorn.error":  {"handlers": ["default"], "level": "INFO",    "propagate": False},
+        "uvicorn.access": {"handlers": [],          "level": "WARNING", "propagate": False},
+    },
+}
 
 # ── Prometheus metrics ─────────────────────────────────────────────────────────
 # Cardinality note: with ~30k hosts, per-host labels are avoided on gauges and
@@ -244,5 +260,5 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=port,
         workers=workers,
-        log_config=None,  # use our logging config
+        log_config=_UVICORN_LOG_CONFIG,
     )
