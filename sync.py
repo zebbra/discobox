@@ -390,9 +390,9 @@ class NetboxClient:
         model: str,
     ) -> pynetbox.core.response.Record:
         """Return an existing DeviceType or create one under manufacturer."""
-        existing = self.nb.dcim.device_types.get(
-            manufacturer_id=manufacturer.id,
-            model=model,
+        existing = (
+            self.nb.dcim.device_types.get(manufacturer_id=manufacturer.id, model=model)
+            or self.nb.dcim.device_types.get(manufacturer_id=manufacturer.id, slug=slugify(model))
         )
         if existing:
             return existing
@@ -907,6 +907,8 @@ def sync_device(
                 patch["serial"] = serial
             if patch:
                 nb_device.update(patch)
+                # pynetbox replaces device_type with a plain int after update — restore the object
+                nb_device.device_type = device_type
                 logger.info("  DeviceType → %s / %s  serial=%s  updated", mfr.name, model, serial)
                 mod_counts["updated"] += 1
             else:
