@@ -1,0 +1,7 @@
+services:
+  sync:
+    build: .
+    env_file:
+      - .env
+    # Pass --host at runtime:
+    #   docker compose run --rm sync --host 172.28.134.133
