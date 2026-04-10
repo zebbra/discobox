@@ -392,10 +392,10 @@ class NetboxClient:
         model: str,
     ) -> pynetbox.core.response.Record:
         """Return an existing DeviceType or create one under manufacturer."""
-        existing = (
-            self.nb.dcim.device_types.get(manufacturer_id=manufacturer.id, model=model)
-            or self.nb.dcim.device_types.get(manufacturer_id=manufacturer.id, slug=slugify(model))
-        )
+        results = list(self.nb.dcim.device_types.filter(manufacturer_id=manufacturer.id, model=model))
+        if not results:
+            results = list(self.nb.dcim.device_types.filter(manufacturer_id=manufacturer.id, slug=slugify(model)))
+        existing = results[0] if results else None
         if existing:
             return existing
         dt = self.nb.dcim.device_types.create(
@@ -414,10 +414,10 @@ class NetboxClient:
         model: str,
     ) -> pynetbox.core.response.Record:
         """Return an existing ModuleType or create one under manufacturer."""
-        existing = (
-            self.nb.dcim.module_types.get(manufacturer_id=manufacturer.id, model=model)
-            or self.nb.dcim.module_types.get(manufacturer_id=manufacturer.id, slug=slugify(model))
-        )
+        results = list(self.nb.dcim.module_types.filter(manufacturer_id=manufacturer.id, model=model))
+        if not results:
+            results = list(self.nb.dcim.module_types.filter(manufacturer_id=manufacturer.id, slug=slugify(model)))
+        existing = results[0] if results else None
         if existing:
             return existing
         mt = self.nb.dcim.module_types.create(
