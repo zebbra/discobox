@@ -3,14 +3,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
+# Place ca-bundle.pem in repo root before building (gitignored):
+#   cp /etc/ssl/ca-bundle.pem .
+COPY ca-bundle.pem /etc/ssl/ca-bundle.pem
 
-# Pass corporate CA bundle at build time if needed:
-#   docker compose build --secret id=ca_bundle,src=./ca-bundle.pem
-RUN --mount=type=secret,id=ca_bundle,target=/tmp/ca-bundle.pem \
-    pip install --no-cache-dir \
-        $([ -f /tmp/ca-bundle.pem ] && echo "--cert /tmp/ca-bundle.pem") \
-        -r requirements.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir --cert /etc/ssl/ca-bundle.pem -r requirements.txt
 
 COPY discobox.py server.py cli.py ./
 
