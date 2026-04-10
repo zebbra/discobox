@@ -1,6 +1,11 @@
 services:
   discobox:
-    build: .
+    build:
+      context: .
+      args:
+        - http_proxy
+        - https_proxy
+        - no_proxy
     env_file:
       - .env
     restart: unless-stopped
@@ -24,7 +29,12 @@ services:
   # One-shot CLI sync — override entrypoint:
   #   docker compose run --rm cli --host 10.0.0.1
   cli:
-    build: .
+    build:
+      context: .
+      args:
+        - http_proxy
+        - https_proxy
+        - no_proxy
     env_file:
       - .env
     entrypoint: ["python", "cli.py"]

@@ -4,12 +4,12 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Proxy support — passed through automatically from the build environment
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG NO_PROXY
 ARG http_proxy
 ARG https_proxy
 ARG no_proxy
+ENV http_proxy=$http_proxy \
+    https_proxy=$https_proxy \
+    no_proxy=$no_proxy
 
 # Place ca-bundle.pem in repo root before building (gitignored):
 #   cp /etc/ssl/ca-bundle.pem .
