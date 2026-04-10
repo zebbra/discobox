@@ -484,20 +484,20 @@ class NetboxClient:
     def remove_stale_device_bays(
         self,
         device: pynetbox.core.response.Record,
-        stale_names: set[str],
+        patterns: list,
     ) -> int:
         """
-        Delete device bays whose names are in stale_names.
+        Delete device bays whose names match any of the given compiled regex patterns.
 
         These are typically auto-created from the DeviceType template
-        (e.g. 'PS-A', 'PSU1') and should be removed when managing
+        (e.g. 'PS-A', 'PSU1', 'Fan 1') and should be removed when managing
         power supplies and modules via inventory items / module bays instead.
 
         Returns the number of bays deleted.
         """
         deleted = 0
         for bay in self.nb.dcim.device_bays.filter(device_id=device.id):
-            if bay.name in stale_names:
+            if any(p.search(bay.name) for p in patterns):
                 if bay.installed_device:
                     logger.warning(
                         "  Device bay %r has installed device %r — skipping deletion",
@@ -626,14 +626,15 @@ class NetboxClient:
 
 # ── Field mapping ──────────────────────────────────────────────────────────────
 
-# Device bay names auto-created from DeviceType templates that should be
-# removed when the device is managed via module bays / inventory items instead.
-STALE_DEVICE_BAYS: set[str] = {
-    "Network Module",
-    "PS-A", "PS-B",
-    "PS1", "PS2",
-    "PSU1", "PSU2",
-}
+# Device bay name patterns (regex) auto-created from DeviceType templates that
+# should be removed when the device is managed via module bays / inventory items.
+STALE_DEVICE_BAY_PATTERNS: list[re.Pattern] = [re.compile(p, re.IGNORECASE) for p in [
+    r"^Network Module$",
+    r"^PS-[AB]$",
+    r"^PS\s*\d+$",
+    r"^PSU\s*\d+$",
+    r"^Fan\s*\d+$",
+]]
 
 # Dummy/placeholder interface names used as IP anchors before a proper sync.
 # IPs found on these interfaces will be moved to the correct interface.
@@ -788,7 +789,7 @@ def sync_device(
     nb.update_device_fields(nb_device, nd_device)
 
     if housekeeping:
-        deleted_bays = nb.remove_stale_device_bays(nb_device, STALE_DEVICE_BAYS)
+        deleted_bays = nb.remove_stale_device_bays(nb_device, STALE_DEVICE_BAY_PATTERNS)
         deleted_ifaces = nb.remove_empty_dummy_interfaces(nb_device, DUMMY_INTERFACES)
         logger.info(
             "Housekeeping — deleted %d stale device bay(s), %d empty dummy interface(s)",
