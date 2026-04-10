@@ -7,6 +7,9 @@ WORKDIR /app
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
 
 # Place ca-bundle.pem in repo root before building (gitignored):
 #   cp /etc/ssl/ca-bundle.pem .
