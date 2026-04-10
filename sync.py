@@ -437,9 +437,12 @@ class NetboxClient:
         position: str,
     ) -> pynetbox.core.response.Record:
         """Return an existing ModuleBay or create one on the device."""
-        existing = self.nb.dcim.module_bays.get(device_id=device.id, name=name)
-        if existing:
-            return existing
+        results = list(self.nb.dcim.module_bays.filter(device_id=device.id, name=name))
+        if len(results) > 1:
+            logger.warning("  ModuleBay %r: %d duplicates in Netbox, using first", name, len(results))
+            return results[0]
+        if results:
+            return results[0]
         bay = self.nb.dcim.module_bays.create(
             device=device.id,
             name=name,
@@ -456,7 +459,8 @@ class NetboxClient:
         serial: str,
     ) -> str:
         """Install or update a Module in a ModuleBay. Returns action string."""
-        existing = self.nb.dcim.modules.get(module_bay_id=bay.id)
+        results = list(self.nb.dcim.modules.filter(module_bay_id=bay.id))
+        existing = results[0] if results else None
         if existing:
             patch = {}
             if self._nb_value(existing.module_type) != module_type.id:
