@@ -713,7 +713,7 @@ def _slot_from_iface(topo: str, name: str) -> Optional[int]:
     """
     Extract module slot key from interface name for stack/fex topologies.
 
-    Stack:  GigabitEthernet2/0/1  → 2   (first number = stack member)
+    Stack:  GigabitEthernet2/0/1  → 2   (first number = stack member, 1-indexed)
     FEX:    Ethernet101/1/1        → 101 (first number ≥ 100 = FEX ID)
     """
     m = re.match(r"[A-Za-z]+(\d+)/\d+/\d+", name)
@@ -861,7 +861,7 @@ def sync_device(
                         root.get("model", ""), root.get("serial", ""))
         for i, ch in enumerate(chassis):
             prefix = "└──" if i == len(chassis) - 1 else "├──"
-            logger.info("  %s chassis  %r  model=%-20s  serial=%s",
+            logger.info("  %s chassis  %r  model=%s  serial=%s",
                         prefix, ch.get("name", ""), ch.get("model", ""), ch.get("serial", ""))
         topo = "fex" if is_fex else ("standalone" if is_standalone else "stack")
         logger.info("Modules   chassis=%d  topology=%s", len(chassis), topo)
@@ -905,7 +905,7 @@ def sync_device(
             if slot_key is not None and module:
                 slot_to_module[slot_key] = module.id
             if action != "unchanged":
-                logger.info("  %-30s %-20s serial=%-15s %s", name, model, serial, action)
+                logger.info("  %s  %s  serial=%s  %s", name, model, serial, action)
             else:
                 logger.debug("  %-30s unchanged", name)
 
@@ -938,10 +938,12 @@ def sync_device(
                     logger.error("  %-30s error: %s", ch.get("name", ""), exc)
 
         else:
-            # Traditional stack — create a module bay + module per chassis member
+            # Traditional stack — create a module bay + module per chassis member.
+            # Netdisco pos is 0-indexed; Cisco interface names are 1-indexed (Gi1/0/1 = member 1).
             for ch in chassis:
                 try:
-                    _upsert_chassis_bay(ch, slot_key=ch.get("pos"))
+                    pos = ch.get("pos")
+                    _upsert_chassis_bay(ch, slot_key=pos + 1 if pos is not None else None)
                 except Exception as exc:
                     mod_counts["error"] += 1
                     logger.error("  %-30s error: %s", ch.get("name", ""), exc)
@@ -971,7 +973,7 @@ def sync_device(
                 )
                 psu_counts[action] += 1
                 if action != "unchanged":
-                    logger.info("  PSU %-35s model=%-20s serial=%s → %s",
+                    logger.info("  PSU %s  model=%s  serial=%s  %s",
                                 psu_name, psu_model or "-", psu_serial or "-", action)
                 else:
                     logger.debug("  PSU %-35s unchanged", psu_name)

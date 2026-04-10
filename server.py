@@ -36,7 +36,7 @@ from discobox import NetboxClient, NetdiscoClient, sync_device, validate_ip
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
-_LOG_FMT = "%(asctime)s %(levelname)-8s %(name)-20s %(message)s"
+_LOG_FMT = "%(asctime)s %(levelname)1.1s %(name)-12s %(message)s"
 _LOG_DATE = "%Y-%m-%dT%H:%M:%S"
 
 logging.basicConfig(level=logging.INFO, format=_LOG_FMT, datefmt=_LOG_DATE)
