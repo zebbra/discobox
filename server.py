@@ -138,8 +138,8 @@ def _run_sync(host: str) -> None:
     try:
         nd = NetdiscoClient(
             base_url=os.environ["NETDISCO_URL"],
-            username=os.environ["NETDISCO_USER"],
-            password=os.environ["NETDISCO_PASS"],
+            username=os.environ["NETDISCO_USERNAME"],
+            password=os.environ["NETDISCO_PASSWORD"],
         )
         nb = NetboxClient(
             url=os.environ["NETBOX_URL"],
@@ -179,8 +179,9 @@ def _run_sync(host: str) -> None:
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
-@app.post(
+@app.api_route(
     "/sync",
+    methods=["GET", "POST"],
     response_model=SyncResponse,
     status_code=202,
     dependencies=[Depends(require_auth)],
@@ -194,7 +195,7 @@ async def sync(
     """
     Queue a sync for the given device IP.
 
-    `host` can be passed as a query parameter or in the JSON body.
+    `host` can be passed as a query parameter or in the JSON body (POST only).
     Returns immediately (202); sync runs in the background.
     Duplicate requests for the same host are dropped.
     """

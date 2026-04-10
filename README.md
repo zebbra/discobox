@@ -134,8 +134,8 @@ Copy `.env.example` to `.env` and fill in the values:
 
 ```env
 NETDISCO_URL=https://netdisco.example.com
-NETDISCO_USER=admin
-NETDISCO_PASS=secret
+NETDISCO_USERNAME=admin
+NETDISCO_PASSWORD=secret
 NETBOX_URL=https://netbox.example.com
 NETBOX_TOKEN=your-token-here
 
