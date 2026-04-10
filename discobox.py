@@ -389,9 +389,11 @@ class NetboxClient:
     ) -> pynetbox.core.response.Record:
         """Return an existing DeviceType or create one under manufacturer."""
         results = list(self.nb.dcim.device_types.filter(manufacturer_id=manufacturer.id, model=model))
-        if not results:
-            results = list(self.nb.dcim.device_types.filter(manufacturer_id=manufacturer.id, slug=slugify(model)))
-        existing = results[0] if results else None
+        existing = next((r for r in results if r.model == model), None)
+        if not existing:
+            slug = slugify(model)
+            results = list(self.nb.dcim.device_types.filter(manufacturer_id=manufacturer.id, slug=slug))
+            existing = next((r for r in results if r.slug == slug), None)
         if existing:
             return existing
         dt = self.nb.dcim.device_types.create(
@@ -411,10 +413,17 @@ class NetboxClient:
     ) -> pynetbox.core.response.Record:
         """Return an existing ModuleType or create one under manufacturer."""
         results = list(self.nb.dcim.module_types.filter(manufacturer_id=manufacturer.id, model=model))
-        if not results:
-            results = list(self.nb.dcim.module_types.filter(manufacturer_id=manufacturer.id, slug=slugify(model)))
-        existing = results[0] if results else None
+        existing = next((r for r in results if r.model == model), None)
+        if not existing:
+            results = list(self.nb.dcim.module_types.filter(manufacturer_id=manufacturer.id, part_number=model))
+            existing = next((r for r in results if r.part_number == model), None)
+        if not existing:
+            slug = slugify(model)
+            results = list(self.nb.dcim.module_types.filter(manufacturer_id=manufacturer.id, slug=slug))
+            existing = next((r for r in results if r.slug == slug), None)
         if existing:
+            if not existing.part_number:
+                existing.update({"part_number": model})
             return existing
         mt = self.nb.dcim.module_types.create(
             manufacturer=manufacturer.id,
@@ -818,89 +827,16 @@ def sync_device(
             deleted_bays, deleted_ifaces,
         )
 
-    existing_ifaces = nb.fetch_interfaces(nb_device.id)
-    logger.debug("Netbox    existing interfaces: %d", len(existing_ifaces))
-
     counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
-
-    for port in nd_ports:
-        iface_name = port.get("port") or port.get("descr") or "?"
-        if iface_name.lower().startswith(PORT_BLACKLIST_PREFIXES):
-            logger.debug("  %-40s blacklisted — skipping", iface_name)
-            continue
-        try:
-            nb_data = port_to_netbox(port)
-            if not sync_mac:
-                nb_data.pop("mac_address", None)
-            action = nb.upsert_interface(nb_device.id, nb_data, existing_ifaces.get(iface_name))
-            counts[action] += 1
-            if action != "unchanged":
-                logger.info("  %-40s %s", iface_name, action)
-            else:
-                logger.debug("  %-40s unchanged", iface_name)
-        except Exception as exc:
-            counts["error"] += 1
-            logger.error("  %-40s error: %s", iface_name, exc)
-
-    nd_names = {
-        port.get("port") or port.get("descr") for port in nd_ports
-        if not (port.get("port") or port.get("descr") or "").lower().startswith(PORT_BLACKLIST_PREFIXES)
-    }
-    for name in existing_ifaces:
-        if name not in nd_names and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
-            logger.warning("  %-40s in Netbox but not in Netdisco", name)
-
     ip_counts: dict[str, int] = {"created": 0, "fixed": 0, "moved": 0, "unchanged": 0, "skipped": 0, "error": 0}
     mod_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
     sfp_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
 
-    if sync_ip:
-        # Re-fetch interfaces so newly created ones have IDs
-        existing_ifaces = nb.fetch_interfaces(nb_device.id)
-        try:
-            nd_ips = nd.get_device_ips(ip)
-        except requests.HTTPError as exc:
-            logger.error("Could not fetch device IPs from Netdisco: %s", exc)
-            nd_ips = []
-
-        for entry in nd_ips:
-            address = entry.get("alias") or entry.get("ip")
-            subnet = entry.get("subnet")
-            port_name = entry.get("port")
-            if not address or not port_name:
-                continue
-            # Build CIDR if needed
-            if "/" not in str(address) and subnet:
-                try:
-                    prefix = ipaddress.ip_network(subnet, strict=False).prefixlen
-                    address = f"{address}/{prefix}"
-                except ValueError:
-                    pass
-            iface = existing_ifaces.get(port_name)
-            if not iface:
-                logger.warning("  IP %-20s skipped — interface %r not found in Netbox", address, port_name)
-                ip_counts["skipped"] += 1
-                continue
-            try:
-                action = nb.upsert_ip(address, iface)
-                ip_counts[action] += 1
-                if action in ("created", "fixed", "moved"):
-                    logger.info("  IP %-20s → %s on %s", address, action, port_name)
-                elif action == "unchanged":
-                    logger.debug("  IP %-20s → unchanged on %s", address, port_name)
-            except Exception as exc:
-                ip_counts["error"] += 1
-                logger.error("  IP %-20s on %-30s error: %s", address, port_name, exc)
-
-        logger.info(
-            "IPs — created=%d fixed=%d moved=%d unchanged=%d skipped=%d errors=%d",
-            ip_counts["created"], ip_counts["fixed"], ip_counts["moved"],
-            ip_counts["unchanged"], ip_counts["skipped"], ip_counts["error"],
-        )
-
-    # Populated during module sync; used afterwards to assign interfaces to modules.
+    # slot_to_module populated during module sync; consumed by interface→module pass.
     slot_to_module: dict[int, int] = {}  # slot key (stack pos / FEX ID) → nb module id
     topo = "standalone"                   # updated inside sync_modules block
+
+    # ── Modules (before interfaces so bays exist when interfaces are assigned) ────
 
     if sync_modules:
         try:
@@ -953,9 +889,6 @@ def sync_device(
             else:
                 logger.debug("  DeviceType unchanged")
                 mod_counts["unchanged"] += 1
-
-        # slot_to_module: maps slot key (stack member pos / FEX ID) → Netbox module id
-        slot_to_module: dict[int, int] = {}
 
         def _upsert_chassis_bay(ch: dict, slot_key: Optional[int] = None) -> None:
             """Create/update a module bay + module for a chassis member."""
@@ -1051,27 +984,108 @@ def sync_device(
             psu_counts["created"], psu_counts["updated"], psu_counts["unchanged"], psu_counts["error"],
         )
 
-        # Assign interfaces to their module based on slot extracted from name
-        if slot_to_module:
-            all_ifaces = nb.fetch_interfaces(nb_device.id)
-            mod_iface_counts = {"updated": 0, "unchanged": 0, "skipped": 0}
-            for iface_name, iface in all_ifaces.items():
-                slot = _slot_from_iface(topo, iface_name)
-                mod_id = slot_to_module.get(slot) if slot is not None else None
-                if mod_id is None:
-                    mod_iface_counts["skipped"] += 1
-                    continue
-                current = nb._nb_value(getattr(iface, "module", None))
-                if current != mod_id:
-                    iface.update({"module": mod_id})
-                    mod_iface_counts["updated"] += 1
-                    logger.debug("  %-40s → module slot %s", iface_name, slot)
-                else:
-                    mod_iface_counts["unchanged"] += 1
-            logger.info(
-                "Interface→Module — updated=%d unchanged=%d skipped=%d",
-                mod_iface_counts["updated"], mod_iface_counts["unchanged"], mod_iface_counts["skipped"],
-            )
+    # ── Interfaces ────────────────────────────────────────────────────────────────
+
+    existing_ifaces = nb.fetch_interfaces(nb_device.id)
+    logger.debug("Netbox    existing interfaces: %d", len(existing_ifaces))
+
+    for port in nd_ports:
+        iface_name = port.get("port") or port.get("descr") or "?"
+        if iface_name.lower().startswith(PORT_BLACKLIST_PREFIXES):
+            logger.debug("  %-40s blacklisted — skipping", iface_name)
+            continue
+        try:
+            nb_data = port_to_netbox(port)
+            if not sync_mac:
+                nb_data.pop("mac_address", None)
+            action = nb.upsert_interface(nb_device.id, nb_data, existing_ifaces.get(iface_name))
+            counts[action] += 1
+            if action != "unchanged":
+                logger.info("  %-40s %s", iface_name, action)
+            else:
+                logger.debug("  %-40s unchanged", iface_name)
+        except Exception as exc:
+            counts["error"] += 1
+            logger.error("  %-40s error: %s", iface_name, exc)
+
+    nd_names = {
+        port.get("port") or port.get("descr") for port in nd_ports
+        if not (port.get("port") or port.get("descr") or "").lower().startswith(PORT_BLACKLIST_PREFIXES)
+    }
+    for name in existing_ifaces:
+        if name not in nd_names and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
+            logger.warning("  %-40s in Netbox but not in Netdisco", name)
+
+    # ── Interface → Module assignment ─────────────────────────────────────────────
+
+    if slot_to_module:
+        all_ifaces = nb.fetch_interfaces(nb_device.id)
+        mod_iface_counts = {"updated": 0, "unchanged": 0, "skipped": 0}
+        for iface_name, iface in all_ifaces.items():
+            slot = _slot_from_iface(topo, iface_name)
+            mod_id = slot_to_module.get(slot) if slot is not None else None
+            if mod_id is None:
+                mod_iface_counts["skipped"] += 1
+                continue
+            current = nb._nb_value(getattr(iface, "module", None))
+            if current != mod_id:
+                iface.update({"module": mod_id})
+                mod_iface_counts["updated"] += 1
+                logger.debug("  %-40s → module slot %s", iface_name, slot)
+            else:
+                mod_iface_counts["unchanged"] += 1
+        logger.info(
+            "Interface→Module — updated=%d unchanged=%d skipped=%d",
+            mod_iface_counts["updated"], mod_iface_counts["unchanged"], mod_iface_counts["skipped"],
+        )
+
+    # ── IPs ───────────────────────────────────────────────────────────────────────
+
+    if sync_ip:
+        # Re-fetch interfaces so newly created ones have IDs
+        existing_ifaces = nb.fetch_interfaces(nb_device.id)
+        try:
+            nd_ips = nd.get_device_ips(ip)
+        except requests.HTTPError as exc:
+            logger.error("Could not fetch device IPs from Netdisco: %s", exc)
+            nd_ips = []
+
+        for entry in nd_ips:
+            address = entry.get("alias") or entry.get("ip")
+            subnet = entry.get("subnet")
+            port_name = entry.get("port")
+            if not address or not port_name:
+                continue
+            # Build CIDR if needed
+            if "/" not in str(address) and subnet:
+                try:
+                    prefix = ipaddress.ip_network(subnet, strict=False).prefixlen
+                    address = f"{address}/{prefix}"
+                except ValueError:
+                    pass
+            iface = existing_ifaces.get(port_name)
+            if not iface:
+                logger.warning("  IP %-20s skipped — interface %r not found in Netbox", address, port_name)
+                ip_counts["skipped"] += 1
+                continue
+            try:
+                action = nb.upsert_ip(address, iface)
+                ip_counts[action] += 1
+                if action in ("created", "fixed", "moved"):
+                    logger.info("  IP %-20s → %s on %s", address, action, port_name)
+                elif action == "unchanged":
+                    logger.debug("  IP %-20s → unchanged on %s", address, port_name)
+            except Exception as exc:
+                ip_counts["error"] += 1
+                logger.error("  IP %-20s on %-30s error: %s", address, port_name, exc)
+
+        logger.info(
+            "IPs — created=%d fixed=%d moved=%d unchanged=%d skipped=%d errors=%d",
+            ip_counts["created"], ip_counts["fixed"], ip_counts["moved"],
+            ip_counts["unchanged"], ip_counts["skipped"], ip_counts["error"],
+        )
+
+    # ── SFPs ──────────────────────────────────────────────────────────────────────
 
     if sync_sfp:
         # nd_mods already fetched if sync_modules ran; fetch only if needed
