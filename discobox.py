@@ -963,7 +963,9 @@ def sync_device(
             model = ch.get("model", "")
             serial = ch.get("serial") or ""
             position = str(ch.get("pos", ""))
-            module_type = nb.get_or_create_module_type(manufacturer, model)
+            vendor_name = vendor_from_chassis(ch)
+            mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
+            module_type = nb.get_or_create_module_type(mfr, model)
             bay = nb.upsert_module_bay(nb_device, name, position)
             action, module = nb.upsert_module(nb_device, bay, module_type, serial)
             mod_counts[action] += 1
