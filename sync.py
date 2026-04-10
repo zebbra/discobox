@@ -151,7 +151,11 @@ class NetdiscoClient:
         return resp.json()
 
     def get_device(self, ip: str) -> dict:
-        return self._get(f"/api/v1/object/device/{ip}")
+        result = self._get(f"/api/v1/object/device/{ip}")
+        # Some Netdisco versions return a list, others a dict
+        if isinstance(result, list):
+            return result[0] if result else {}
+        return result
 
     def get_ports(self, ip: str) -> list[dict]:
         return self._get(f"/api/v1/object/device/{ip}/ports")
@@ -362,6 +366,34 @@ class NetboxClient:
             assigned_object_id=iface.id,
         )
         return "created"
+
+    def get_or_create_manufacturer(self, name: str) -> pynetbox.core.response.Record:
+        """Return an existing Manufacturer or create one."""
+        existing = self.nb.dcim.manufacturers.get(name=name)
+        if existing:
+            return existing
+        mfr = self.nb.dcim.manufacturers.create(name=name)
+        logger.debug("  Manufacturer created: %s", name)
+        return mfr
+
+    def get_or_create_device_type(
+        self,
+        manufacturer: pynetbox.core.response.Record,
+        model: str,
+    ) -> pynetbox.core.response.Record:
+        """Return an existing DeviceType or create one under manufacturer."""
+        existing = self.nb.dcim.device_types.get(
+            manufacturer_id=manufacturer.id,
+            model=model,
+        )
+        if existing:
+            return existing
+        dt = self.nb.dcim.device_types.create(
+            manufacturer=manufacturer.id,
+            model=model,
+        )
+        logger.debug("  DeviceType created: %s / %s", manufacturer.name, model)
+        return dt
 
     def get_or_create_module_type(
         self,
@@ -596,6 +628,29 @@ PORT_BLACKLIST_PREFIXES: tuple[str, ...] = (
     "modem",
 )
 
+def vendor_from_chassis(chassis: dict) -> Optional[str]:
+    """
+    Extract a vendor/manufacturer name from a Netdisco chassis entry.
+
+    Returns None for Cisco devices (caller falls back to device's existing
+    manufacturer). For other vendors the name is encoded in the type string:
+      "fortinet.6007.6007.0"  →  "Fortinet"
+
+    Cisco ENTITY-MIB OID names all start with "cev" (e.g. cevChassisN9KC93600CDGX)
+    and never contain a leading vendor prefix.
+    """
+    type_str = chassis.get("type", "")
+    # Cisco types — let caller use the device's existing Netbox manufacturer
+    if type_str.lower().startswith("cev"):
+        return None
+    # Other vendors encode their name before the first dot
+    if "." in type_str:
+        vendor = type_str.split(".")[0]
+        if vendor:
+            return vendor.capitalize()
+    return None
+
+
 NULL_MAC = "00:00:00:00:00:00"
 
 
@@ -805,9 +860,14 @@ def sync_device(
             nd_mods = []
 
         chassis = [m for m in nd_mods if m.get("class") == "chassis" and m.get("model")]
+        stack_root = next((m for m in nd_mods if m.get("class") == "stack"), None)
+        has_stack = stack_root is not None
+        # Nexus FEX topology: stack root is a logical fabric, not a real member stack.
+        # The primary N9K chassis + satellite FEX units all appear as chassis entries.
+        is_fex = has_stack and (stack_root.get("type", "").lower() == "cevcontainernexuslogicalfabric")
+        is_standalone = not has_stack and len(chassis) == 1
 
-        # Log stack tree
-        by_idx = {m["index"]: m for m in nd_mods}
+        # Log tree
         root = next((m for m in nd_mods if not m.get("parent")), None)
         if root:
             logger.info("  %s (root)  %r  model=%s  serial=%s",
@@ -817,33 +877,85 @@ def sync_device(
             prefix = "└──" if i == len(chassis) - 1 else "├──"
             logger.info("  %s chassis  %r  model=%-20s  serial=%s",
                         prefix, ch.get("name", ""), ch.get("model", ""), ch.get("serial", ""))
-
-        logger.info("Modules   chassis entries: %d", len(chassis))
+        topo = "fex" if is_fex else ("standalone" if is_standalone else "stack")
+        logger.info("Modules   chassis=%d  topology=%s", len(chassis), topo)
 
         manufacturer = nb_device.device_type.manufacturer
         mod_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
 
-        for ch in chassis:
+        def _update_device_type(ch: dict) -> None:
+            """Update DeviceType (and serial) on nb_device from a chassis entry."""
+            model = ch.get("model", "")
+            serial = ch.get("serial") or ""
+            vendor_name = vendor_from_chassis(ch)
+            mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
+            device_type = nb.get_or_create_device_type(mfr, model)
+            patch = {}
+            if nb_device.device_type.id != device_type.id:
+                patch["device_type"] = device_type.id
+            if serial and (nb_device.serial or "") != serial:
+                patch["serial"] = serial
+            if patch:
+                nb_device.update(patch)
+                logger.info("  DeviceType → %s / %s  serial=%s  updated", mfr.name, model, serial)
+                mod_counts["updated"] += 1
+            else:
+                logger.debug("  DeviceType unchanged")
+                mod_counts["unchanged"] += 1
+
+        def _upsert_chassis_bay(ch: dict) -> None:
+            """Create/update a module bay + module for a chassis member."""
             name = ch.get("name", "")
             model = ch.get("model", "")
             serial = ch.get("serial") or ""
             position = str(ch.get("pos", ""))
+            module_type = nb.get_or_create_module_type(manufacturer, model)
+            bay = nb.upsert_module_bay(nb_device, name, position)
+            action = nb.upsert_module(nb_device, bay, module_type, serial)
+            mod_counts[action] += 1
+            if action != "unchanged":
+                logger.info("  %-30s %-20s serial=%-15s %s", name, model, serial, action)
+            else:
+                logger.debug("  %-30s unchanged", name)
+
+        if is_standalone:
+            # Single device — update DeviceType on the device itself
             try:
-                module_type = nb.get_or_create_module_type(manufacturer, model)
-                bay = nb.upsert_module_bay(nb_device, name, position)
-                action = nb.upsert_module(nb_device, bay, module_type, serial)
-                mod_counts[action] += 1
-                if action != "unchanged":
-                    logger.info("  %-30s %-20s serial=%-15s %s", name, model, serial, action)
-                else:
-                    logger.debug("  %-30s unchanged", name)
+                _update_device_type(chassis[0])
             except Exception as exc:
                 mod_counts["error"] += 1
-                logger.error("  %-30s error: %s", name, exc)
+                logger.error("  DeviceType update error: %s", exc)
+
+        elif is_fex:
+            # Nexus FEX: primary N9K chassis → DeviceType update; FEX units → module bays
+            device_serial = nd_device.get("serial", "")
+            primary = next((c for c in chassis if c.get("serial") == device_serial), chassis[0])
+            fex_units = [c for c in chassis if c is not primary]
+            try:
+                _update_device_type(primary)
+            except Exception as exc:
+                mod_counts["error"] += 1
+                logger.error("  DeviceType update error: %s", exc)
+            for ch in fex_units:
+                try:
+                    _upsert_chassis_bay(ch)
+                except Exception as exc:
+                    mod_counts["error"] += 1
+                    logger.error("  %-30s error: %s", ch.get("name", ""), exc)
+
+        else:
+            # Traditional stack — create a module bay + module per chassis member
+            for ch in chassis:
+                try:
+                    _upsert_chassis_bay(ch)
+                except Exception as exc:
+                    mod_counts["error"] += 1
+                    logger.error("  %-30s error: %s", ch.get("name", ""), exc)
 
         logger.info(
-            "Modules — created=%d updated=%d unchanged=%d errors=%d",
-            mod_counts["created"], mod_counts["updated"], mod_counts["unchanged"], mod_counts["error"],
+            "Modules — updated=%d unchanged=%d errors=%d",
+            mod_counts.get("updated", 0) + mod_counts.get("created", 0),
+            mod_counts["unchanged"], mod_counts["error"],
         )
 
         # PSUs — inventory items on the device (skip Unknown type with no model)
