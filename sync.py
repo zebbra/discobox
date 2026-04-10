@@ -109,6 +109,14 @@ def parse_speed_kbps(speed_str: Optional[str]) -> Optional[int]:
 
 
 
+def slugify(value: str) -> str:
+    """Convert a string to a Netbox-compatible slug (lowercase, alphanum + hyphens)."""
+    s = value.lower()
+    s = re.sub(r"[^a-z0-9_-]", "-", s)
+    s = re.sub(r"-{2,}", "-", s)
+    return s.strip("-")
+
+
 def validate_ip(value: str) -> str:
     """Validate that value is a valid IP address; exit with an error if not."""
     try:
@@ -372,7 +380,7 @@ class NetboxClient:
         existing = self.nb.dcim.manufacturers.get(name=name)
         if existing:
             return existing
-        mfr = self.nb.dcim.manufacturers.create(name=name)
+        mfr = self.nb.dcim.manufacturers.create(name=name, slug=slugify(name))
         logger.debug("  Manufacturer created: %s", name)
         return mfr
 
@@ -391,6 +399,7 @@ class NetboxClient:
         dt = self.nb.dcim.device_types.create(
             manufacturer=manufacturer.id,
             model=model,
+            slug=slugify(model),
         )
         logger.debug("  DeviceType created: %s / %s", manufacturer.name, model)
         return dt
@@ -410,6 +419,7 @@ class NetboxClient:
         mt = self.nb.dcim.module_types.create(
             manufacturer=manufacturer.id,
             model=model,
+            slug=slugify(model),
         )
         logger.debug("  ModuleType created: %s / %s", manufacturer.name, model)
         return mt
@@ -804,7 +814,7 @@ def sync_device(
         if not (port.get("port") or port.get("descr") or "").lower().startswith(PORT_BLACKLIST_PREFIXES)
     }
     for name in existing_ifaces:
-        if name not in nd_names:
+        if name not in nd_names and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
             logger.warning("  %-40s in Netbox but not in Netdisco", name)
 
     if sync_ip:
