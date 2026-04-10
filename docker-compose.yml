@@ -1,7 +1,18 @@
 services:
-  sync:
+  discobox:
     build: .
     env_file:
       - .env
-    # Pass --host at runtime:
-    #   docker compose run --rm sync --host 172.28.134.133
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  # One-shot CLI sync — override entrypoint:
+  #   docker compose run --rm cli --host 10.0.0.1
+  cli:
+    build: .
+    env_file:
+      - .env
+    entrypoint: ["python", "cli.py"]
+    profiles:
+      - cli

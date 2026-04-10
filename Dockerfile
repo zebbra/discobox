@@ -5,6 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY sync.py .
+COPY discobox.py server.py cli.py ./
 
-ENTRYPOINT ["python", "sync.py"]
+# Server mode by default; use cli.py for one-shot syncs
+ENTRYPOINT ["python", "server.py"]

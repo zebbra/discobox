@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
-discobox: sync interfaces from Netdisco → Netbox.
+discobox — Netdisco → Netbox sync library.
 
-Usage:
-    python sync.py --host 172.28.134.133
-    python sync.py --host 172.28.134.133 --debug
+Imported by cli.py (one-shot CLI) and server.py (FastAPI webhook receiver).
 """
 
-import argparse
 import ipaddress
 import logging
 import os
 import re
-import sys
 from typing import Optional
 
 import pynetbox
@@ -118,13 +114,12 @@ def slugify(value: str) -> str:
 
 
 def validate_ip(value: str) -> str:
-    """Validate that value is a valid IP address; exit with an error if not."""
+    """Validate that value is a valid IP address. Raises ValueError if invalid."""
     try:
         ipaddress.ip_address(value)
         return value
     except ValueError:
-        logger.error("--host must be an IP address, got %r", value)
-        sys.exit(1)
+        raise ValueError(f"not a valid IP address: {value!r}")
 
 
 # ── Netdisco client ────────────────────────────────────────────────────────────
@@ -178,11 +173,12 @@ class NetdiscoClient:
 # ── Netbox client ──────────────────────────────────────────────────────────────
 
 class NetboxClient:
-    def __init__(self, url: str, token: str, verify_tls: bool = True):
+    def __init__(self, url: str, token: str, verify_tls: bool = True, change_reason: str = "DiscoBox"):
         self.nb = pynetbox.api(url, token=token)
         if not verify_tls:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             self.nb.http_session.verify = False
+        self.nb.http_session.headers.update({"X-Netbox-Change-Reason": change_reason})
 
     def find_device_by_ip(self, ip: str) -> Optional[pynetbox.core.response.Record]:
         """
@@ -457,8 +453,8 @@ class NetboxClient:
         bay: pynetbox.core.response.Record,
         module_type: pynetbox.core.response.Record,
         serial: str,
-    ) -> str:
-        """Install or update a Module in a ModuleBay. Returns action string."""
+    ) -> tuple[str, pynetbox.core.response.Record]:
+        """Install or update a Module in a ModuleBay. Returns (action, module_record)."""
         results = list(self.nb.dcim.modules.filter(module_bay_id=bay.id))
         existing = results[0] if results else None
         if existing:
@@ -468,18 +464,18 @@ class NetboxClient:
             if (existing.serial or "") != serial:
                 patch["serial"] = serial
             if not patch:
-                return "unchanged"
+                return "unchanged", existing
             existing.update(patch)
-            return "updated"
+            return "updated", existing
 
-        self.nb.dcim.modules.create(
+        module = self.nb.dcim.modules.create(
             device=device.id,
             module_bay=bay.id,
             module_type=module_type.id,
             serial=serial,
             status="active",
         )
-        return "created"
+        return "created", module
 
     def remove_stale_device_bays(
         self,
@@ -704,6 +700,24 @@ def expand_iface_name(name: str) -> str:
     return name
 
 
+def _slot_from_iface(topo: str, name: str) -> Optional[int]:
+    """
+    Extract module slot key from interface name for stack/fex topologies.
+
+    Stack:  GigabitEthernet2/0/1  → 2   (first number = stack member)
+    FEX:    Ethernet101/1/1        → 101 (first number ≥ 100 = FEX ID)
+    """
+    m = re.match(r"[A-Za-z]+(\d+)/\d+/\d+", name)
+    if not m:
+        return None
+    slot = int(m.group(1))
+    if topo == "fex":
+        return slot if slot >= 100 else None
+    if topo == "stack":
+        return slot
+    return None
+
+
 def clean_mac(raw: Optional[str]) -> Optional[str]:
     """Return uppercased MAC or None if missing, zero, or otherwise invalid."""
     if not raw:
@@ -873,6 +887,10 @@ def sync_device(
             ip_counts["unchanged"], ip_counts["skipped"], ip_counts["error"],
         )
 
+    # Populated during module sync; used afterwards to assign interfaces to modules.
+    slot_to_module: dict[int, int] = {}  # slot key (stack pos / FEX ID) → nb module id
+    topo = "standalone"                   # updated inside sync_modules block
+
     if sync_modules:
         try:
             nd_mods = nd.get_modules(ip)
@@ -926,7 +944,10 @@ def sync_device(
                 logger.debug("  DeviceType unchanged")
                 mod_counts["unchanged"] += 1
 
-        def _upsert_chassis_bay(ch: dict) -> None:
+        # slot_to_module: maps slot key (stack member pos / FEX ID) → Netbox module id
+        slot_to_module: dict[int, int] = {}
+
+        def _upsert_chassis_bay(ch: dict, slot_key: Optional[int] = None) -> None:
             """Create/update a module bay + module for a chassis member."""
             name = ch.get("name", "")
             model = ch.get("model", "")
@@ -934,8 +955,10 @@ def sync_device(
             position = str(ch.get("pos", ""))
             module_type = nb.get_or_create_module_type(manufacturer, model)
             bay = nb.upsert_module_bay(nb_device, name, position)
-            action = nb.upsert_module(nb_device, bay, module_type, serial)
+            action, module = nb.upsert_module(nb_device, bay, module_type, serial)
             mod_counts[action] += 1
+            if slot_key is not None and module:
+                slot_to_module[slot_key] = module.id
             if action != "unchanged":
                 logger.info("  %-30s %-20s serial=%-15s %s", name, model, serial, action)
             else:
@@ -960,8 +983,11 @@ def sync_device(
                 mod_counts["error"] += 1
                 logger.error("  DeviceType update error: %s", exc)
             for ch in fex_units:
+                # Extract FEX ID from name: "Fex-101 Nexus2332 Chassis" → 101
+                fex_match = re.match(r"[Ff]ex-(\d+)", ch.get("name", ""))
+                slot_key = int(fex_match.group(1)) if fex_match else None
                 try:
-                    _upsert_chassis_bay(ch)
+                    _upsert_chassis_bay(ch, slot_key)
                 except Exception as exc:
                     mod_counts["error"] += 1
                     logger.error("  %-30s error: %s", ch.get("name", ""), exc)
@@ -970,7 +996,7 @@ def sync_device(
             # Traditional stack — create a module bay + module per chassis member
             for ch in chassis:
                 try:
-                    _upsert_chassis_bay(ch)
+                    _upsert_chassis_bay(ch, slot_key=ch.get("pos"))
                 except Exception as exc:
                     mod_counts["error"] += 1
                     logger.error("  %-30s error: %s", ch.get("name", ""), exc)
@@ -1012,6 +1038,28 @@ def sync_device(
             "PSUs — created=%d updated=%d unchanged=%d errors=%d",
             psu_counts["created"], psu_counts["updated"], psu_counts["unchanged"], psu_counts["error"],
         )
+
+        # Assign interfaces to their module based on slot extracted from name
+        if slot_to_module:
+            all_ifaces = nb.fetch_interfaces(nb_device.id)
+            mod_iface_counts = {"updated": 0, "unchanged": 0, "skipped": 0}
+            for iface_name, iface in all_ifaces.items():
+                slot = _slot_from_iface(topo, iface_name)
+                mod_id = slot_to_module.get(slot) if slot is not None else None
+                if mod_id is None:
+                    mod_iface_counts["skipped"] += 1
+                    continue
+                current = nb._nb_value(getattr(iface, "module", None))
+                if current != mod_id:
+                    iface.update({"module": mod_id})
+                    mod_iface_counts["updated"] += 1
+                    logger.debug("  %-40s → module slot %s", iface_name, slot)
+                else:
+                    mod_iface_counts["unchanged"] += 1
+            logger.info(
+                "Interface→Module — updated=%d unchanged=%d skipped=%d",
+                mod_iface_counts["updated"], mod_iface_counts["unchanged"], mod_iface_counts["skipped"],
+            )
 
     if sync_sfp:
         # nd_mods already fetched if sync_modules ran; fetch only if needed
@@ -1064,52 +1112,3 @@ def sync_device(
     return counts["error"] == 0
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Sync Netdisco interfaces → Netbox (devices must exist in Netbox)."
-    )
-    parser.add_argument(
-        "--host", metavar="IP", required=True,
-        help="Management IP of the device to sync.",
-    )
-    parser.add_argument("--no-mac",      action="store_true", help="Skip MAC address sync.")
-    parser.add_argument("--no-ip",       action="store_true", help="Skip IP address sync.")
-    parser.add_argument("--no-modules",  action="store_true", help="Skip module bay/module sync.")
-    parser.add_argument("--no-sfp",      action="store_true", help="Skip SFP inventory item sync.")
-    parser.add_argument("--housekeeping", action="store_true",
-                        help="Remove stale device bays auto-created from DeviceType templates "
-                             "(see STALE_DEVICE_BAYS in sync.py).")
-    parser.add_argument("--debug",       action="store_true", help="Enable debug logging.")
-    args = parser.parse_args()
-
-    if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
-
-    nd = NetdiscoClient(
-        base_url=os.environ["NETDISCO_URL"],
-        username=os.environ["NETDISCO_USERNAME"],
-        password=os.environ["NETDISCO_PASSWORD"],
-        verify_tls=os.getenv("NETDISCO_TLS_VERIFY", "true").lower() != "false",
-    )
-    nb = NetboxClient(
-        url=os.environ["NETBOX_URL"],
-        token=os.environ["NETBOX_TOKEN"],
-        verify_tls=os.getenv("NETBOX_TLS_VERIFY", "true").lower() != "false",
-    )
-
-    ip = validate_ip(args.host)
-    ok = sync_device(
-        ip, nd, nb,
-        sync_mac=not args.no_mac,
-        sync_ip=not args.no_ip,
-        sync_modules=not args.no_modules,
-        sync_sfp=not args.no_sfp,
-        housekeeping=args.housekeeping,
-    )
-    sys.exit(0 if ok else 1)
-
-
-if __name__ == "__main__":
-    main()
