@@ -57,7 +57,7 @@ def main() -> None:
         change_reason="DiscoBox CLI",
     )
 
-    ok = sync_device(
+    result = sync_device(
         ip, nd, nb,
         sync_mac=not args.no_mac,
         sync_ip=not args.no_ip,
@@ -65,7 +65,7 @@ def main() -> None:
         sync_sfp=not args.no_sfp,
         housekeeping=args.housekeeping,
     )
-    sys.exit(0 if ok else 1)
+    sys.exit(0 if result["ok"] else 1)
 
 
 if __name__ == "__main__":

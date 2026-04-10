@@ -772,8 +772,16 @@ def sync_device(
     sync_modules: bool = True,
     sync_sfp: bool = True,
     housekeeping: bool = False,
-) -> bool:
-    """Sync device fields, interfaces, MACs, IPs, modules, and SFPs. Returns True on success."""
+) -> dict:
+    """
+    Sync device fields, interfaces, MACs, IPs, modules, and SFPs.
+
+    Returns a dict with:
+      ok          bool   — True if no errors occurred
+      interfaces  dict   — created/updated/unchanged/error counts
+      ips         dict   — created/fixed/moved/unchanged/skipped/error counts
+      modules     dict   — created/updated/unchanged/error counts
+    """
     logger.info("── device %s", ip)
 
     try:
@@ -842,6 +850,10 @@ def sync_device(
         if name not in nd_names and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
             logger.warning("  %-40s in Netbox but not in Netdisco", name)
 
+    ip_counts: dict[str, int] = {"created": 0, "fixed": 0, "moved": 0, "unchanged": 0, "skipped": 0, "error": 0}
+    mod_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
+    sfp_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
+
     if sync_ip:
         # Re-fetch interfaces so newly created ones have IDs
         existing_ifaces = nb.fetch_interfaces(nb_device.id)
@@ -851,7 +863,6 @@ def sync_device(
             logger.error("Could not fetch device IPs from Netdisco: %s", exc)
             nd_ips = []
 
-        ip_counts: dict[str, int] = {"created": 0, "fixed": 0, "moved": 0, "unchanged": 0, "skipped": 0, "error": 0}
         for entry in nd_ips:
             address = entry.get("alias") or entry.get("ip")
             subnet = entry.get("subnet")
@@ -920,7 +931,6 @@ def sync_device(
         logger.info("Modules   chassis=%d  topology=%s", len(chassis), topo)
 
         manufacturer = nb_device.device_type.manufacturer
-        mod_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
 
         def _update_device_type(ch: dict) -> None:
             """Update DeviceType (and serial) on nb_device from a chassis entry."""
@@ -1079,7 +1089,6 @@ def sync_device(
         # Re-fetch interfaces to include anything created this run
         existing_ifaces = nb.fetch_interfaces(nb_device.id)
         manufacturer = nb_device.device_type.manufacturer
-        sfp_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
 
         for sfp in sfps:
             name = sfp.get("name", "")
@@ -1109,6 +1118,12 @@ def sync_device(
         "── done %s  created=%d updated=%d unchanged=%d errors=%d",
         ip, counts["created"], counts["updated"], counts["unchanged"], counts["error"],
     )
-    return counts["error"] == 0
+    return {
+        "ok": counts["error"] == 0,
+        "interfaces": counts,
+        "ips": ip_counts if sync_ip else {},
+        "modules": mod_counts if sync_modules else {},
+        "sfps": sfp_counts if sync_sfp else {},
+    }
 
 

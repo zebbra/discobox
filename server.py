@@ -44,19 +44,25 @@ logging.basicConfig(
 logger = logging.getLogger("discobox.server")
 
 # ── Prometheus metrics ─────────────────────────────────────────────────────────
+# Cardinality note: with ~30k hosts, per-host labels are avoided on gauges and
+# histograms. Per-host last-sync info is served via /health JSON instead.
 
 registry = CollectorRegistry()
 
+hooks_received_total = Counter(
+    "discobox_hooks_received_total",
+    "Total webhook POST /sync calls received (including skipped/invalid)",
+    registry=registry,
+)
 syncs_total = Counter(
     "discobox_syncs_total",
-    "Total number of device syncs completed",
-    ["host", "status"],
+    "Completed device syncs",
+    ["status"],   # success | error — no host label
     registry=registry,
 )
 sync_duration = Histogram(
     "discobox_sync_duration_seconds",
     "Time spent syncing a device",
-    ["host"],
     buckets=[5, 10, 30, 60, 120, 300],
     registry=registry,
 )
@@ -65,10 +71,22 @@ sync_in_progress = Gauge(
     "Number of device syncs currently running",
     registry=registry,
 )
-last_sync_timestamp = Gauge(
-    "discobox_last_sync_timestamp_seconds",
-    "Unix timestamp of the last completed sync per host",
-    ["host"],
+interfaces_total = Counter(
+    "discobox_interfaces_total",
+    "Interfaces processed across all syncs",
+    ["action"],   # created | updated | unchanged | error
+    registry=registry,
+)
+ips_total = Counter(
+    "discobox_ips_total",
+    "IP addresses processed across all syncs",
+    ["action"],   # created | fixed | moved | unchanged | skipped | error
+    registry=registry,
+)
+modules_total = Counter(
+    "discobox_modules_total",
+    "Modules processed across all syncs",
+    ["action"],   # created | updated | unchanged | error
     registry=registry,
 )
 
