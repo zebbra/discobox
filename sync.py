@@ -337,9 +337,11 @@ class NetboxClient:
                 and nb_ip.assigned_object_id == iface.id
             )
             if same_iface:
-                if nb_ip.address == address:
+                nb_host = str(ipaddress.ip_interface(nb_ip.address).ip)
+                nd_host = str(ipaddress.ip_interface(address).ip)
+                if nb_ip.address == address or nb_host != nd_host:
                     return "unchanged"
-                # Prefix differs (e.g. /32 → /26) — fix it
+                # Same host, different prefix — fix it
                 nb_ip.update({"address": address})
                 return "fixed"
 
@@ -400,6 +402,8 @@ class NetboxClient:
             manufacturer=manufacturer.id,
             model=model,
             slug=slugify(model),
+            part_number=model,
+            comments="Created by discobox",
         )
         logger.debug("  DeviceType created: %s / %s", manufacturer.name, model)
         return dt
@@ -410,9 +414,9 @@ class NetboxClient:
         model: str,
     ) -> pynetbox.core.response.Record:
         """Return an existing ModuleType or create one under manufacturer."""
-        existing = self.nb.dcim.module_types.get(
-            manufacturer_id=manufacturer.id,
-            model=model,
+        existing = (
+            self.nb.dcim.module_types.get(manufacturer_id=manufacturer.id, model=model)
+            or self.nb.dcim.module_types.get(manufacturer_id=manufacturer.id, slug=slugify(model))
         )
         if existing:
             return existing
@@ -420,6 +424,8 @@ class NetboxClient:
             manufacturer=manufacturer.id,
             model=model,
             slug=slugify(model),
+            part_number=model,
+            comments="Created by discobox",
         )
         logger.debug("  ModuleType created: %s / %s", manufacturer.name, model)
         return mt
