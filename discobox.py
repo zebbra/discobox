@@ -388,12 +388,12 @@ class NetboxClient:
         model: str,
     ) -> pynetbox.core.response.Record:
         """Return an existing DeviceType or create one under manufacturer."""
+        slug = slugify(model)
         results = list(self.nb.dcim.device_types.filter(manufacturer_id=manufacturer.id, model=model))
-        existing = next((r for r in results if r.model == model), None)
+        existing = next((r for r in results if getattr(r, "model", None) == model), None)
         if not existing:
-            slug = slugify(model)
             results = list(self.nb.dcim.device_types.filter(manufacturer_id=manufacturer.id, slug=slug))
-            existing = next((r for r in results if r.slug == slug), None)
+            existing = next((r for r in results if getattr(r, "slug", None) == slug), None)
         if existing:
             return existing
         dt = self.nb.dcim.device_types.create(
@@ -412,17 +412,17 @@ class NetboxClient:
         model: str,
     ) -> pynetbox.core.response.Record:
         """Return an existing ModuleType or create one under manufacturer."""
+        slug = slugify(model)
         results = list(self.nb.dcim.module_types.filter(manufacturer_id=manufacturer.id, model=model))
-        existing = next((r for r in results if r.model == model), None)
+        existing = next((r for r in results if getattr(r, "model", None) == model), None)
         if not existing:
             results = list(self.nb.dcim.module_types.filter(manufacturer_id=manufacturer.id, part_number=model))
-            existing = next((r for r in results if r.part_number == model), None)
+            existing = next((r for r in results if getattr(r, "part_number", None) == model), None)
         if not existing:
-            slug = slugify(model)
             results = list(self.nb.dcim.module_types.filter(manufacturer_id=manufacturer.id, slug=slug))
-            existing = next((r for r in results if r.slug == slug), None)
+            existing = next((r for r in results if getattr(r, "slug", None) == slug), None)
         if existing:
-            if not existing.part_number:
+            if not getattr(existing, "part_number", None):
                 existing.update({"part_number": model})
             return existing
         mt = self.nb.dcim.module_types.create(
