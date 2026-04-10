@@ -146,7 +146,7 @@ def _run_sync(host: str) -> None:
             url=os.environ["NETBOX_URL"],
             token=os.environ["NETBOX_TOKEN"],
             verify_tls=os.getenv("NETBOX_TLS_VERIFY", "true").lower() != "false",
-            change_reason="DiscoBox Hook",
+            changelog_message="DiscoBox Hook",
         )
         result = sync_device(
             nd=nd,

@@ -173,12 +173,12 @@ class NetdiscoClient:
 # ── Netbox client ──────────────────────────────────────────────────────────────
 
 class NetboxClient:
-    def __init__(self, url: str, token: str, verify_tls: bool = True, change_reason: str = "DiscoBox"):
+    def __init__(self, url: str, token: str, verify_tls: bool = True, changelog_message: str = "DiscoBox"):
         self.nb = pynetbox.api(url, token=token)
         if not verify_tls:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             self.nb.http_session.verify = False
-        self.nb.http_session.headers.update({"X-Netbox-Change-Reason": change_reason})
+        self.nb.http_session.headers.update({"X-Netbox-Change-Reason": changelog_message})
 
     def find_device_by_ip(self, ip: str) -> Optional[pynetbox.core.response.Record]:
         """
