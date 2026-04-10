@@ -140,10 +140,12 @@ def _run_sync(host: str) -> None:
             base_url=os.environ["NETDISCO_URL"],
             username=os.environ["NETDISCO_USERNAME"],
             password=os.environ["NETDISCO_PASSWORD"],
+            verify_tls=os.getenv("NETDISCO_TLS_VERIFY", "true").lower() != "false",
         )
         nb = NetboxClient(
             url=os.environ["NETBOX_URL"],
             token=os.environ["NETBOX_TOKEN"],
+            verify_tls=os.getenv("NETBOX_TLS_VERIFY", "true").lower() != "false",
             change_reason="DiscoBox Hook",
         )
         result = sync_device(
