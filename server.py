@@ -134,6 +134,7 @@ def _run_sync(host: str) -> None:
     """Run sync_device in a background thread and record metrics."""
     start = time.time()
     status = "error"
+    result: dict = {}
     try:
         nd = NetdiscoClient(
             base_url=os.environ["NETDISCO_URL"],
@@ -145,7 +146,7 @@ def _run_sync(host: str) -> None:
             token=os.environ["NETBOX_TOKEN"],
             change_reason="DiscoBox Hook",
         )
-        ok = sync_device(
+        result = sync_device(
             nd=nd,
             nb=nb,
             ip=host,
@@ -155,18 +156,24 @@ def _run_sync(host: str) -> None:
             sync_sfp=True,
             housekeeping=False,
         )
-        status = "success" if ok else "error"
+        status = "success" if result.get("ok") else "error"
     except Exception as exc:
         logger.error("Sync failed for %s: %s", host, exc)
         status = "error"
     finally:
         elapsed = time.time() - start
-        syncs_total.labels(host=host, status=status).inc()
-        sync_duration.labels(host=host).observe(elapsed)
-        last_sync_timestamp.labels(host=host).set(time.time())
+        syncs_total.labels(status=status).inc()
+        sync_duration.observe(elapsed)
         sync_in_progress.dec()
         with _in_flight_lock:
             _in_flight.discard(host)
+        # Record per-action counts from result dict
+        for action, count in result.get("interfaces", {}).items():
+            interfaces_total.labels(action=action).inc(count)
+        for action, count in result.get("ips", {}).items():
+            ips_total.labels(action=action).inc(count)
+        for action, count in result.get("modules", {}).items():
+            modules_total.labels(action=action).inc(count)
         logger.info("Sync %s for %s in %.1fs", status, host, elapsed)
 
 
@@ -191,6 +198,7 @@ async def sync(
     Returns immediately (202); sync runs in the background.
     Duplicate requests for the same host are dropped.
     """
+    hooks_received_total.inc()
     resolved_host = host or (body.host if body else None)
     if not resolved_host:
         raise HTTPException(status_code=400, detail="host parameter required")

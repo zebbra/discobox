@@ -3,9 +3,23 @@ services:
     build: .
     env_file:
       - .env
-    ports:
-      - "8080:8080"
     restart: unless-stopped
+    networks:
+      - traefik
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik
+      # HTTP → HTTPS redirect
+      traefik.http.routers.discobox-http-router.entrypoints: http
+      traefik.http.routers.discobox-http-router.rule: Host(`${DISCOBOX_HOSTNAME}`) && PathPrefix(`/sync`, `/metrics`, `/health`, `/docs`, `/openapi.json`)
+      traefik.http.routers.discobox-http-router.middlewares: discobox-redirect
+      traefik.http.middlewares.discobox-redirect.redirectscheme.scheme: https
+      # HTTPS
+      traefik.http.routers.discobox-https-router.entrypoints: https
+      traefik.http.routers.discobox-https-router.tls: "true"
+      traefik.http.routers.discobox-https-router.rule: Host(`${DISCOBOX_HOSTNAME}`) && PathPrefix(`/sync`, `/metrics`, `/health`, `/docs`, `/openapi.json`)
+      traefik.http.services.discobox-service.loadbalancer.server.port: "8080"
+      traefik.http.services.discobox-service.loadbalancer.server.scheme: http
 
   # One-shot CLI sync — override entrypoint:
   #   docker compose run --rm cli --host 10.0.0.1
@@ -16,3 +30,7 @@ services:
     entrypoint: ["python", "cli.py"]
     profiles:
       - cli
+
+networks:
+  traefik:
+    external: true
