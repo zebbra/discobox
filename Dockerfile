@@ -5,9 +5,9 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-# Mount ca-bundle.pem from build context if present (place it in repo root).
-# If absent the mount is skipped and pip falls back to the system bundle.
-RUN --mount=type=bind,source=ca-bundle.pem,target=/tmp/ca-bundle.pem,required=false \
+# Pass corporate CA bundle at build time if needed:
+#   docker compose build --secret id=ca_bundle,src=./ca-bundle.pem
+RUN --mount=type=secret,id=ca_bundle,target=/tmp/ca-bundle.pem \
     pip install --no-cache-dir \
         $([ -f /tmp/ca-bundle.pem ] && echo "--cert /tmp/ca-bundle.pem") \
         -r requirements.txt
