@@ -454,6 +454,9 @@ class NetboxClient:
         slug = slugify(model)
         results = list(self.nb.dcim.device_types.filter(manufacturer_id=manufacturer.id, model=model))
         existing = next((r for r in results if getattr(r, "model", None) == model), None)
+        if not existing and part_number:
+            results = list(self.nb.dcim.device_types.filter(manufacturer_id=manufacturer.id, part_number=part_number))
+            existing = next((r for r in results if getattr(r, "part_number", None) == part_number), None)
         if not existing:
             results = list(self.nb.dcim.device_types.filter(manufacturer_id=manufacturer.id, slug=slug))
             existing = next((r for r in results if getattr(r, "slug", None) == slug), None)
@@ -1176,7 +1179,9 @@ def sync_device(
                 try:
                     vendor_name = vendor_from_chassis(partner_ch)
                     mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
-                    partner_dt = nb.get_or_create_device_type(mfr, partner_model)
+                    partner_part_number = partner_model
+                    partner_model = parse_sw_model(partner_ch.get("sw_ver", "")) or partner_part_number
+                    partner_dt = nb.get_or_create_device_type(mfr, partner_model, part_number=partner_part_number)
                     patch: dict = {}
                     if partner_dev.device_type.id != partner_dt.id:
                         patch["device_type"] = partner_dt.id
