@@ -689,6 +689,7 @@ STALE_DEVICE_BAY_PATTERNS: list[re.Pattern] = [re.compile(p, re.IGNORECASE) for 
     r"^PS\s*\d+$",
     r"^PSU\s*\d+$",
     r"^Fan\s*\d+$",
+    r"^Slot\s*\d+$",
 ]]
 
 # Dummy/placeholder interface names used as IP anchors before a proper sync.
@@ -843,13 +844,14 @@ def sync_device(
       ips         dict   — created/fixed/moved/unchanged/skipped/error counts
       modules     dict   — created/updated/unchanged/error counts
     """
-    logger.info("── device %s", ip)
+    log = logging.getLogger(f"discobox.{ip}")
+    log.info("── device %s", ip)
 
     try:
         nd_device = nd.get_device(ip)
         nd_ports = nd.get_ports(ip)
     except requests.HTTPError as exc:
-        logger.error("Netdisco request failed for %s: %s", ip, exc)
+        log.error("Netdisco request failed for %s: %s", ip, exc)
         return {"ok": False, "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
 
     nd_hostname = nd_device.get("name") or nd_device.get("dns") or ""
@@ -857,14 +859,16 @@ def sync_device(
 
     nb_device = nb.find_device_by_ip(ip, hostname=nd_hostname)
     if not nb_device:
-        logger.error("No Netbox device found for IP %s or hostname %r — skipping", ip, nd_hostname)
+        log.error("No Netbox device found for IP %s or hostname %r — skipping", ip, nd_hostname)
         return {"ok": False, "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
 
     logger.info("Netbox    device=%r  id=%s", nb_device.name, nb_device.id)
 
     if nd_hostname and nb_device.name:
-        if nd_hostname.lower() != nb_device.name.lower():
-            logger.warning(
+        nd_short = nd_hostname.lower().split(".")[0]
+        nb_short = nb_device.name.lower().split(".")[0]
+        if nd_short != nb_short:
+            log.warning(
                 "Hostname mismatch for %s — Netdisco=%r  Netbox=%r",
                 ip, nd_hostname, nb_device.name,
             )
@@ -874,7 +878,7 @@ def sync_device(
     if housekeeping:
         deleted_bays = nb.remove_stale_device_bays(nb_device, STALE_DEVICE_BAY_PATTERNS)
         deleted_ifaces = nb.remove_empty_dummy_interfaces(nb_device, DUMMY_INTERFACES)
-        logger.info(
+        log.info(
             "Housekeeping — deleted %d stale device bay(s), %d empty dummy interface(s)",
             deleted_bays, deleted_ifaces,
         )
@@ -896,7 +900,7 @@ def sync_device(
         try:
             nd_mods = nd.get_modules(ip)
         except requests.HTTPError as exc:
-            logger.error("Could not fetch modules from Netdisco: %s", exc)
+            log.error("Could not fetch modules from Netdisco: %s", exc)
             nd_mods = []
 
         chassis = [m for m in nd_mods if m.get("class") == "chassis" and m.get("model")]
@@ -914,15 +918,15 @@ def sync_device(
         # Log tree
         root = next((m for m in nd_mods if not m.get("parent")), None)
         if root:
-            logger.info("  %s (root)  %r  type=%s  model=%s  serial=%s",
+            log.info("  %s (root)  %r  type=%s  model=%s  serial=%s",
                         root.get("class", "?"), root.get("name", ""),
                         root.get("type", ""), root.get("model", ""), root.get("serial", ""))
         for i, ch in enumerate(chassis):
             prefix = "└──" if i == len(chassis) - 1 else "├──"
-            logger.info("  %s chassis  %r  model=%s  serial=%s",
+            log.info("  %s chassis  %r  model=%s  serial=%s",
                         prefix, ch.get("name", ""), ch.get("model", ""), ch.get("serial", ""))
         topo = "fex" if is_fex else ("vss" if is_vss else ("standalone" if is_standalone else "stack"))
-        logger.info("Modules   chassis=%d  topology=%s", len(chassis), topo)
+        log.info("Modules   chassis=%d  topology=%s", len(chassis), topo)
 
         manufacturer = nb_device.device_type.manufacturer
 
@@ -942,10 +946,10 @@ def sync_device(
                 nb_device.update(patch)
                 # pynetbox replaces device_type with a plain int after update — restore the object
                 nb_device.device_type = device_type
-                logger.info("  DeviceType → %s / %s  serial=%s  updated", mfr.name, model, serial)
+                log.info("  DeviceType → %s / %s  serial=%s  updated", mfr.name, model, serial)
                 mod_counts["updated"] += 1
             else:
-                logger.debug("  DeviceType unchanged")
+                log.debug("  DeviceType unchanged")
                 mod_counts["unchanged"] += 1
 
         def _upsert_chassis_bay(ch: dict, slot_key: Optional[int] = None) -> None:
@@ -963,9 +967,9 @@ def sync_device(
             if slot_key is not None and module:
                 slot_to_module[slot_key] = module.id
             if action != "unchanged":
-                logger.info("  %s  %s  serial=%s  %s", name, model, serial, action)
+                log.info("  %s  %s  serial=%s  %s", name, model, serial, action)
             else:
-                logger.debug("  %-30s unchanged", name)
+                log.debug("  %-30s unchanged", name)
 
         if is_standalone:
             # Single device — update DeviceType on the device itself
@@ -973,7 +977,7 @@ def sync_device(
                 _update_device_type(chassis[0])
             except Exception as exc:
                 mod_counts["error"] += 1
-                logger.error("  DeviceType update error: %s", exc)
+                log.error("  DeviceType update error: %s", exc)
 
         elif is_fex:
             # Nexus FEX: primary N9K chassis → DeviceType update; FEX units → module bays
@@ -984,7 +988,7 @@ def sync_device(
                 _update_device_type(primary)
             except Exception as exc:
                 mod_counts["error"] += 1
-                logger.error("  DeviceType update error: %s", exc)
+                log.error("  DeviceType update error: %s", exc)
             for ch in fex_units:
                 # Extract FEX ID from name: "Fex-101 Nexus2332 Chassis" → 101
                 fex_match = re.match(r"[Ff]ex-(\d+)", ch.get("name", ""))
@@ -993,7 +997,7 @@ def sync_device(
                     _upsert_chassis_bay(ch, slot_key)
                 except Exception as exc:
                     mod_counts["error"] += 1
-                    logger.error("  %-30s error: %s", ch.get("name", ""), exc)
+                    log.error("  %-30s error: %s", ch.get("name", ""), exc)
 
         elif is_vss:
             # Cat9500 StackWise Virtual — two physical devices in separate Netbox records.
@@ -1007,7 +1011,7 @@ def sync_device(
                 _update_device_type(primary_ch)
             except Exception as exc:
                 mod_counts["error"] += 1
-                logger.error("  DeviceType update error (primary): %s", exc)
+                log.error("  DeviceType update error (primary): %s", exc)
 
             primary_pos = primary_ch.get("pos", 1)
             vc_members: list[tuple] = [(nb_device, primary_pos)]
@@ -1031,10 +1035,10 @@ def sync_device(
                     results = list(nb.nb.dcim.devices.filter(name__ie=partner_hostname))
                     if results:
                         partner_dev = results[0]
-                        logger.info("  VSS partner found by hostname %r", partner_dev.name)
+                        log.info("  VSS partner found by hostname %r", partner_dev.name)
 
                 if not partner_dev:
-                    logger.warning(
+                    log.warning(
                         "  VSS partner not found (serial=%r) — Virtual Chassis will be incomplete",
                         partner_serial,
                     )
@@ -1053,7 +1057,7 @@ def sync_device(
                         patch["serial"] = partner_serial
                     if patch:
                         partner_dev.update(patch)
-                        logger.info(
+                        log.info(
                             "  VSS partner DeviceType → %s  serial=%s  updated",
                             partner_model, partner_serial,
                         )
@@ -1062,7 +1066,7 @@ def sync_device(
                         mod_counts["unchanged"] += 1
                 except Exception as exc:
                     mod_counts["error"] += 1
-                    logger.error("  VSS partner DeviceType update error: %s", exc)
+                    log.error("  VSS partner DeviceType update error: %s", exc)
 
                 vc_members.append((partner_dev, partner_pos))
 
@@ -1070,9 +1074,9 @@ def sync_device(
             vc_name = nd_hostname.split(".")[0] if nd_hostname else f"vc-{ip}"
             try:
                 vc_action, _vc = nb.upsert_virtual_chassis(vc_name, vc_members)
-                logger.info("  VirtualChassis %r — %s", vc_name, vc_action)
+                log.info("  VirtualChassis %r — %s", vc_name, vc_action)
             except Exception as exc:
-                logger.error("  VirtualChassis error: %s", exc)
+                log.error("  VirtualChassis error: %s", exc)
 
             # Build pos → device map so blades can be routed to the right member
             for _dev, _pos in vc_members:
@@ -1087,9 +1091,9 @@ def sync_device(
                     _upsert_chassis_bay(ch, slot_key=pos + 1 if pos is not None else None)
                 except Exception as exc:
                     mod_counts["error"] += 1
-                    logger.error("  %-30s error: %s", ch.get("name", ""), exc)
+                    log.error("  %-30s error: %s", ch.get("name", ""), exc)
 
-        logger.info(
+        log.info(
             "Modules — updated=%d unchanged=%d errors=%d",
             mod_counts.get("updated", 0) + mod_counts.get("created", 0),
             mod_counts["unchanged"], mod_counts["error"],
@@ -1100,7 +1104,7 @@ def sync_device(
             m for m in nd_mods
             if m.get("class") == "powerSupply" and m.get("type") != "cevPowerSupplyUnknown"
         ]
-        logger.info("PSUs      entries: %d", len(psus))
+        log.info("PSUs      entries: %d", len(psus))
         psu_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
         for psu in psus:
             psu_name = psu.get("name", "")
@@ -1114,15 +1118,15 @@ def sync_device(
                 )
                 psu_counts[action] += 1
                 if action != "unchanged":
-                    logger.info("  PSU %s  model=%s  serial=%s  %s",
+                    log.info("  PSU %s  model=%s  serial=%s  %s",
                                 psu_name, psu_model or "-", psu_serial or "-", action)
                 else:
-                    logger.debug("  PSU %-35s unchanged", psu_name)
+                    log.debug("  PSU %-35s unchanged", psu_name)
             except Exception as exc:
                 psu_counts["error"] += 1
-                logger.error("  PSU %-35s error: %s", psu_name, exc)
+                log.error("  PSU %-35s error: %s", psu_name, exc)
 
-        logger.info(
+        log.info(
             "PSUs — created=%d updated=%d unchanged=%d errors=%d",
             psu_counts["created"], psu_counts["updated"], psu_counts["unchanged"], psu_counts["error"],
         )
@@ -1134,8 +1138,9 @@ def sync_device(
             if m.get("class") == "module"
             and m.get("model") and m.get("model") != "Unknown PID"
             and m.get("serial")
+            and "transceiver" not in m.get("name", "").lower()
         ]
-        logger.info("Blades    entries: %d", len(blades))
+        log.info("Blades    entries: %d", len(blades))
         blade_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
         for blade in blades:
             blade_name = blade.get("name", "")
@@ -1158,15 +1163,15 @@ def sync_device(
                 action, _ = nb.upsert_module(target_device, bay, module_type, blade_serial)
                 blade_counts[action] += 1
                 if action != "unchanged":
-                    logger.info("  Blade %s  model=%s  serial=%s  %s",
+                    log.info("  Blade %s  model=%s  serial=%s  %s",
                                 blade_name, blade_model, blade_serial, action)
                 else:
-                    logger.debug("  Blade %-35s unchanged", blade_name)
+                    log.debug("  Blade %-35s unchanged", blade_name)
             except Exception as exc:
                 blade_counts["error"] += 1
-                logger.error("  Blade %-35s error: %s", blade_name, exc)
+                log.error("  Blade %-35s error: %s", blade_name, exc)
 
-        logger.info(
+        log.info(
             "Blades — created=%d updated=%d unchanged=%d errors=%d",
             blade_counts["created"], blade_counts["updated"], blade_counts["unchanged"], blade_counts["error"],
         )
@@ -1182,7 +1187,7 @@ def sync_device(
     for port in nd_ports_sorted:
         iface_name = port.get("port") or port.get("descr") or "?"
         if iface_name.lower().startswith(PORT_BLACKLIST_PREFIXES):
-            logger.debug("  %-40s blacklisted — skipping", iface_name)
+            log.debug("  %-40s blacklisted — skipping", iface_name)
             continue
         try:
             nb_data = port_to_netbox(port)
@@ -1191,12 +1196,12 @@ def sync_device(
             action = nb.upsert_interface(nb_device.id, nb_data, existing_ifaces.get(iface_name))
             counts[action] += 1
             if action != "unchanged":
-                logger.info("  %-40s %s", iface_name, action)
+                log.info("  %-40s %s", iface_name, action)
             else:
-                logger.debug("  %-40s unchanged", iface_name)
+                log.debug("  %-40s unchanged", iface_name)
         except Exception as exc:
             counts["error"] += 1
-            logger.error("  %-40s error: %s", iface_name, exc)
+            log.error("  %-40s error: %s", iface_name, exc)
 
     nd_names = {
         port.get("port") or port.get("descr") for port in nd_ports
@@ -1204,7 +1209,7 @@ def sync_device(
     }
     for name in existing_ifaces:
         if name not in nd_names and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
-            logger.warning("  %-40s in Netbox but not in Netdisco", name)
+            log.warning("  %-40s in Netbox but not in Netdisco", name)
 
     # Wire up parent links for subinterfaces (e.g. GigabitEthernet0/0/1.1132 → GigabitEthernet0/0/1)
     all_ifaces = nb.fetch_interfaces(nb_device.id)
@@ -1221,11 +1226,11 @@ def sync_device(
             try:
                 iface.update({"parent": parent.id})
                 parent_updated += 1
-                logger.debug("  %s → parent %s", iface_name, parent_name)
+                log.debug("  %s → parent %s", iface_name, parent_name)
             except Exception as exc:
-                logger.error("  %s parent link error: %s", iface_name, exc)
+                log.error("  %s parent link error: %s", iface_name, exc)
     if parent_updated:
-        logger.info("Subinterfaces — linked %d parent(s)", parent_updated)
+        log.info("Subinterfaces — linked %d parent(s)", parent_updated)
 
     # ── Interface → Module assignment ─────────────────────────────────────────────
 
@@ -1242,10 +1247,10 @@ def sync_device(
             if current != mod_id:
                 iface.update({"module": mod_id})
                 mod_iface_counts["updated"] += 1
-                logger.debug("  %-40s → module slot %s", iface_name, slot)
+                log.debug("  %-40s → module slot %s", iface_name, slot)
             else:
                 mod_iface_counts["unchanged"] += 1
-        logger.info(
+        log.info(
             "Interface→Module — updated=%d unchanged=%d skipped=%d",
             mod_iface_counts["updated"], mod_iface_counts["unchanged"], mod_iface_counts["skipped"],
         )
@@ -1258,7 +1263,7 @@ def sync_device(
         try:
             nd_ips = nd.get_device_ips(ip)
         except requests.HTTPError as exc:
-            logger.error("Could not fetch device IPs from Netdisco: %s", exc)
+            log.error("Could not fetch device IPs from Netdisco: %s", exc)
             nd_ips = []
 
         for entry in nd_ips:
@@ -1276,21 +1281,21 @@ def sync_device(
                     pass
             iface = existing_ifaces.get(port_name)
             if not iface:
-                logger.warning("  IP %-20s skipped — interface %r not found in Netbox", address, port_name)
+                log.warning("  IP %-20s skipped — interface %r not found in Netbox", address, port_name)
                 ip_counts["skipped"] += 1
                 continue
             try:
                 action = nb.upsert_ip(address, iface)
                 ip_counts[action] += 1
                 if action in ("created", "fixed", "moved"):
-                    logger.info("  IP %-20s → %s on %s", address, action, port_name)
+                    log.info("  IP %-20s → %s on %s", address, action, port_name)
                 elif action == "unchanged":
-                    logger.debug("  IP %-20s → unchanged on %s", address, port_name)
+                    log.debug("  IP %-20s → unchanged on %s", address, port_name)
             except Exception as exc:
                 ip_counts["error"] += 1
-                logger.error("  IP %-20s on %-30s error: %s", address, port_name, exc)
+                log.error("  IP %-20s on %-30s error: %s", address, port_name, exc)
 
-        logger.info(
+        log.info(
             "IPs — created=%d fixed=%d moved=%d unchanged=%d skipped=%d errors=%d",
             ip_counts["created"], ip_counts["fixed"], ip_counts["moved"],
             ip_counts["unchanged"], ip_counts["skipped"], ip_counts["error"],
@@ -1304,14 +1309,14 @@ def sync_device(
             try:
                 nd_mods = nd.get_modules(ip)
             except requests.HTTPError as exc:
-                logger.error("Could not fetch modules from Netdisco: %s", exc)
+                log.error("Could not fetch modules from Netdisco: %s", exc)
                 nd_mods = []
 
         sfps = [
             m for m in nd_mods
             if m.get("class") == "port" and m.get("model") and m.get("serial")
         ]
-        logger.info("SFPs      entries: %d", len(sfps))
+        log.info("SFPs      entries: %d", len(sfps))
 
         # Re-fetch interfaces to include anything created this run
         existing_ifaces = nb.fetch_interfaces(nb_device.id)
@@ -1323,20 +1328,20 @@ def sync_device(
             serial = sfp.get("serial", "")
             iface = existing_ifaces.get(expand_iface_name(name))
             if not iface:
-                logger.warning("  SFP %-20s skipped — interface not in Netbox", name)
+                log.warning("  SFP %-20s skipped — interface not in Netbox", name)
                 continue
             try:
                 action = nb.upsert_sfp(nb_device, iface, manufacturer, name, model, serial)
                 sfp_counts[action] += 1
                 if action != "unchanged":
-                    logger.info("  SFP %-20s model=%-20s serial=%s → %s", name, model, serial, action)
+                    log.info("  SFP %-20s model=%-20s serial=%s → %s", name, model, serial, action)
                 else:
-                    logger.debug("  SFP %-20s unchanged", name)
+                    log.debug("  SFP %-20s unchanged", name)
             except Exception as exc:
                 sfp_counts["error"] += 1
-                logger.error("  SFP %-20s error: %s", name, exc)
+                log.error("  SFP %-20s error: %s", name, exc)
 
-        logger.info(
+        log.info(
             "SFPs — created=%d updated=%d unchanged=%d errors=%d",
             sfp_counts["created"], sfp_counts["updated"], sfp_counts["unchanged"], sfp_counts["error"],
         )
@@ -1349,7 +1354,7 @@ def sync_device(
         try:
             powered_ports = nd.get_powered_ports(ip)
         except requests.HTTPError as exc:
-            logger.warning("Could not fetch powered ports (device may not support PoE): %s", exc)
+            log.warning("Could not fetch powered ports (device may not support PoE): %s", exc)
             powered_ports = []
 
         if powered_ports:
@@ -1365,14 +1370,14 @@ def sync_device(
                     if current != "pse":
                         iface.update({"poe_mode": "pse"})
                         poe_counts["updated"] += 1
-                        logger.debug("  PoE %s → pse", port_name)
+                        log.debug("  PoE %s → pse", port_name)
                     else:
                         poe_counts["unchanged"] += 1
                 except Exception as exc:
                     poe_counts["error"] += 1
-                    logger.error("  PoE %s error: %s", port_name, exc)
+                    log.error("  PoE %s error: %s", port_name, exc)
 
-            logger.info(
+            log.info(
                 "PoE — updated=%d unchanged=%d skipped=%d errors=%d",
                 poe_counts["updated"], poe_counts["unchanged"], poe_counts["skipped"], poe_counts["error"],
             )
