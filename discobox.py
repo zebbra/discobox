@@ -884,58 +884,76 @@ def sync_device(
 
     logger.info("Netbox    device=%r  id=%s", nb_device.name, nb_device.id)
 
+    # ── HA / VIP detection ────────────────────────────────────────────────────────
+    # Signal: SNMP hostname belongs to a different Netbox device than the IP lookup found.
+    # This happens when the management IP is a cluster VIP. The serial approach alone
+    # is unreliable because previous syncs may have written the active node's serial
+    # onto the VIP device. Hostname mismatch is the primary signal.
+    vip_device = None
     if nd_hostname and nb_device.name:
         nd_short = nd_hostname.lower().split(".")[0]
         nb_short = nb_device.name.lower().split(".")[0]
         if nd_short != nb_short:
-            log.warning(
-                "Hostname mismatch for %s — Netdisco=%r  Netbox=%r",
-                ip, nd_hostname, nb_device.name,
-            )
+            # Try to find the real physical device by SNMP hostname
+            real_device = None
+            # 1. Exact hostname match
+            results = list(nb.nb.dcim.devices.filter(name__ie=nd_hostname))
+            real_device = results[0] if results else None
+            # 2. Reconstruct FQDN from nb_device's domain suffix
+            if not real_device and "." in nb_device.name:
+                domain = nb_device.name.split(".", 1)[1]
+                fqdn = f"{nd_short}.{domain}"
+                results = list(nb.nb.dcim.devices.filter(name__ie=fqdn))
+                real_device = results[0] if results else None
+            # 3. Serial fallback (works before any previous sync has poisoned the VIP serial)
+            if not real_device:
+                nd_serial = nd_device.get("serial", "")
+                if nd_serial:
+                    serial_match = nb.find_device_by_serial(nd_serial)
+                    if serial_match and serial_match.id != nb_device.id:
+                        real_device = serial_match
 
-    # ── HA / VIP detection ────────────────────────────────────────────────────────
-    # If the serial from Netdisco belongs to a *different* Netbox device the IP we
-    # are syncing is a cluster VIP — redirect to the real physical node.
-    nd_serial = nd_device.get("serial", "")
-    vip_device = None
-    if nd_serial and nd_serial != (nb_device.serial or ""):
-        serial_match = nb.find_device_by_serial(nd_serial)
-        if serial_match and serial_match.id != nb_device.id:
-            log.info(
-                "HA VIP detected — %r owns serial %s, redirecting to %r",
-                nb_device.name, nd_serial, serial_match.name,
-            )
-            vip_device = nb_device
-            nb_device = serial_match
+            if real_device and real_device.id != nb_device.id:
+                log.info(
+                    "HA VIP detected — %r → redirecting to %r",
+                    nb_device.name, real_device.name,
+                )
+                vip_device = nb_device
+                nb_device = real_device
 
-            # Find partner node by swapping node indicator in hostname
-            partner_dev = nb.find_ha_partner(nb_device.name)
+                # Find partner node by swapping node indicator in hostname
+                partner_dev = nb.find_ha_partner(nb_device.name)
 
-            # Create / update Virtual Chassis using the VIP device's short name as identity
-            vc_name = vip_device.name.split(".")[0]
-            active_m = re.search(r"p(\d+)h", nb_device.name, re.IGNORECASE)
-            active_pos = int(active_m.group(1)) if active_m else 1
-            vc_members: list[tuple] = [(nb_device, active_pos)]
-            if partner_dev:
-                partner_m = re.search(r"p(\d+)h", partner_dev.name, re.IGNORECASE)
-                partner_pos = int(partner_m.group(1)) if partner_m else (2 if active_pos == 1 else 1)
-                vc_members.append((partner_dev, partner_pos))
-                log.info("HA partner found: %r", partner_dev.name)
-            else:
-                log.warning("HA partner not found for %r — VC will have one member", nb_device.name)
-            try:
-                vc_action, _ = nb.upsert_virtual_chassis(vc_name, vc_members)
-                log.info("HA VirtualChassis %r — %s", vc_name, vc_action)
-            except Exception as exc:
-                log.error("HA VirtualChassis error: %s", exc)
-
-            # Delete VIP device (only during housekeeping — it's destructive)
-            if housekeeping:
+                # Create / update Virtual Chassis using the VIP device's short name as identity
+                vc_name = vip_device.name.split(".")[0]
+                active_m = re.search(r"p(\d+)h", nb_device.name, re.IGNORECASE)
+                active_pos = int(active_m.group(1)) if active_m else 1
+                vc_members: list[tuple] = [(nb_device, active_pos)]
+                if partner_dev:
+                    partner_m = re.search(r"p(\d+)h", partner_dev.name, re.IGNORECASE)
+                    partner_pos = int(partner_m.group(1)) if partner_m else (2 if active_pos == 1 else 1)
+                    vc_members.append((partner_dev, partner_pos))
+                    log.info("HA partner found: %r", partner_dev.name)
+                else:
+                    log.warning("HA partner not found for %r — VC will have one member", nb_device.name)
                 try:
-                    nb.nb.dcim.devices.get(vip_device.id).delete()
-                    log.info("Deleted VIP device %r (id=%s)", vip_device.name, vip_device.id)
+                    vc_action, _ = nb.upsert_virtual_chassis(vc_name, vc_members)
+                    log.info("HA VirtualChassis %r — %s", vc_name, vc_action)
                 except Exception as exc:
-                    log.error("Could not delete VIP device %r: %s", vip_device.name, exc)
+                    log.error("HA VirtualChassis error: %s", exc)
+
+                # Delete VIP device (only during housekeeping — it's destructive)
+                if housekeeping:
+                    try:
+                        nb.nb.dcim.devices.get(vip_device.id).delete()
+                        log.info("Deleted VIP device %r (id=%s)", vip_device.name, vip_device.id)
+                    except Exception as exc:
+                        log.error("Could not delete VIP device %r: %s", vip_device.name, exc)
+            else:
+                log.warning(
+                    "Hostname mismatch for %s — Netdisco=%r  Netbox=%r",
+                    ip, nd_hostname, nb_device.name,
+                )
 
     nb.update_device_fields(nb_device, nd_device)
 
