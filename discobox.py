@@ -224,14 +224,17 @@ class NetboxClient:
         self.nb = pynetbox.api(url, token=token)
         self.nb.http_session = session
 
-    def find_device_by_ip(self, ip: str, hostname: str = "") -> Optional[pynetbox.core.response.Record]:
+    def find_device_by_ip(self, ip: str, hostname: str = "", serial: str = "") -> Optional[pynetbox.core.response.Record]:
         """
-        Find a Netbox device by management IP, with hostname fallback.
+        Find a Netbox device by management IP, with hostname and serial fallbacks.
 
         Strategy:
           1. Search IPAM for the address; walk the assignment back to a device.
-          2. Fall back to scanning devices whose primary_ip4 matches.
-          3. If both fail and a hostname is provided, search by name (case-insensitive).
+          2. Scan devices whose primary_ip4 matches.
+          3. Exact hostname match (name__ie) — works when Netdisco has the full FQDN.
+          4. Short-name contains match (name__ic) — fallback for when Netdisco returns
+             a hostname from PTR that differs from the Netbox FQDN (e.g. wrong domain).
+          5. Serial match — most reliable identifier when IP and hostname both fail.
         """
         for addr in self.nb.ipam.ip_addresses.filter(address=ip):
             if addr.assigned_object_type == "dcim.interface" and addr.assigned_object:
@@ -246,8 +249,19 @@ class NetboxClient:
                 return dev
 
         if hostname:
+            short = hostname.lower().split(".")[0]
             for dev in self.nb.dcim.devices.filter(name__ie=hostname):
                 logger.info("Device found by hostname %r (no IP match for %s)", dev.name, ip)
+                return dev
+            for dev in self.nb.dcim.devices.filter(name__ic=short):
+                if dev.name.lower().split(".")[0] == short:
+                    logger.info("Device found by short hostname %r (no IP match for %s)", dev.name, ip)
+                    return dev
+
+        if serial:
+            dev = self.find_device_by_serial(serial)
+            if dev:
+                logger.info("Device found by serial %r (no IP/hostname match for %s)", serial, ip)
                 return dev
 
         return None
@@ -902,9 +916,10 @@ def sync_device(
         return {"ok": False, "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
 
     nd_hostname = nd_device.get("name") or nd_device.get("dns") or ""
+    nd_serial = nd_device.get("serial") or ""
     logger.info("Netdisco  hostname=%r  ports=%d", nd_hostname, len(nd_ports))
 
-    nb_device = nb.find_device_by_ip(ip, hostname=nd_hostname)
+    nb_device = nb.find_device_by_ip(ip, hostname=nd_hostname, serial=nd_serial)
     if not nb_device:
         log.error("No Netbox device found for IP %s or hostname %r — skipping", ip, nd_hostname)
         return {"ok": False, "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
@@ -923,22 +938,20 @@ def sync_device(
         if nd_short != nb_short:
             # Try to find the real physical device by SNMP hostname
             real_device = None
-            # 1. Exact hostname match
-            results = list(nb.nb.dcim.devices.filter(name__ie=nd_hostname))
-            real_device = results[0] if results else None
-            # 2. Reconstruct FQDN from nb_device's domain suffix
-            if not real_device and "." in nb_device.name:
-                domain = nb_device.name.split(".", 1)[1]
-                fqdn = f"{nd_short}.{domain}"
-                results = list(nb.nb.dcim.devices.filter(name__ie=fqdn))
-                real_device = results[0] if results else None
-            # 3. Serial fallback (works before any previous sync has poisoned the VIP serial)
+            # 1. Exact match, then contains with short-name verification
+            for dev in nb.nb.dcim.devices.filter(name__ie=nd_hostname):
+                real_device = dev
+                break
             if not real_device:
-                nd_serial = nd_device.get("serial", "")
-                if nd_serial:
-                    serial_match = nb.find_device_by_serial(nd_serial)
-                    if serial_match and serial_match.id != nb_device.id:
-                        real_device = serial_match
+                for dev in nb.nb.dcim.devices.filter(name__ic=nd_short):
+                    if dev.name.lower().split(".")[0] == nd_short:
+                        real_device = dev
+                        break
+            # 2. Serial fallback
+            if not real_device and nd_serial:
+                serial_match = nb.find_device_by_serial(nd_serial)
+                if serial_match and serial_match.id != nb_device.id:
+                    real_device = serial_match
 
             if real_device and real_device.id != nb_device.id:
                 log.info(
