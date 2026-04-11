@@ -175,13 +175,28 @@ class NetdiscoClient:
 
 # ── Netbox client ──────────────────────────────────────────────────────────────
 
+class _ChangelogSession(requests.Session):
+    """requests.Session that injects changelog_message into every write body."""
+    def __init__(self, changelog_message: str):
+        super().__init__()
+        self._changelog_message = changelog_message
+
+    def request(self, method, url, **kwargs):
+        if method.upper() in ("POST", "PATCH", "PUT") and self._changelog_message:
+            json_data = kwargs.get("json")
+            if isinstance(json_data, dict):
+                kwargs["json"] = {**json_data, "changelog_message": self._changelog_message}
+        return super().request(method, url, **kwargs)
+
+
 class NetboxClient:
     def __init__(self, url: str, token: str, verify_tls: bool = True, changelog_message: str = "DiscoBox"):
-        self.nb = pynetbox.api(url, token=token)
+        session = _ChangelogSession(changelog_message)
         if not verify_tls:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            self.nb.http_session.verify = False
-        self.nb.http_session.headers.update({"X-Netbox-Change-Reason": changelog_message})
+            session.verify = False
+        self.nb = pynetbox.api(url, token=token)
+        self.nb.http_session = session
 
     def find_device_by_ip(self, ip: str) -> Optional[pynetbox.core.response.Record]:
         """
