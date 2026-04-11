@@ -169,6 +169,9 @@ class NetdiscoClient:
     def get_modules(self, ip: str) -> list[dict]:
         return self._get(f"/api/v1/object/device/{ip}/modules")
 
+    def get_powered_ports(self, ip: str) -> list[dict]:
+        return self._get(f"/api/v1/object/device/{ip}/powered_ports")
+
 
 # ── Netbox client ──────────────────────────────────────────────────────────────
 
@@ -780,6 +783,7 @@ def sync_device(
     sync_ip: bool = True,
     sync_modules: bool = True,
     sync_sfp: bool = True,
+    sync_poe: bool = True,
     housekeeping: bool = False,
 ) -> dict:
     """
@@ -798,7 +802,7 @@ def sync_device(
         nd_ports = nd.get_ports(ip)
     except requests.HTTPError as exc:
         logger.error("Netdisco request failed for %s: %s", ip, exc)
-        return False
+        return {"ok": False, "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
 
     nd_hostname = nd_device.get("name") or nd_device.get("dns") or ""
     logger.info("Netdisco  hostname=%r  ports=%d", nd_hostname, len(nd_ports))
@@ -806,7 +810,7 @@ def sync_device(
     nb_device = nb.find_device_by_ip(ip)
     if not nb_device:
         logger.error("No Netbox device found for IP %s — skipping", ip)
-        return False
+        return {"ok": False, "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
 
     logger.info("Netbox    device=%r  id=%s", nb_device.name, nb_device.id)
 
@@ -1131,6 +1135,42 @@ def sync_device(
             "SFPs — created=%d updated=%d unchanged=%d errors=%d",
             sfp_counts["created"], sfp_counts["updated"], sfp_counts["unchanged"], sfp_counts["error"],
         )
+
+    # ── PoE ───────────────────────────────────────────────────────────────────────
+
+    poe_counts: dict[str, int] = {"updated": 0, "unchanged": 0, "skipped": 0, "error": 0}
+
+    if sync_poe:
+        try:
+            powered_ports = nd.get_powered_ports(ip)
+        except requests.HTTPError as exc:
+            logger.warning("Could not fetch powered ports (device may not support PoE): %s", exc)
+            powered_ports = []
+
+        if powered_ports:
+            existing_ifaces = nb.fetch_interfaces(nb_device.id)
+            poe_iface_names = {p["port"] for p in powered_ports if p.get("port")}
+            for port_name in poe_iface_names:
+                iface = existing_ifaces.get(port_name)
+                if not iface:
+                    poe_counts["skipped"] += 1
+                    continue
+                try:
+                    current = nb._nb_value(getattr(iface, "poe_mode", None))
+                    if current != "pse":
+                        iface.update({"poe_mode": "pse"})
+                        poe_counts["updated"] += 1
+                        logger.debug("  PoE %s → pse", port_name)
+                    else:
+                        poe_counts["unchanged"] += 1
+                except Exception as exc:
+                    poe_counts["error"] += 1
+                    logger.error("  PoE %s error: %s", port_name, exc)
+
+            logger.info(
+                "PoE — updated=%d unchanged=%d skipped=%d errors=%d",
+                poe_counts["updated"], poe_counts["unchanged"], poe_counts["skipped"], poe_counts["error"],
+            )
 
     logger.info(
         "── done %s  created=%d updated=%d unchanged=%d errors=%d",

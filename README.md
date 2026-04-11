@@ -46,6 +46,7 @@ python cli.py --host 10.0.0.1
 --no-ip            Skip IP address sync
 --no-modules       Skip module bay / module sync
 --no-sfp           Skip SFP inventory item sync
+--no-poe           Skip PoE mode sync
 --housekeeping     Remove stale device bays and empty dummy interfaces
 --debug            Enable debug logging
 ```

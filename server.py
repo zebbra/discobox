@@ -172,6 +172,7 @@ def _run_sync(host: str) -> None:
             sync_ip=True,
             sync_modules=True,
             sync_sfp=True,
+            sync_poe=True,
             housekeeping=False,
         )
         status = "success" if result.get("ok") else "error"

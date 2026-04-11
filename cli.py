@@ -27,6 +27,7 @@ def main() -> None:
     parser.add_argument("--no-ip",       action="store_true", help="Skip IP address sync.")
     parser.add_argument("--no-modules",  action="store_true", help="Skip module bay/module sync.")
     parser.add_argument("--no-sfp",      action="store_true", help="Skip SFP inventory item sync.")
+    parser.add_argument("--no-poe",      action="store_true", help="Skip PoE mode sync.")
     parser.add_argument("--housekeeping", action="store_true",
                         help="Remove stale device bays and empty dummy interfaces.")
     parser.add_argument("--debug",       action="store_true", help="Enable debug logging.")
@@ -63,6 +64,7 @@ def main() -> None:
         sync_ip=not args.no_ip,
         sync_modules=not args.no_modules,
         sync_sfp=not args.no_sfp,
+        sync_poe=not args.no_poe,
         housekeeping=args.housekeeping,
     )
     sys.exit(0 if result["ok"] else 1)
