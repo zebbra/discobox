@@ -198,14 +198,14 @@ class NetboxClient:
         self.nb = pynetbox.api(url, token=token)
         self.nb.http_session = session
 
-    def find_device_by_ip(self, ip: str) -> Optional[pynetbox.core.response.Record]:
+    def find_device_by_ip(self, ip: str, hostname: str = "") -> Optional[pynetbox.core.response.Record]:
         """
-        Find a Netbox device by management IP.
+        Find a Netbox device by management IP, with hostname fallback.
 
         Strategy:
           1. Search IPAM for the address; walk the assignment back to a device.
-          2. Fall back to scanning devices whose primary_ip4 matches (slow on
-             large installs, but avoids needing CIDR notation).
+          2. Fall back to scanning devices whose primary_ip4 matches.
+          3. If both fail and a hostname is provided, search by name (case-insensitive).
         """
         for addr in self.nb.ipam.ip_addresses.filter(address=ip):
             if addr.assigned_object_type == "dcim.interface" and addr.assigned_object:
@@ -215,9 +215,13 @@ class NetboxClient:
                     if device:
                         return device
 
-        # Fallback: check primary_ip4 for devices matching a free-text search
         for dev in self.nb.dcim.devices.filter(q=ip):
             if dev.primary_ip4 and dev.primary_ip4.address.split("/")[0] == ip:
+                return dev
+
+        if hostname:
+            for dev in self.nb.dcim.devices.filter(name__ie=hostname):
+                logger.warning("Device not found by IP %s — matched by hostname %r", ip, dev.name)
                 return dev
 
         return None
@@ -822,9 +826,9 @@ def sync_device(
     nd_hostname = nd_device.get("name") or nd_device.get("dns") or ""
     logger.info("Netdisco  hostname=%r  ports=%d", nd_hostname, len(nd_ports))
 
-    nb_device = nb.find_device_by_ip(ip)
+    nb_device = nb.find_device_by_ip(ip, hostname=nd_hostname)
     if not nb_device:
-        logger.error("No Netbox device found for IP %s — skipping", ip)
+        logger.error("No Netbox device found for IP %s or hostname %r — skipping", ip, nd_hostname)
         return {"ok": False, "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
 
     logger.info("Netbox    device=%r  id=%s", nb_device.name, nb_device.id)

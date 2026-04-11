@@ -56,7 +56,8 @@ python cli.py --host 10.0.0.1
 ## Features
 
 - **Device fields** — updates serial number, OS version, OS name, OS release (parsed from description)
-- **Interfaces** — creates and updates all physical and logical interfaces; maps interface type by name prefix
+- **Interfaces** — creates and updates all physical and logical interfaces; maps interface type by name prefix; links subinterfaces (e.g. `Gi0/0/1.100`) to their parent interface
+- **PoE** — sets `poe_mode = pse` on ports reported as PoE-capable by Netdisco
 - **MAC addresses** — creates `dcim.mac-addresses` objects and links them as primary MAC per interface (Netbox 4.x model)
 - **IP addresses** — assigns interface IPs; fixes prefix mismatches (e.g. `/32` → `/26`); moves IPs from dummy placeholder interfaces to the correct one
 - **Module bays & modules** — models physical chassis members as module bays with installed modules; assigns interfaces to their parent module
