@@ -458,6 +458,8 @@ class NetboxClient:
             results = list(self.nb.dcim.device_types.filter(manufacturer_id=manufacturer.id, slug=slug))
             existing = next((r for r in results if getattr(r, "slug", None) == slug), None)
         if existing:
+            if not getattr(existing, "part_number", None):
+                existing.update({"part_number": part_number or model})
             return existing
         dt = self.nb.dcim.device_types.create(
             manufacturer=manufacturer.id,
