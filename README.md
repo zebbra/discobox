@@ -75,6 +75,7 @@ python cli.py --host 10.0.0.1
 | **Standalone** | Single chassis, no stack root | Updates `device_type` directly on the device |
 | **Traditional stack** (e.g. Cisco 3850) | `class=stack` root present | Module bay + module per stack member; interfaces linked to their member's module |
 | **Nexus FEX** (e.g. N9K-C93180LC-EX) | Stack root type `cevContainerNexusLogicalFabric` | Primary N9K updates `device_type`; each FEX unit becomes a module bay + module; FEX interfaces linked to their FEX module |
+| **Cat9500 StackWise Virtual** | Stack root type `cevC9500VirtualStack` | Module bay + module per chassis member; pos already 1-indexed |
 
 ---
 

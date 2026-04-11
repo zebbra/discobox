@@ -508,6 +508,34 @@ class NetboxClient:
         )
         return "created", module
 
+    def find_device_by_serial(self, serial: str) -> Optional[pynetbox.core.response.Record]:
+        results = list(self.nb.dcim.devices.filter(serial=serial))
+        return results[0] if results else None
+
+    def upsert_virtual_chassis(
+        self,
+        name: str,
+        members: list[tuple[pynetbox.core.response.Record, int]],
+    ) -> tuple[str, pynetbox.core.response.Record]:
+        """Create or update a Virtual Chassis and assign member devices."""
+        results = list(self.nb.dcim.virtual_chassis.filter(name=name))
+        vc = results[0] if results else None
+        action = "unchanged"
+        if not vc:
+            vc = self.nb.dcim.virtual_chassis.create(name=name, master=members[0][0].id)
+            action = "created"
+
+        for device, position in members:
+            patch = {}
+            if self._nb_value(getattr(device, "virtual_chassis", None)) != vc.id:
+                patch["virtual_chassis"] = vc.id
+            if getattr(device, "vc_position", None) != position:
+                patch["vc_position"] = position
+            if patch:
+                device.update(patch)
+                action = action if action == "created" else "updated"
+        return action, vc
+
     def remove_stale_device_bays(
         self,
         device: pynetbox.core.response.Record,
@@ -744,7 +772,7 @@ def _slot_from_iface(topo: str, name: str) -> Optional[int]:
     slot = int(m.group(1))
     if topo == "fex":
         return slot if slot >= 100 else None
-    if topo == "stack":
+    if topo in ("stack", "vss"):
         return slot
     return None
 
@@ -874,6 +902,7 @@ def sync_device(
         # Nexus FEX topology: stack root is a logical fabric, not a real member stack.
         # The primary N9K chassis + satellite FEX units all appear as chassis entries.
         is_fex = has_stack and (stack_root.get("type", "").lower() == "cevcontainernexuslogicalfabric")
+        is_vss = has_stack and (stack_root.get("type", "").lower() == "cevc9500virtualstack")
         is_standalone = not has_stack and len(chassis) == 1
 
         # Log tree
@@ -886,7 +915,7 @@ def sync_device(
             prefix = "└──" if i == len(chassis) - 1 else "├──"
             logger.info("  %s chassis  %r  model=%s  serial=%s",
                         prefix, ch.get("name", ""), ch.get("model", ""), ch.get("serial", ""))
-        topo = "fex" if is_fex else ("standalone" if is_standalone else "stack")
+        topo = "fex" if is_fex else ("vss" if is_vss else ("standalone" if is_standalone else "stack"))
         logger.info("Modules   chassis=%d  topology=%s", len(chassis), topo)
 
         manufacturer = nb_device.device_type.manufacturer
@@ -956,6 +985,15 @@ def sync_device(
                 slot_key = int(fex_match.group(1)) if fex_match else None
                 try:
                     _upsert_chassis_bay(ch, slot_key)
+                except Exception as exc:
+                    mod_counts["error"] += 1
+                    logger.error("  %-30s error: %s", ch.get("name", ""), exc)
+
+        elif is_vss:
+            # Cat9500 StackWise Virtual — pos is already 1-indexed, use directly
+            for ch in chassis:
+                try:
+                    _upsert_chassis_bay(ch, slot_key=ch.get("pos"))
                 except Exception as exc:
                     mod_counts["error"] += 1
                     logger.error("  %-30s error: %s", ch.get("name", ""), exc)
