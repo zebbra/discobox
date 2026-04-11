@@ -1010,7 +1010,10 @@ def sync_device(
     existing_ifaces = nb.fetch_interfaces(nb_device.id)
     logger.debug("Netbox    existing interfaces: %d", len(existing_ifaces))
 
-    for port in nd_ports:
+    # Sort: parent interfaces before subinterfaces (dot-notation) so parents exist when children are created
+    nd_ports_sorted = sorted(nd_ports, key=lambda p: (1 if "." in (p.get("port") or p.get("descr") or "") else 0))
+
+    for port in nd_ports_sorted:
         iface_name = port.get("port") or port.get("descr") or "?"
         if iface_name.lower().startswith(PORT_BLACKLIST_PREFIXES):
             logger.debug("  %-40s blacklisted — skipping", iface_name)
@@ -1036,6 +1039,27 @@ def sync_device(
     for name in existing_ifaces:
         if name not in nd_names and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
             logger.warning("  %-40s in Netbox but not in Netdisco", name)
+
+    # Wire up parent links for subinterfaces (e.g. GigabitEthernet0/0/1.1132 → GigabitEthernet0/0/1)
+    all_ifaces = nb.fetch_interfaces(nb_device.id)
+    parent_updated = 0
+    for iface_name, iface in all_ifaces.items():
+        if "." not in iface_name:
+            continue
+        parent_name = iface_name.rsplit(".", 1)[0]
+        parent = all_ifaces.get(parent_name)
+        if not parent:
+            continue
+        current_parent = nb._nb_value(getattr(iface, "parent", None))
+        if current_parent != parent.id:
+            try:
+                iface.update({"parent": parent.id})
+                parent_updated += 1
+                logger.debug("  %s → parent %s", iface_name, parent_name)
+            except Exception as exc:
+                logger.error("  %s parent link error: %s", iface_name, exc)
+    if parent_updated:
+        logger.info("Subinterfaces — linked %d parent(s)", parent_updated)
 
     # ── Interface → Module assignment ─────────────────────────────────────────────
 
