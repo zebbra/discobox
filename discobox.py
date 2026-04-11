@@ -88,6 +88,32 @@ def parse_os_release(description: Optional[str]) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def parse_sw_ver(sw_ver: Optional[str]) -> Optional[str]:
+    """
+    Extract a plain version number from a chassis sw_ver string.
+
+    Examples:
+      "FortiGate-600F v7.4.8,build2795,250523 (GA.M)"  →  "7.4.8"
+      "Version 17.3.4"                                  →  "17.3.4"
+    """
+    if not sw_ver:
+        return None
+    m = re.search(r"v?(\d+\.\d+[\.\d]*)", sw_ver)
+    return m.group(1) if m else None
+
+
+def parse_sw_model(sw_ver: Optional[str]) -> Optional[str]:
+    """
+    Extract the product model name from a sw_ver string (the word before the version).
+
+    Example: "FortiGate-600F v7.4.8,build2795,250523 (GA.M)"  →  "FortiGate-600F"
+    """
+    if not sw_ver:
+        return None
+    m = re.match(r"(\S+)\s+v\d+", sw_ver)
+    return m.group(1) if m else None
+
+
 def parse_speed_kbps(speed_str: Optional[str]) -> Optional[int]:
     """
     Parse Netdisco speed string to kbps for Netbox.
@@ -408,6 +434,7 @@ class NetboxClient:
         self,
         manufacturer: pynetbox.core.response.Record,
         model: str,
+        part_number: Optional[str] = None,
     ) -> pynetbox.core.response.Record:
         """Return an existing DeviceType or create one under manufacturer."""
         slug = slugify(model)
@@ -422,7 +449,7 @@ class NetboxClient:
             manufacturer=manufacturer.id,
             model=model,
             slug=slugify(model),
-            part_number=model,
+            part_number=part_number or model,
             comments="Created by discobox",
         )
         logger.debug("  DeviceType created: %s / %s", manufacturer.name, model)
@@ -1014,11 +1041,14 @@ def sync_device(
 
         def _update_device_type(ch: dict) -> None:
             """Update DeviceType (and serial) on nb_device from a chassis entry."""
-            model = ch.get("model", "")
+            part_number = ch.get("model", "")
             serial = ch.get("serial") or ""
             vendor_name = vendor_from_chassis(ch)
             mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
-            device_type = nb.get_or_create_device_type(mfr, model)
+            # Use product name from sw_ver as model when available (e.g. Fortinet:
+            # model=FGT_600F → part_number, sw_ver yields "FortiGate-600F" → model)
+            model = parse_sw_model(ch.get("sw_ver", "")) or part_number
+            device_type = nb.get_or_create_device_type(mfr, model, part_number=part_number)
             patch = {}
             if nb_device.device_type.id != device_type.id:
                 patch["device_type"] = device_type.id
@@ -1180,6 +1210,19 @@ def sync_device(
             mod_counts.get("updated", 0) + mod_counts.get("created", 0),
             mod_counts["unchanged"], mod_counts["error"],
         )
+
+        # Supplement os_version from chassis sw_ver when the device field was empty
+        # (e.g. Fortinet: "FortiGate-600F v7.4.8,build2795,250523 (GA.M)" → "7.4.8")
+        if not nd_device.get("os_ver"):
+            for ch in chassis:
+                ver = parse_sw_ver(ch.get("sw_ver", ""))
+                if ver:
+                    try:
+                        nb_device.update({"custom_fields": {"os_version": ver}})
+                        log.info("  OS version from chassis sw_ver: %s", ver)
+                    except Exception as exc:
+                        log.error("  OS version update error: %s", exc)
+                    break
 
         # PSUs — inventory items on the device (skip Unknown type with no model)
         psus = [
