@@ -109,6 +109,7 @@ modules_total = Counter(
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
 _AUTH_TOKEN: Optional[str] = os.getenv("DISCOBOX_AUTH_TOKEN")
+_METRICS_PATH: str = os.getenv("DISCOBOX_METRICS_PATH", "/metrics")
 
 # ── Sync defaults (overridable per-request) ────────────────────────────────────
 
@@ -280,7 +281,7 @@ async def sync(
     return SyncResponse(status="queued", host=resolved_host)
 
 
-@app.get("/metrics", include_in_schema=False)
+@app.get(_METRICS_PATH, include_in_schema=False)
 async def metrics() -> Response:
     return Response(content=generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
 
