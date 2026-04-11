@@ -20,7 +20,7 @@ import time
 from typing import Annotated, Optional
 
 import uvicorn
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, Response
 from prometheus_client import (
     CollectorRegistry,
@@ -110,6 +110,20 @@ modules_total = Counter(
 
 _AUTH_TOKEN: Optional[str] = os.getenv("DISCOBOX_AUTH_TOKEN")
 
+# ── Sync defaults (overridable per-request) ────────────────────────────────────
+
+def _flag(env: str) -> bool:
+    """Return True if env var is set to a truthy value."""
+    return os.getenv(env, "").lower() in ("1", "true", "yes")
+
+# DISCOBOX_NO_* disables a feature; DISCOBOX_HOUSEKEEPING enables it.
+_DEFAULT_MAC          = not _flag("DISCOBOX_NO_MAC")
+_DEFAULT_IP           = not _flag("DISCOBOX_NO_IP")
+_DEFAULT_MODULES      = not _flag("DISCOBOX_NO_MODULES")
+_DEFAULT_SFP          = not _flag("DISCOBOX_NO_SFP")
+_DEFAULT_POE          = not _flag("DISCOBOX_NO_POE")
+_DEFAULT_HOUSEKEEPING =     _flag("DISCOBOX_HOUSEKEEPING")
+
 
 async def require_auth(authorization: Annotated[str, Header()] = "") -> None:
     """Bearer token auth. Disabled if DISCOBOX_AUTH_TOKEN is not set."""
@@ -136,6 +150,12 @@ _in_flight_lock = threading.Lock()
 
 class SyncRequest(BaseModel):
     host: str
+    mac: bool = _DEFAULT_MAC
+    ip: bool = _DEFAULT_IP
+    modules: bool = _DEFAULT_MODULES
+    sfp: bool = _DEFAULT_SFP
+    poe: bool = _DEFAULT_POE
+    housekeeping: bool = _DEFAULT_HOUSEKEEPING
 
 
 class SyncResponse(BaseModel):
@@ -146,7 +166,7 @@ class SyncResponse(BaseModel):
 
 # ── Background sync ────────────────────────────────────────────────────────────
 
-def _run_sync(host: str) -> None:
+def _run_sync(host: str, mac: bool, ip: bool, modules: bool, sfp: bool, poe: bool, housekeeping: bool) -> None:
     """Run sync_device in a background thread and record metrics."""
     start = time.time()
     status = "error"
@@ -168,12 +188,12 @@ def _run_sync(host: str) -> None:
             nd=nd,
             nb=nb,
             ip=host,
-            sync_mac=True,
-            sync_ip=True,
-            sync_modules=True,
-            sync_sfp=True,
-            sync_poe=True,
-            housekeeping=False,
+            sync_mac=mac,
+            sync_ip=ip,
+            sync_modules=modules,
+            sync_sfp=sfp,
+            sync_poe=poe,
+            housekeeping=housekeeping,
         )
         status = "success" if result.get("ok") else "error"
     except Exception as exc:
@@ -207,14 +227,22 @@ def _run_sync(host: str) -> None:
     summary="Trigger a device sync",
 )
 async def sync(
+    request: Request,
     background_tasks: BackgroundTasks,
     host: Annotated[Optional[str], Query(description="Device management IP")] = None,
+    mac: Annotated[bool, Query(description="Sync MAC addresses")] = _DEFAULT_MAC,
+    ip: Annotated[bool, Query(description="Sync IP addresses")] = _DEFAULT_IP,
+    modules: Annotated[bool, Query(description="Sync module bays / modules")] = _DEFAULT_MODULES,
+    sfp: Annotated[bool, Query(description="Sync SFP inventory items")] = _DEFAULT_SFP,
+    poe: Annotated[bool, Query(description="Sync PoE mode")] = _DEFAULT_POE,
+    housekeeping: Annotated[bool, Query(description="Remove stale device bays and empty dummy interfaces")] = _DEFAULT_HOUSEKEEPING,
     body: Optional[SyncRequest] = None,
 ) -> SyncResponse:
     """
     Queue a sync for the given device IP.
 
     `host` can be passed as a query parameter or in the JSON body (POST only).
+    All flags default to their normal values; set to `false` to skip a step.
     Returns immediately (202); sync runs in the background.
     Duplicate requests for the same host are dropped.
     """
@@ -228,15 +256,27 @@ async def sync(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    # Body fields override query params when provided
+    if body:
+        mac = body.mac
+        ip = body.ip
+        modules = body.modules
+        sfp = body.sfp
+        poe = body.poe
+        housekeeping = body.housekeeping
+
+    caller = request.headers.get("x-forwarded-for", "").split(",")[0].strip() \
+             or (request.client.host if request.client else "unknown")
+
     with _in_flight_lock:
         if resolved_host in _in_flight:
-            logger.info("Sync for %s already in progress — skipping", resolved_host)
+            logger.info("hook  %s → %s  already in progress — skipping", caller, resolved_host)
             return SyncResponse(status="skipped", host=resolved_host, reason="already in progress")
         _in_flight.add(resolved_host)
 
     sync_in_progress.inc()
-    background_tasks.add_task(_run_sync, resolved_host)
-    logger.info("Sync queued for %s", resolved_host)
+    background_tasks.add_task(_run_sync, resolved_host, mac, ip, modules, sfp, poe, housekeeping)
+    logger.info("hook  %s → %s  queued", caller, resolved_host)
     return SyncResponse(status="queued", host=resolved_host)
 
 

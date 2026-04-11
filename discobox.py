@@ -990,13 +990,79 @@ def sync_device(
                     logger.error("  %-30s error: %s", ch.get("name", ""), exc)
 
         elif is_vss:
-            # Cat9500 StackWise Virtual — pos is already 1-indexed, use directly
-            for ch in chassis:
+            # Cat9500 StackWise Virtual — two physical devices in separate Netbox records.
+            # Create/update a Virtual Chassis to link them; no module bays on either device.
+            device_serial = nd_device.get("serial", "")
+            primary_ch = next((c for c in chassis if c.get("serial") == device_serial), chassis[0])
+            partner_chs = [c for c in chassis if c is not primary_ch]
+
+            # Update DeviceType for the primary (the device we're syncing right now)
+            try:
+                _update_device_type(primary_ch)
+            except Exception as exc:
+                mod_counts["error"] += 1
+                logger.error("  DeviceType update error (primary): %s", exc)
+
+            primary_pos = primary_ch.get("pos", 1)
+            vc_members: list[tuple] = [(nb_device, primary_pos)]
+
+            for partner_ch in partner_chs:
+                partner_serial = partner_ch.get("serial", "")
+                partner_pos = partner_ch.get("pos", 2)
+                partner_model = partner_ch.get("model", "")
+
+                # 1. Find partner by serial number
+                partner_dev = nb.find_device_by_serial(partner_serial) if partner_serial else None
+
+                # 2. Fallback: replace last number in primary hostname with partner pos
+                if not partner_dev and nd_hostname:
+                    partner_hostname = re.sub(r"\d+(?=\D*$)", str(partner_pos), nd_hostname)
+                    if partner_hostname != nd_hostname:
+                        results = list(nb.nb.dcim.devices.filter(name__ie=partner_hostname))
+                        if results:
+                            partner_dev = results[0]
+                            logger.info("  VSS partner found by hostname %r", partner_dev.name)
+
+                if not partner_dev:
+                    logger.warning(
+                        "  VSS partner not found (serial=%r) — Virtual Chassis will be incomplete",
+                        partner_serial,
+                    )
+                    mod_counts["error"] += 1
+                    continue
+
+                # Update DeviceType on the partner device
                 try:
-                    _upsert_chassis_bay(ch, slot_key=ch.get("pos"))
+                    vendor_name = vendor_from_chassis(partner_ch)
+                    mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
+                    partner_dt = nb.get_or_create_device_type(mfr, partner_model)
+                    patch: dict = {}
+                    if partner_dev.device_type.id != partner_dt.id:
+                        patch["device_type"] = partner_dt.id
+                    if partner_serial and (partner_dev.serial or "") != partner_serial:
+                        patch["serial"] = partner_serial
+                    if patch:
+                        partner_dev.update(patch)
+                        logger.info(
+                            "  VSS partner DeviceType → %s  serial=%s  updated",
+                            partner_model, partner_serial,
+                        )
+                        mod_counts["updated"] += 1
+                    else:
+                        mod_counts["unchanged"] += 1
                 except Exception as exc:
                     mod_counts["error"] += 1
-                    logger.error("  %-30s error: %s", ch.get("name", ""), exc)
+                    logger.error("  VSS partner DeviceType update error: %s", exc)
+
+                vc_members.append((partner_dev, partner_pos))
+
+            # Create/update Virtual Chassis linking both physical devices
+            vc_name = nd_hostname.split(".")[0] if nd_hostname else f"vc-{ip}"
+            try:
+                vc_action, _vc = nb.upsert_virtual_chassis(vc_name, vc_members)
+                logger.info("  VirtualChassis %r — %s", vc_name, vc_action)
+            except Exception as exc:
+                logger.error("  VirtualChassis error: %s", exc)
 
         else:
             # Traditional stack — create a module bay + module per chassis member.
