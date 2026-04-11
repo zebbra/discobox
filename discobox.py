@@ -221,7 +221,7 @@ class NetboxClient:
 
         if hostname:
             for dev in self.nb.dcim.devices.filter(name__ie=hostname):
-                logger.warning("Device not found by IP %s — matched by hostname %r", ip, dev.name)
+                logger.info("Device found by hostname %r (no IP match for %s)", dev.name, ip)
                 return dev
 
         return None
@@ -886,6 +886,8 @@ def sync_device(
 
     # slot_to_module populated during module sync; consumed by interface→module pass.
     slot_to_module: dict[int, int] = {}  # slot key (stack pos / FEX ID) → nb module id
+    # slot_to_device populated for VSS; used to route blades to the correct member device.
+    slot_to_device: dict[int, object] = {}  # VSS pos → nb device record
     topo = "standalone"                   # updated inside sync_modules block
 
     # ── Modules (before interfaces so bays exist when interfaces are assigned) ────
@@ -1072,6 +1074,10 @@ def sync_device(
             except Exception as exc:
                 logger.error("  VirtualChassis error: %s", exc)
 
+            # Build pos → device map so blades can be routed to the right member
+            for _dev, _pos in vc_members:
+                slot_to_device[_pos] = _dev
+
         else:
             # Traditional stack — create a module bay + module per chassis member.
             # Netdisco pos is 0-indexed; Cisco interface names are 1-indexed (Gi1/0/1 = member 1).
@@ -1119,6 +1125,50 @@ def sync_device(
         logger.info(
             "PSUs — created=%d updated=%d unchanged=%d errors=%d",
             psu_counts["created"], psu_counts["updated"], psu_counts["unchanged"], psu_counts["error"],
+        )
+
+        # Blades (linecards / supervisors) — module bay + module per slot.
+        # Only meaningful for VSS chassis; other topologies don't produce class=module entries.
+        blades = [
+            m for m in nd_mods
+            if m.get("class") == "module"
+            and m.get("model") and m.get("model") != "Unknown PID"
+            and m.get("serial")
+        ]
+        logger.info("Blades    entries: %d", len(blades))
+        blade_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
+        for blade in blades:
+            blade_name = blade.get("name", "")
+            blade_model = blade.get("model", "")
+            blade_serial = blade.get("serial", "")
+            # Extract slot number from name: "Switch 1 Slot 3 Supervisor" → 3
+            slot_match = re.search(r"Slot\s+(\d+)", blade_name, re.IGNORECASE)
+            position = slot_match.group(1) if slot_match else ""
+            # For VSS route to the correct member device via "Switch N" prefix
+            target_device = nb_device
+            if slot_to_device:
+                sw_match = re.match(r"Switch\s+(\d+)", blade_name, re.IGNORECASE)
+                if sw_match:
+                    target_device = slot_to_device.get(int(sw_match.group(1)), nb_device)
+            try:
+                vendor_name = vendor_from_chassis(blade)
+                mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
+                module_type = nb.get_or_create_module_type(mfr, blade_model)
+                bay = nb.upsert_module_bay(target_device, blade_name, position)
+                action, _ = nb.upsert_module(target_device, bay, module_type, blade_serial)
+                blade_counts[action] += 1
+                if action != "unchanged":
+                    logger.info("  Blade %s  model=%s  serial=%s  %s",
+                                blade_name, blade_model, blade_serial, action)
+                else:
+                    logger.debug("  Blade %-35s unchanged", blade_name)
+            except Exception as exc:
+                blade_counts["error"] += 1
+                logger.error("  Blade %-35s error: %s", blade_name, exc)
+
+        logger.info(
+            "Blades — created=%d updated=%d unchanged=%d errors=%d",
+            blade_counts["created"], blade_counts["updated"], blade_counts["unchanged"], blade_counts["error"],
         )
 
     # ── Interfaces ────────────────────────────────────────────────────────────────
