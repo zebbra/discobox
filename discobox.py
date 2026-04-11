@@ -903,15 +903,18 @@ def sync_device(
         # Nexus FEX topology: stack root is a logical fabric, not a real member stack.
         # The primary N9K chassis + satellite FEX units all appear as chassis entries.
         is_fex = has_stack and (stack_root.get("type", "").lower() == "cevcontainernexuslogicalfabric")
-        is_vss = has_stack and (stack_root.get("type", "").lower() == "cevc9500virtualstack")
+        is_vss = has_stack and (
+            "virtualstack" in stack_root.get("type", "").lower()
+            or "virtual stack" in stack_root.get("name", "").lower()
+        )
         is_standalone = not has_stack and len(chassis) == 1
 
         # Log tree
         root = next((m for m in nd_mods if not m.get("parent")), None)
         if root:
-            logger.info("  %s (root)  %r  model=%s  serial=%s",
+            logger.info("  %s (root)  %r  type=%s  model=%s  serial=%s",
                         root.get("class", "?"), root.get("name", ""),
-                        root.get("model", ""), root.get("serial", ""))
+                        root.get("type", ""), root.get("model", ""), root.get("serial", ""))
         for i, ch in enumerate(chassis):
             prefix = "└──" if i == len(chassis) - 1 else "├──"
             logger.info("  %s chassis  %r  model=%s  serial=%s",
