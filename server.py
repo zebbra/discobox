@@ -270,13 +270,13 @@ async def sync(
 
     with _in_flight_lock:
         if resolved_host in _in_flight:
-            logger.info("hook  %s → %s  already in progress — skipping", caller, resolved_host)
+            logger.info("hook from %s: %s  already in progress — skipping", caller, resolved_host)
             return SyncResponse(status="skipped", host=resolved_host, reason="already in progress")
         _in_flight.add(resolved_host)
 
     sync_in_progress.inc()
     background_tasks.add_task(_run_sync, resolved_host, mac, ip, modules, sfp, poe, housekeeping)
-    logger.info("hook  %s → %s  queued", caller, resolved_host)
+    logger.info("hook from %s: %s  queued", caller, resolved_host)
     return SyncResponse(status="queued", host=resolved_host)
 
 

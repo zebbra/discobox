@@ -702,6 +702,7 @@ DUMMY_INTERFACES: set[str] = {
 PORT_BLACKLIST_PREFIXES: tuple[str, ...] = (
     "null",
     "modem",
+    "bluetooth",
 )
 
 def vendor_from_chassis(chassis: dict) -> Optional[str]:
