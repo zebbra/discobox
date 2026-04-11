@@ -1018,14 +1018,18 @@ def sync_device(
                 # 1. Find partner by serial number
                 partner_dev = nb.find_device_by_serial(partner_serial) if partner_serial else None
 
-                # 2. Fallback: replace last number in primary hostname with partner pos
+                # 2. Fallback: append "-<pos>" before the domain suffix
+                #    e.g. "sw1.example.com" → "sw1-2.example.com"
                 if not partner_dev and nd_hostname:
-                    partner_hostname = re.sub(r"\d+(?=\D*$)", str(partner_pos), nd_hostname)
-                    if partner_hostname != nd_hostname:
-                        results = list(nb.nb.dcim.devices.filter(name__ie=partner_hostname))
-                        if results:
-                            partner_dev = results[0]
-                            logger.info("  VSS partner found by hostname %r", partner_dev.name)
+                    parts = nd_hostname.split(".", 1)
+                    if len(parts) > 1:
+                        partner_hostname = f"{parts[0]}-{partner_pos}.{parts[1]}"
+                    else:
+                        partner_hostname = f"{nd_hostname}-{partner_pos}"
+                    results = list(nb.nb.dcim.devices.filter(name__ie=partner_hostname))
+                    if results:
+                        partner_dev = results[0]
+                        logger.info("  VSS partner found by hostname %r", partner_dev.name)
 
                 if not partner_dev:
                     logger.warning(
