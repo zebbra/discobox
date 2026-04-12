@@ -1347,6 +1347,23 @@ def sync_device(
     else:
         vss_ifaces = {}
 
+    # For VSS, remove interfaces that ended up on the wrong member device in a prior run.
+    # e.g. TwentyFiveGigE2/1/0/47 sitting on Switch 1's device record.
+    if slot_to_device:
+        for pos, dev_ifaces in vss_ifaces.items():
+            for iface_name, iface in list(dev_ifaces.items()):
+                owner_pos = _slot_from_iface("vss", iface_name)
+                if owner_pos is not None and owner_pos != pos and owner_pos in slot_to_device:
+                    try:
+                        iface.delete()
+                        del dev_ifaces[iface_name]
+                        log.info(
+                            "  %-40s moved from Switch %d → Switch %d",
+                            iface_name, pos, owner_pos,
+                        )
+                    except Exception as exc:
+                        log.error("  %-40s could not remove from wrong VSS member: %s", iface_name, exc)
+
     existing_ifaces = nb.fetch_interfaces(nb_device.id)
     logger.debug("Netbox    existing interfaces: %d", len(existing_ifaces))
 
