@@ -1337,6 +1337,16 @@ def sync_device(
 
     # ── Interfaces ────────────────────────────────────────────────────────────────
 
+    # For VSS, build a per-member interface cache so each interface is created on the right device.
+    # slot_to_device is populated only for VSS; empty for all other topologies.
+    if slot_to_device:
+        vss_ifaces: dict[int, dict] = {
+            pos: nb.fetch_interfaces(dev.id)
+            for pos, dev in slot_to_device.items()
+        }
+    else:
+        vss_ifaces = {}
+
     existing_ifaces = nb.fetch_interfaces(nb_device.id)
     logger.debug("Netbox    existing interfaces: %d", len(existing_ifaces))
 
@@ -1352,7 +1362,14 @@ def sync_device(
             nb_data = port_to_netbox(port)
             if not sync_mac:
                 nb_data.pop("mac_address", None)
-            action = nb.upsert_interface(nb_device.id, nb_data, existing_ifaces.get(iface_name))
+            if slot_to_device:
+                sw_pos = _slot_from_iface("vss", iface_name)
+                target_id = slot_to_device[sw_pos].id if sw_pos in slot_to_device else nb_device.id
+                target_existing = vss_ifaces.get(sw_pos, existing_ifaces)
+            else:
+                target_id = nb_device.id
+                target_existing = existing_ifaces
+            action = nb.upsert_interface(target_id, nb_data, target_existing.get(iface_name))
             counts[action] += 1
             if action != "unchanged":
                 log.info("  %-40s %s", iface_name, action)
@@ -1366,28 +1383,39 @@ def sync_device(
         port.get("port") or port.get("descr") for port in nd_ports
         if not (port.get("port") or port.get("descr") or "").lower().startswith(PORT_BLACKLIST_PREFIXES)
     }
-    for name in existing_ifaces:
+    # For VSS, warn against all member devices' interfaces
+    all_existing: dict = {}
+    for d in vss_ifaces.values():
+        all_existing.update(d)
+    all_existing.update(existing_ifaces)
+    for name in all_existing:
         if name not in nd_names and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
             log.warning("  %-40s in Netbox but not in Netdisco", name)
 
     # Wire up parent links for subinterfaces (e.g. GigabitEthernet0/0/1.1132 → GigabitEthernet0/0/1)
-    all_ifaces = nb.fetch_interfaces(nb_device.id)
+    # For VSS, wire parents per member device (subinterface and parent are always on the same device).
+    member_iface_maps = (
+        [nb.fetch_interfaces(dev.id) for dev in slot_to_device.values()]
+        if slot_to_device
+        else [nb.fetch_interfaces(nb_device.id)]
+    )
     parent_updated = 0
-    for iface_name, iface in all_ifaces.items():
-        if "." not in iface_name:
-            continue
-        parent_name = iface_name.rsplit(".", 1)[0]
-        parent = all_ifaces.get(parent_name)
-        if not parent:
-            continue
-        current_parent = nb._nb_value(getattr(iface, "parent", None))
-        if current_parent != parent.id:
-            try:
-                iface.update({"parent": parent.id})
-                parent_updated += 1
-                log.debug("  %s → parent %s", iface_name, parent_name)
-            except Exception as exc:
-                log.error("  %s parent link error: %s", iface_name, exc)
+    for all_ifaces in member_iface_maps:
+        for iface_name, iface in all_ifaces.items():
+            if "." not in iface_name:
+                continue
+            parent_name = iface_name.rsplit(".", 1)[0]
+            parent = all_ifaces.get(parent_name)
+            if not parent:
+                continue
+            current_parent = nb._nb_value(getattr(iface, "parent", None))
+            if current_parent != parent.id:
+                try:
+                    iface.update({"parent": parent.id})
+                    parent_updated += 1
+                    log.debug("  %s → parent %s", iface_name, parent_name)
+                except Exception as exc:
+                    log.error("  %s parent link error: %s", iface_name, exc)
     if parent_updated:
         log.info("Subinterfaces — linked %d parent(s)", parent_updated)
 
@@ -1417,8 +1445,14 @@ def sync_device(
     # ── IPs ───────────────────────────────────────────────────────────────────────
 
     if sync_ip:
-        # Re-fetch interfaces so newly created ones have IDs
-        existing_ifaces = nb.fetch_interfaces(nb_device.id)
+        # Re-fetch interfaces so newly created ones have IDs.
+        # For VSS, merge all member devices' interfaces so IPs can be assigned across both switches.
+        if slot_to_device:
+            existing_ifaces = {}
+            for pos, dev in slot_to_device.items():
+                existing_ifaces.update(nb.fetch_interfaces(dev.id))
+        else:
+            existing_ifaces = nb.fetch_interfaces(nb_device.id)
         try:
             nd_ips = nd.get_device_ips(ip)
         except requests.HTTPError as exc:
