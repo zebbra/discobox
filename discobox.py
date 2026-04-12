@@ -1349,20 +1349,31 @@ def sync_device(
 
     # For VSS, remove interfaces that ended up on the wrong member device in a prior run.
     # e.g. TwentyFiveGigE2/1/0/47 sitting on Switch 1's device record.
+    # Delete subinterfaces (names containing ".") before parents to avoid Netbox cascade-delete
+    # causing a 404 when we try to explicitly delete the child afterwards.
     if slot_to_device:
         for pos, dev_ifaces in vss_ifaces.items():
-            for iface_name, iface in list(dev_ifaces.items()):
-                owner_pos = _slot_from_iface("vss", iface_name)
-                if owner_pos is not None and owner_pos != pos and owner_pos in slot_to_device:
-                    try:
-                        iface.delete()
-                        del dev_ifaces[iface_name]
-                        log.info(
-                            "  %-40s moved from Switch %d → Switch %d",
-                            iface_name, pos, owner_pos,
-                        )
-                    except Exception as exc:
-                        log.error("  %-40s could not remove from wrong VSS member: %s", iface_name, exc)
+            misplaced = [
+                (iface_name, iface, owner)
+                for iface_name, iface in dev_ifaces.items()
+                if (
+                    (owner := _slot_from_iface("vss", iface_name)) is not None
+                    and owner != pos
+                    and owner in slot_to_device
+                )
+            ]
+            # subinterfaces first — Netbox rejects deleting a parent that still has children
+            misplaced.sort(key=lambda x: (0 if "." in x[0] else 1))
+            for iface_name, iface, owner_pos in misplaced:
+                try:
+                    iface.delete()
+                    del dev_ifaces[iface_name]
+                    log.info(
+                        "  %-40s moved from Switch %d → Switch %d",
+                        iface_name, pos, owner_pos,
+                    )
+                except Exception as exc:
+                    log.error("  %-40s could not remove from wrong VSS member: %s", iface_name, exc)
 
     existing_ifaces = nb.fetch_interfaces(nb_device.id)
     logger.debug("Netbox    existing interfaces: %d", len(existing_ifaces))
