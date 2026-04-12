@@ -1059,13 +1059,21 @@ def sync_device(
 
         def _update_device_type(ch: dict) -> None:
             """Update DeviceType (and serial) on nb_device from a chassis entry."""
-            part_number = ch.get("model", "")
+            part_number = ch.get("model", "") or ""
             serial = ch.get("serial") or ""
+            # Skip device type update when model looks like a raw OID fragment
+            # (e.g. ".112.100.1003") — keep whatever is already set in Netbox.
+            model = parse_sw_model(ch.get("sw_ver", "")) or part_number
+            if not model or model.startswith("."):
+                if serial and (nb_device.serial or "") != serial:
+                    nb_device.update({"serial": serial})
+                    log.info("  serial=%s updated (no valid model from Netdisco)", serial)
+                else:
+                    log.debug("  DeviceType skipped — no valid model from Netdisco")
+                mod_counts["unchanged"] += 1
+                return
             vendor_name = vendor_from_chassis(ch)
             mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
-            # Use product name from sw_ver as model when available (e.g. Fortinet:
-            # model=FGT_600F → part_number, sw_ver yields "FortiGate-600F" → model)
-            model = parse_sw_model(ch.get("sw_ver", "")) or part_number
             device_type = nb.get_or_create_device_type(mfr, model, part_number=part_number)
             patch = {}
             if nb_device.device_type.id != device_type.id:
@@ -1537,6 +1545,7 @@ def sync_device(
         "ips": ip_counts if sync_ip else {},
         "modules": mod_counts if sync_modules else {},
         "sfps": sfp_counts if sync_sfp else {},
+        "ha_vip": vip_device is not None,
     }
 
 

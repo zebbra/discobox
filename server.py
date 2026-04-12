@@ -105,6 +105,22 @@ modules_total = Counter(
     ["action"],   # created | updated | unchanged | error
     registry=registry,
 )
+sfps_total = Counter(
+    "discobox_sfps_total",
+    "SFP inventory items processed across all syncs",
+    ["action"],   # created | updated | unchanged | error
+    registry=registry,
+)
+syncs_skipped_total = Counter(
+    "discobox_syncs_skipped_total",
+    "Sync requests dropped because the host was already being synced",
+    registry=registry,
+)
+ha_vip_total = Counter(
+    "discobox_ha_vip_total",
+    "HA VIP redirections detected and handled",
+    registry=registry,
+)
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -214,6 +230,10 @@ def _run_sync(host: str, mac: bool, ip: bool, modules: bool, sfp: bool, poe: boo
             ips_total.labels(action=action).inc(count)
         for action, count in result.get("modules", {}).items():
             modules_total.labels(action=action).inc(count)
+        for action, count in result.get("sfps", {}).items():
+            sfps_total.labels(action=action).inc(count)
+        if result.get("ha_vip"):
+            ha_vip_total.inc()
         logger.info("Sync %s for %s in %.1fs", status, host, elapsed)
 
 
@@ -272,6 +292,7 @@ async def sync(
     with _in_flight_lock:
         if resolved_host in _in_flight:
             logger.info("hook from %s: %s  already in progress — skipping", caller, resolved_host)
+            syncs_skipped_total.inc()
             return SyncResponse(status="skipped", host=resolved_host, reason="already in progress")
         _in_flight.add(resolved_host)
 
