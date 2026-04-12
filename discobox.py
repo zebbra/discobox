@@ -1263,9 +1263,15 @@ def sync_device(
             psu_name = psu.get("name", "")
             psu_model = psu.get("model", "")
             psu_serial = psu.get("serial", "")
+            # For VSS route to the correct member device via "Switch N" prefix
+            psu_target = nb_device
+            if slot_to_device:
+                sw_match = re.match(r"Switch\s+(\d+)", psu_name, re.IGNORECASE)
+                if sw_match:
+                    psu_target = slot_to_device.get(int(sw_match.group(1)), nb_device)
             try:
                 action = nb.upsert_inventory_item(
-                    nb_device, psu_name,
+                    psu_target, psu_name,
                     manufacturer if psu_model else None,
                     psu_model, psu_serial,
                 )
@@ -1471,20 +1477,36 @@ def sync_device(
         ]
         log.info("SFPs      entries: %d", len(sfps))
 
-        # Re-fetch interfaces to include anything created this run
-        existing_ifaces = nb.fetch_interfaces(nb_device.id)
+        # Re-fetch interfaces to include anything created this run.
+        # For VSS, build a per-member interface cache so Switch 2 SFPs land on the right device.
         manufacturer = nb_device.device_type.manufacturer
+        if slot_to_device:
+            sfp_ifaces_by_device: dict[int, dict] = {
+                pos: nb.fetch_interfaces(dev.id)
+                for pos, dev in slot_to_device.items()
+            }
+        else:
+            sfp_ifaces_by_device = {1: nb.fetch_interfaces(nb_device.id)}
 
         for sfp in sfps:
             name = sfp.get("name", "")
             model = sfp.get("model", "")
             serial = sfp.get("serial", "")
-            iface = existing_ifaces.get(expand_iface_name(name))
+            expanded = expand_iface_name(name)
+            # Determine which VSS member owns this interface (first digit run before first '/').
+            # e.g. GigabitEthernet2/0/1 → switch 2.  Falls back to pos 1 for standalone/stack.
+            sw_match = re.match(r"[A-Za-z-]+(\d+)/", expanded)
+            sw_pos = int(sw_match.group(1)) if sw_match and sw_match.group(1) in {
+                str(k) for k in sfp_ifaces_by_device
+            } else 1
+            target_ifaces = sfp_ifaces_by_device.get(sw_pos) or sfp_ifaces_by_device.get(1, {})
+            target_device = slot_to_device.get(sw_pos, nb_device) if slot_to_device else nb_device
+            iface = target_ifaces.get(expanded)
             if not iface:
                 log.warning("  SFP %-20s skipped — interface not in Netbox", name)
                 continue
             try:
-                action = nb.upsert_sfp(nb_device, iface, manufacturer, name, model, serial)
+                action = nb.upsert_sfp(target_device, iface, manufacturer, name, model, serial)
                 sfp_counts[action] += 1
                 if action != "unchanged":
                     log.info("  SFP %-20s model=%-20s serial=%s → %s", name, model, serial, action)
