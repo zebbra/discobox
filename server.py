@@ -62,14 +62,13 @@ _MULTIPROC_DIR = os.environ.get("PROMETHEUS_MULTIPROC_DIR", "")
 if _MULTIPROC_DIR:
     os.makedirs(_MULTIPROC_DIR, exist_ok=True)
 
-# Metrics use the default registry so prometheus_client can write to shared
-# files in multiprocess mode. A custom registry is used in single-worker mode
-# to avoid exposing irrelevant process/GC metrics.
-if _MULTIPROC_DIR:
-    _reg: dict = {}                        # no registry= → uses default (multiprocess-aware)
-else:
-    _custom_registry = CollectorRegistry()
-    _reg = {"registry": _custom_registry}
+# Always register metrics to a private registry so the default global REGISTRY
+# (and its built-in process/GC collectors) is never touched. In multiprocess mode,
+# prometheus_client writes metric values to files via _ValueClass regardless of
+# which registry the metric is attached to, so MultiProcessCollector at scrape
+# time picks them up correctly.
+_custom_registry = CollectorRegistry()
+_reg = {"registry": _custom_registry}
 
 hooks_received_total = Counter(
     "discobox_hooks_received_total",
