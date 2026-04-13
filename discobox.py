@@ -1460,11 +1460,8 @@ def sync_device(
                 bay = nb.upsert_module_bay(target_device, blade_name, position)
                 action, _ = nb.upsert_module(target_device, bay, module_type, blade_serial)
                 blade_counts[action] += 1
-                if action != "unchanged":
-                    log.info("  Blade %s  model=%s  serial=%s  %s",
-                                blade_name, blade_model, blade_serial, action)
-                else:
-                    log.debug("  Blade %-35s unchanged", blade_name)
+                log.info("  Blade %s  model=%s  serial=%s  %s",
+                            blade_name, blade_model, blade_serial, action)
             except Exception as exc:
                 blade_counts["error"] += 1
                 log.error("  Blade %-35s error: %s", blade_name, exc)
@@ -1516,6 +1513,40 @@ def sync_device(
 
     existing_ifaces = nb.fetch_interfaces(nb_device.id)
 
+    nd_names = {
+        port.get("port") or port.get("descr") for port in nd_ports
+        if not (port.get("port") or port.get("descr") or "").lower().startswith(PORT_BLACKLIST_PREFIXES)
+    }
+
+    # Orphan pass — runs before interface sync so stale/template-generated interfaces
+    # are removed before we try to create the real ones from Netdisco.
+    # Also evict deleted entries from the in-memory caches so the interface loop
+    # treats them as new creates rather than updates.
+    all_existing: dict = {}
+    for d in vss_ifaces.values():
+        all_existing.update(d)
+    all_existing.update(existing_ifaces)
+    orphaned_deleted = 0
+    orphaned_errors = 0
+    for name, iface in list(all_existing.items()):
+        if name not in nd_names and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
+            if housekeeping:
+                try:
+                    iface.delete()
+                    orphaned_deleted += 1
+                    log.info("  %-40s deleted (not in Netdisco)", name)
+                    # Evict from caches so the interface loop doesn't see a stale record
+                    existing_ifaces.pop(name, None)
+                    for m in vss_ifaces.values():
+                        m.pop(name, None)
+                except Exception as exc:
+                    orphaned_errors += 1
+                    log.error("  %-40s could not delete orphan: %s", name, exc)
+            else:
+                log.warning("  %-40s in Netbox but not in Netdisco", name)
+    if housekeeping and (orphaned_deleted or orphaned_errors):
+        log.info("Orphaned interfaces — deleted=%d errors=%d", orphaned_deleted, orphaned_errors)
+
     # Sort: parent interfaces before subinterfaces (dot-notation) so parents exist when children are created
     nd_ports_sorted = sorted(nd_ports, key=lambda p: (1 if "." in (p.get("port") or p.get("descr") or "") else 0))
     log.info("Interfaces  entries: %d  existing: %d", len(nd_ports_sorted), len(existing_ifaces))
@@ -1545,32 +1576,6 @@ def sync_device(
         except Exception as exc:
             counts["error"] += 1
             log.error("  %-40s error: %s", iface_name, exc)
-
-    nd_names = {
-        port.get("port") or port.get("descr") for port in nd_ports
-        if not (port.get("port") or port.get("descr") or "").lower().startswith(PORT_BLACKLIST_PREFIXES)
-    }
-    # For VSS, check against all member devices' interfaces
-    all_existing: dict = {}
-    for d in vss_ifaces.values():
-        all_existing.update(d)
-    all_existing.update(existing_ifaces)
-    orphaned_deleted = 0
-    orphaned_errors = 0
-    for name, iface in all_existing.items():
-        if name not in nd_names and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
-            if housekeeping:
-                try:
-                    iface.delete()
-                    orphaned_deleted += 1
-                    log.info("  %-40s deleted (not in Netdisco)", name)
-                except Exception as exc:
-                    orphaned_errors += 1
-                    log.error("  %-40s could not delete orphan: %s", name, exc)
-            else:
-                log.warning("  %-40s in Netbox but not in Netdisco", name)
-    if housekeeping and (orphaned_deleted or orphaned_errors):
-        log.info("Orphaned interfaces — deleted=%d errors=%d", orphaned_deleted, orphaned_errors)
 
     # Wire up parent links for subinterfaces (e.g. GigabitEthernet0/0/1.1132 → GigabitEthernet0/0/1)
     # For VSS, wire parents per member device (subinterface and parent are always on the same device).
