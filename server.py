@@ -127,6 +127,12 @@ device_sync_duration = Gauge(
     ["instance"],
     registry=registry,
 )
+device_sync_timestamp = Gauge(
+    "discobox_device_last_sync_timestamp_seconds",
+    "Unix timestamp of the last completed sync for each device",
+    ["instance"],
+    registry=registry,
+)
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -231,9 +237,12 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
         sync_in_progress.dec()
         with _in_flight_lock:
             _in_flight.discard(host)
-        # Per-device duration — label matches instance convention used by SNMP exporters
-        instance = result.get("hostname") or host
-        device_sync_duration.labels(instance=instance).set(elapsed)
+        # Per-device metrics — only on success so a persistently failing device
+        # goes stale and timestamp-based alerts fire correctly.
+        if status == "success":
+            instance = result.get("hostname") or host
+            device_sync_duration.labels(instance=instance).set(elapsed)
+            device_sync_timestamp.labels(instance=instance).set(start)
         # Record per-action counts from result dict
         for action, count in result.get("interfaces", {}).items():
             interfaces_total.labels(action=action).inc(count)
