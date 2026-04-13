@@ -22,14 +22,7 @@ from typing import Annotated, Optional
 import uvicorn
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, Response
-from prometheus_client import (
-    CollectorRegistry,
-    Counter,
-    Gauge,
-    Histogram,
-    generate_latest,
-    CONTENT_TYPE_LATEST,
-)
+from prometheus_client import Counter, Gauge, Histogram, CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST
 from pydantic import BaseModel
 
 from discobox import NetboxClient, NetdiscoClient, sync_device, validate_ip
@@ -60,78 +53,93 @@ _UVICORN_LOG_CONFIG = {
 }
 
 # ── Prometheus metrics ─────────────────────────────────────────────────────────
-# Cardinality note: with ~30k hosts, per-host labels are avoided on gauges and
-# histograms. Per-host last-sync info is served via /health JSON instead.
+# Multi-worker support: set PROMETHEUS_MULTIPROC_DIR to a writable directory so
+# all uvicorn workers share metrics via the filesystem. Without it, each worker
+# has its own in-memory state and the scrape target rotates between them.
 
-registry = CollectorRegistry()
+_MULTIPROC_DIR = os.environ.get("PROMETHEUS_MULTIPROC_DIR", "")
+if _MULTIPROC_DIR:
+    os.makedirs(_MULTIPROC_DIR, exist_ok=True)
+
+# Metrics use the default registry so prometheus_client can write to shared
+# files in multiprocess mode. A custom registry is used in single-worker mode
+# to avoid exposing irrelevant process/GC metrics.
+if _MULTIPROC_DIR:
+    _reg: dict = {}                        # no registry= → uses default (multiprocess-aware)
+else:
+    _custom_registry = CollectorRegistry()
+    _reg = {"registry": _custom_registry}
 
 hooks_received_total = Counter(
     "discobox_hooks_received_total",
     "Total webhook POST /sync calls received (including skipped/invalid)",
-    registry=registry,
+    **_reg,
 )
 syncs_total = Counter(
     "discobox_syncs_total",
     "Completed device syncs",
-    ["status"],   # success | error — no host label
-    registry=registry,
+    ["status"],   # success | error
+    **_reg,
 )
 sync_duration = Histogram(
     "discobox_sync_duration_seconds",
     "Time spent syncing a device",
     buckets=[5, 10, 30, 60, 120, 300],
-    registry=registry,
+    **_reg,
 )
 sync_in_progress = Gauge(
     "discobox_sync_in_progress",
     "Number of device syncs currently running",
-    registry=registry,
+    multiprocess_mode="livesum",
+    **_reg,
 )
 interfaces_total = Counter(
     "discobox_interfaces_total",
     "Interfaces processed across all syncs",
     ["action"],   # created | updated | unchanged | error
-    registry=registry,
+    **_reg,
 )
 ips_total = Counter(
     "discobox_ips_total",
     "IP addresses processed across all syncs",
     ["action"],   # created | fixed | moved | unchanged | skipped | error
-    registry=registry,
+    **_reg,
 )
 modules_total = Counter(
     "discobox_modules_total",
     "Modules processed across all syncs",
     ["action"],   # created | updated | unchanged | error
-    registry=registry,
+    **_reg,
 )
 sfps_total = Counter(
     "discobox_sfps_total",
     "SFP inventory items processed across all syncs",
     ["action"],   # created | updated | unchanged | error
-    registry=registry,
+    **_reg,
 )
 syncs_skipped_total = Counter(
     "discobox_syncs_skipped_total",
     "Sync requests dropped because the host was already being synced",
-    registry=registry,
+    **_reg,
 )
 ha_vip_total = Counter(
     "discobox_ha_vip_total",
     "HA VIP redirections detected and handled",
-    registry=registry,
+    **_reg,
 )
 device_sync_duration = Gauge(
     "discobox_device_last_sync_duration_seconds",
     "Duration of the last completed sync for each device",
     ["instance"],
-    registry=registry,
+    multiprocess_mode="liveall",
+    **_reg,
 )
 device_sync_timestamp = Gauge(
     "discobox_device_last_sync_timestamp_seconds",
     "Unix timestamp of the last completed sync for each device",
     ["instance"],
-    registry=registry,
+    multiprocess_mode="liveall",
+    **_reg,
 )
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
