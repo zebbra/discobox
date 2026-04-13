@@ -66,6 +66,7 @@ def main() -> None:
         sync_sfp=not args.no_sfp,
         sync_poe=not args.no_poe,
         housekeeping=args.housekeeping,
+        vip_mode=os.getenv("DISCOBOX_VIP_MODE", "soft").lower(),
     )
     sys.exit(0 if result["ok"] else 1)
 

@@ -404,6 +404,16 @@ class NetboxClient:
                 nb_ip.update({"address": address})
                 return "fixed"
 
+            # Unassigned IP (e.g. after VIP device was deleted) — claim it
+            if not nb_ip.assigned_object:
+                nb_ip.update({
+                    "address": address,
+                    "assigned_object_type": "dcim.interface",
+                    "assigned_object_id": iface.id,
+                })
+                logger.info("  IP %-20s was unassigned → assigned to %s", address, iface.name)
+                return "moved"
+
             # Check if the IP is on a dummy placeholder interface
             assigned_name = (
                 nb_ip.assigned_object.name
@@ -638,9 +648,12 @@ class NetboxClient:
         self,
         device: pynetbox.core.response.Record,
         dummy_names: set[str],
+        nd_port_names: set[str] | None = None,
     ) -> int:
         """
-        Delete dummy placeholder interfaces that have no IPs assigned.
+        Delete dummy placeholder interfaces that have no IPs assigned and do not
+        appear in Netdisco's port list (interfaces present in Netdisco are real,
+        not placeholders, regardless of their name).
 
         Safe to run after IP sync — if the IP was moved to the real interface
         the dummy is now empty and can be removed.
@@ -649,8 +662,14 @@ class NetboxClient:
         """
         deleted = 0
         lower_names = {n.lower() for n in dummy_names}
+        nd_lower = {n.lower() for n in (nd_port_names or set())}
         for iface in self.nb.dcim.interfaces.filter(device_id=device.id):
             if iface.name.lower() not in lower_names:
+                continue
+            if iface.name.lower() in nd_lower:
+                logger.debug(
+                    "  Dummy interface %r exists in Netdisco — keeping", iface.name,
+                )
                 continue
             ips = list(self.nb.ipam.ip_addresses.filter(
                 assigned_object_type="dcim.interface",
@@ -894,6 +913,42 @@ def port_to_netbox(port: dict) -> dict:
 
 # ── Sync logic ─────────────────────────────────────────────────────────────────
 
+def _handle_vip_device(
+    nb: "NetboxClient",
+    vip_dev: "pynetbox.core.response.Record",
+    vip_mode: str,
+    log: logging.Logger,
+) -> None:
+    """
+    Handle a VIP/cluster placeholder device according to vip_mode:
+
+    soft (default) — clear primary_ip4 and unassign all IPs from the device's
+                     interfaces so they can be claimed by the physical nodes on
+                     the next IP sync. Device record is kept.
+    hard           — delete the device entirely (implies soft cleanup first).
+    off            — do nothing.
+    """
+    if vip_mode == "off":
+        return
+    try:
+        if getattr(vip_dev, "primary_ip4", None):
+            vip_dev.update({"primary_ip4": None})
+        for iface in nb.nb.dcim.interfaces.filter(device_id=vip_dev.id):
+            for ip in nb.nb.ipam.ip_addresses.filter(
+                assigned_object_type="dcim.interface",
+                assigned_object_id=iface.id,
+            ):
+                ip.update({"assigned_object_type": None, "assigned_object_id": None})
+                log.info("VIP device %r — unassigned IP %s", vip_dev.name, ip.address)
+        if vip_mode == "hard":
+            nb.nb.dcim.devices.get(vip_dev.id).delete()
+            log.info("VIP device %r deleted (hard mode)", vip_dev.name)
+        else:
+            log.info("VIP device %r — IPs freed (soft mode)", vip_dev.name)
+    except Exception as exc:
+        log.error("VIP device %r handling error: %s", vip_dev.name, exc)
+
+
 def sync_device(
     ip: str,
     nd: NetdiscoClient,
@@ -904,6 +959,7 @@ def sync_device(
     sync_sfp: bool = True,
     sync_poe: bool = True,
     housekeeping: bool = False,
+    vip_mode: str = "soft",   # soft | hard | off
 ) -> dict:
     """
     Sync device fields, interfaces, MACs, IPs, modules, and SFPs.
@@ -991,13 +1047,7 @@ def sync_device(
                 except Exception as exc:
                     log.error("HA VirtualChassis error: %s", exc)
 
-                # Delete VIP device (only during housekeeping — it's destructive)
-                if housekeeping:
-                    try:
-                        nb.nb.dcim.devices.get(vip_device.id).delete()
-                        log.info("Deleted VIP device %r (id=%s)", vip_device.name, vip_device.id)
-                    except Exception as exc:
-                        log.error("Could not delete VIP device %r: %s", vip_device.name, exc)
+                _handle_vip_device(nb, vip_device, vip_mode, log)
             else:
                 log.warning(
                     "Hostname mismatch for %s — Netdisco=%r  Netbox=%r",
@@ -1029,11 +1079,26 @@ def sync_device(
                 except Exception as exc:
                     log.error("HA peer VirtualChassis error: %s", exc)
 
+                # Handle VIP device (e.g. p0h): free its IPs or delete it, per vip_mode.
+                # Derive the VIP hostname by replacing the node number with 0.
+                if vip_mode != "off":
+                    domain = nb_device.name[len(short):]
+                    vip_short = short[:ha_m.start(2)] + "0" + short[ha_m.end(2):]
+                    for candidate in (vip_short + domain, vip_short):
+                        vip_results = list(nb.nb.dcim.devices.filter(name__ie=candidate))
+                        if vip_results:
+                            _handle_vip_device(nb, vip_results[0], vip_mode, log)
+                            break
+
     nb.update_device_fields(nb_device, nd_device)
 
     if housekeeping:
         deleted_bays = nb.remove_stale_device_bays(nb_device, STALE_DEVICE_BAY_PATTERNS)
-        deleted_ifaces = nb.remove_empty_dummy_interfaces(nb_device, DUMMY_INTERFACES)
+        nd_port_names = {
+            p.get("port") or p.get("descr") for p in nd_ports
+            if p.get("port") or p.get("descr")
+        }
+        deleted_ifaces = nb.remove_empty_dummy_interfaces(nb_device, DUMMY_INTERFACES, nd_port_names)
         log.info(
             "Housekeeping — deleted %d stale device bay(s), %d empty dummy interface(s)",
             deleted_bays, deleted_ifaces,
@@ -1542,8 +1607,16 @@ def sync_device(
                 elif action == "unchanged":
                     log.debug("  IP %-20s → unchanged on %s", address, port_name)
             except Exception as exc:
-                ip_counts["error"] += 1
-                log.error("  IP %-20s on %-30s error: %s", address, port_name, exc)
+                if "primary IP" in str(exc):
+                    ip_counts["skipped"] += 1
+                    log.warning(
+                        "  IP %-20s on %-30s skipped — designated primary IP of another device"
+                        " (enable housekeeping to remove the VIP device first)",
+                        address, port_name,
+                    )
+                else:
+                    ip_counts["error"] += 1
+                    log.error("  IP %-20s on %-30s error: %s", address, port_name, exc)
 
         log.info(
             "IPs — created=%d fixed=%d moved=%d unchanged=%d skipped=%d errors=%d",

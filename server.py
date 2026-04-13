@@ -140,6 +140,7 @@ _DEFAULT_MODULES      = not _flag("DISCOBOX_NO_MODULES")
 _DEFAULT_SFP          = not _flag("DISCOBOX_NO_SFP")
 _DEFAULT_POE          = not _flag("DISCOBOX_NO_POE")
 _DEFAULT_HOUSEKEEPING =     _flag("DISCOBOX_HOUSEKEEPING")
+_VIP_MODE: str = os.getenv("DISCOBOX_VIP_MODE", "soft").lower()  # soft | hard | off
 
 
 async def require_auth(authorization: Annotated[str, Header()] = "") -> None:
@@ -211,6 +212,7 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             sync_sfp=sync_sfp,
             sync_poe=sync_poe,
             housekeeping=housekeeping,
+            vip_mode=_VIP_MODE,
         )
         status = "success" if result.get("ok") else "error"
     except Exception as exc:
