@@ -1617,17 +1617,24 @@ def sync_device(
             blade_name = blade.get("name", "")
             blade_model = blade.get("model", "")
             blade_serial = blade.get("serial", "")
-            # Extract slot/position from name.
-            # Try "Slot N" first (linecards), then "Module N" (FRU uplink modules).
-            pos_match = re.search(r"Slot\s+(\d+)", blade_name, re.IGNORECASE) \
-                     or re.search(r"Module\s+(\d+)", blade_name, re.IGNORECASE)
-            position = pos_match.group(1) if pos_match else ""
-            # For VSS route to the correct member device via "Switch N" prefix
+            # Extract slot/position and route to the correct device.
+            # VSS: each member is a separate Netbox device → route via "Switch N".
+            # Stack: single Netbox device, so use the switch number AS the position so
+            # each member's uplink module gets a unique slot and the module type
+            # template generates distinct interface names (Te2/1/8 for Switch 2, etc.).
             target_device = nb_device
-            if slot_to_device:
-                sw_match = re.match(r"Switch\s+(\d+)", blade_name, re.IGNORECASE)
-                if sw_match:
-                    target_device = slot_to_device.get(int(sw_match.group(1)), nb_device)
+            sw_match = re.match(r"Switch\s+(\d+)", blade_name, re.IGNORECASE)
+            if sw_match and slot_to_device:
+                # VSS — route blade to the right member device; position within that device
+                target_device = slot_to_device.get(int(sw_match.group(1)), nb_device)
+                sw_match = None  # fall through to Slot/Module extraction below
+            if sw_match:
+                # Stack — switch number doubles as the module bay position
+                position = sw_match.group(1)
+            else:
+                m = re.search(r"Slot\s+(\d+)", blade_name, re.IGNORECASE) \
+                 or re.search(r"Module\s+(\d+)", blade_name, re.IGNORECASE)
+                position = m.group(1) if m else ""
             try:
                 vendor_name = vendor_from_chassis(blade)
                 mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
