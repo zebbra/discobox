@@ -1135,7 +1135,7 @@ def sync_device(
                     log.error("HA peer VirtualChassis error: %s", exc)
 
                 if found_vip_dev:
-                    _handle_vip_device(nb, found_vip_dev, vip_mode, log)
+                    _handle_vip_device(nb, found_vip_dev, vip_mode, log, active_device=nb_device)
 
     nb.update_device_fields(nb_device, nd_device)
 
