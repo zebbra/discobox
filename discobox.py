@@ -922,13 +922,25 @@ def _handle_vip_device(
     """
     Handle a VIP/cluster placeholder device according to vip_mode:
 
-    soft (default) — clear primary_ip4 and unassign all IPs from the device's
+    threenode      — keep the device as a VC member; set role=vip on its primary_ip4.
+    soft           — clear primary_ip4 and unassign all IPs from the device's
                      interfaces so they can be claimed by the physical nodes on
                      the next IP sync. Device record is kept.
     hard           — delete the device entirely (implies soft cleanup first).
     off            — do nothing.
     """
     if vip_mode == "off":
+        return
+    if vip_mode == "threenode":
+        try:
+            primary = getattr(vip_dev, "primary_ip4", None)
+            if primary:
+                ip_obj = nb.nb.ipam.ip_addresses.get(primary.id)
+                if ip_obj and getattr(ip_obj, "role", None) != "vip":
+                    ip_obj.update({"role": "vip"})
+                    log.info("VIP device %r — primary IP %s role set to vip", vip_dev.name, ip_obj.address)
+        except Exception as exc:
+            log.error("VIP device %r — could not set primary IP role: %s", vip_dev.name, exc)
         return
     try:
         if getattr(vip_dev, "primary_ip4", None):
@@ -1054,8 +1066,7 @@ def sync_device(
                 except Exception as exc:
                     log.error("HA VirtualChassis error: %s", exc)
 
-                if vip_mode != "threenode":
-                    _handle_vip_device(nb, vip_device, vip_mode, log)
+                _handle_vip_device(nb, vip_device, vip_mode, log)
             else:
                 log.warning(
                     "Hostname mismatch for %s — Netdisco=%r  Netbox=%r",
@@ -1102,7 +1113,7 @@ def sync_device(
                 except Exception as exc:
                     log.error("HA peer VirtualChassis error: %s", exc)
 
-                if found_vip_dev and vip_mode not in ("threenode", "off"):
+                if found_vip_dev:
                     _handle_vip_device(nb, found_vip_dev, vip_mode, log)
 
     nb.update_device_fields(nb_device, nd_device)
