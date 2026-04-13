@@ -132,14 +132,14 @@ device_sync_duration = Gauge(
     "discobox_device_last_sync_duration_seconds",
     "Duration of the last completed sync for each device",
     ["instance"],
-    multiprocess_mode="liveall",
+    multiprocess_mode="livemax",
     **_reg,
 )
 device_sync_timestamp = Gauge(
     "discobox_device_last_sync_timestamp_seconds",
     "Unix timestamp of the last completed sync for each device",
     ["instance"],
-    multiprocess_mode="liveall",
+    multiprocess_mode="livemax",
     **_reg,
 )
 
