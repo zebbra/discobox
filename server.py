@@ -167,11 +167,11 @@ _in_flight_lock = threading.Lock()
 
 class SyncRequest(BaseModel):
     host: str
-    mac: bool = _DEFAULT_MAC
-    ip: bool = _DEFAULT_IP
-    modules: bool = _DEFAULT_MODULES
-    sfp: bool = _DEFAULT_SFP
-    poe: bool = _DEFAULT_POE
+    sync_mac: bool = _DEFAULT_MAC
+    sync_ip: bool = _DEFAULT_IP
+    sync_modules: bool = _DEFAULT_MODULES
+    sync_sfp: bool = _DEFAULT_SFP
+    sync_poe: bool = _DEFAULT_POE
     housekeeping: bool = _DEFAULT_HOUSEKEEPING
 
 
@@ -183,7 +183,7 @@ class SyncResponse(BaseModel):
 
 # ── Background sync ────────────────────────────────────────────────────────────
 
-def _run_sync(host: str, mac: bool, ip: bool, modules: bool, sfp: bool, poe: bool, housekeeping: bool) -> None:
+def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync_sfp: bool, sync_poe: bool, housekeeping: bool) -> None:
     """Run sync_device in a background thread and record metrics."""
     start = time.time()
     status = "error"
@@ -205,11 +205,11 @@ def _run_sync(host: str, mac: bool, ip: bool, modules: bool, sfp: bool, poe: boo
             nd=nd,
             nb=nb,
             ip=host,
-            sync_mac=mac,
-            sync_ip=ip,
-            sync_modules=modules,
-            sync_sfp=sfp,
-            sync_poe=poe,
+            sync_mac=sync_mac,
+            sync_ip=sync_ip,
+            sync_modules=sync_modules,
+            sync_sfp=sync_sfp,
+            sync_poe=sync_poe,
             housekeeping=housekeeping,
         )
         status = "success" if result.get("ok") else "error"
@@ -251,11 +251,11 @@ async def sync(
     request: Request,
     background_tasks: BackgroundTasks,
     host: Annotated[Optional[str], Query(description="Device management IP")] = None,
-    mac: Annotated[bool, Query(description="Sync MAC addresses")] = _DEFAULT_MAC,
-    ip: Annotated[bool, Query(description="Sync IP addresses")] = _DEFAULT_IP,
-    modules: Annotated[bool, Query(description="Sync module bays / modules")] = _DEFAULT_MODULES,
-    sfp: Annotated[bool, Query(description="Sync SFP inventory items")] = _DEFAULT_SFP,
-    poe: Annotated[bool, Query(description="Sync PoE mode")] = _DEFAULT_POE,
+    sync_mac: Annotated[bool, Query(description="Sync MAC addresses")] = _DEFAULT_MAC,
+    sync_ip: Annotated[bool, Query(description="Sync IP addresses")] = _DEFAULT_IP,
+    sync_modules: Annotated[bool, Query(description="Sync module bays / modules")] = _DEFAULT_MODULES,
+    sync_sfp: Annotated[bool, Query(description="Sync SFP inventory items")] = _DEFAULT_SFP,
+    sync_poe: Annotated[bool, Query(description="Sync PoE mode")] = _DEFAULT_POE,
     housekeeping: Annotated[bool, Query(description="Remove stale device bays and empty dummy interfaces")] = _DEFAULT_HOUSEKEEPING,
     body: Optional[SyncRequest] = None,
 ) -> SyncResponse:
@@ -279,11 +279,11 @@ async def sync(
 
     # Body fields override query params when provided
     if body:
-        mac = body.mac
-        ip = body.ip
-        modules = body.modules
-        sfp = body.sfp
-        poe = body.poe
+        sync_mac = body.sync_mac
+        sync_ip = body.sync_ip
+        sync_modules = body.sync_modules
+        sync_sfp = body.sync_sfp
+        sync_poe = body.sync_poe
         housekeeping = body.housekeeping
 
     caller = request.headers.get("x-forwarded-for", "").split(",")[0].strip() \
@@ -297,7 +297,7 @@ async def sync(
         _in_flight.add(resolved_host)
 
     sync_in_progress.inc()
-    background_tasks.add_task(_run_sync, resolved_host, mac, ip, modules, sfp, poe, housekeeping)
+    background_tasks.add_task(_run_sync, resolved_host, sync_mac, sync_ip, sync_modules, sync_sfp, sync_poe, housekeeping)
     logger.info("hook from %s: %s  queued", caller, resolved_host)
     return SyncResponse(status="queued", host=resolved_host)
 
