@@ -601,6 +601,9 @@ class NetboxClient:
             if patch:
                 device.update(patch)
                 action = action if action == "created" else "updated"
+                logger.info("  VC member %-40s pos=%d  updated", device.name, position)
+            else:
+                logger.info("  VC member %-40s pos=%d  unchanged", device.name, position)
         return action, vc
 
     def remove_stale_device_bays(
@@ -1019,7 +1022,10 @@ def sync_device(
                 vc_members = [(nb_device, node_num), (partner_dev, partner_num)]
                 try:
                     vc_action, _ = nb.upsert_virtual_chassis(vc_name, vc_members)
-                    log.info("HA peer VirtualChassis %r — %s", vc_name, vc_action)
+                    log.info(
+                        "HA peer VirtualChassis %r — %s  (topology=standalone per Netdisco; VC is Netbox-side)",
+                        vc_name, vc_action,
+                    )
                 except Exception as exc:
                     log.error("HA peer VirtualChassis error: %s", exc)
 
