@@ -1429,6 +1429,70 @@ def sync_device(
             psu_counts["created"], psu_counts["updated"], psu_counts["unchanged"], psu_counts["error"],
         )
 
+        # Pre-blade orphan pass — fetch existing interfaces and delete any that are not
+        # in Netdisco before blade sync fires, so Netbox's template auto-creation doesn't
+        # hit duplicate-key errors on stale / wrongly-named interfaces.
+        if slot_to_device:
+            vss_ifaces: dict[int, dict] = {
+                pos: nb.fetch_interfaces(dev.id)
+                for pos, dev in slot_to_device.items()
+            }
+            # Remove interfaces sitting on the wrong VSS member device from a prior run.
+            # Subinterfaces first to avoid Netbox cascade-delete causing a 404 on the child.
+            for pos, dev_ifaces in vss_ifaces.items():
+                misplaced = [
+                    (iface_name, iface, owner)
+                    for iface_name, iface in dev_ifaces.items()
+                    if (
+                        (owner := _slot_from_iface("vss", iface_name)) is not None
+                        and owner != pos
+                        and owner in slot_to_device
+                    )
+                ]
+                misplaced.sort(key=lambda x: (0 if "." in x[0] else 1))
+                for iface_name, iface, owner_pos in misplaced:
+                    try:
+                        iface.delete()
+                        del dev_ifaces[iface_name]
+                        log.info("  %-40s moved from Switch %d → Switch %d",
+                                 iface_name, pos, owner_pos)
+                    except Exception as exc:
+                        log.error("  %-40s could not remove from wrong VSS member: %s",
+                                  iface_name, exc)
+        else:
+            vss_ifaces = {}
+
+        existing_ifaces = nb.fetch_interfaces(nb_device.id)
+
+        nd_names = {
+            port.get("port") or port.get("descr") for port in nd_ports
+            if not (port.get("port") or port.get("descr") or "").lower().startswith(PORT_BLACKLIST_PREFIXES)
+        }
+
+        all_existing: dict = {}
+        for d in vss_ifaces.values():
+            all_existing.update(d)
+        all_existing.update(existing_ifaces)
+        orphaned_deleted = 0
+        orphaned_errors = 0
+        for name, iface in list(all_existing.items()):
+            if name not in nd_names and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
+                if housekeeping:
+                    try:
+                        iface.delete()
+                        orphaned_deleted += 1
+                        log.info("  %-40s deleted (not in Netdisco)", name)
+                        existing_ifaces.pop(name, None)
+                        for m in vss_ifaces.values():
+                            m.pop(name, None)
+                    except Exception as exc:
+                        orphaned_errors += 1
+                        log.error("  %-40s could not delete orphan: %s", name, exc)
+                else:
+                    log.warning("  %-40s in Netbox but not in Netdisco", name)
+        if housekeeping and (orphaned_deleted or orphaned_errors):
+            log.info("Orphaned interfaces — deleted=%d errors=%d", orphaned_deleted, orphaned_errors)
+
         # Blades (linecards / supervisors) — module bay + module per slot.
         # Only meaningful for VSS chassis; other topologies don't produce class=module entries.
         blades = [
@@ -1473,79 +1537,42 @@ def sync_device(
 
     # ── Interfaces ────────────────────────────────────────────────────────────────
 
-    # For VSS, build a per-member interface cache so each interface is created on the right device.
-    # slot_to_device is populated only for VSS; empty for all other topologies.
-    if slot_to_device:
-        vss_ifaces: dict[int, dict] = {
-            pos: nb.fetch_interfaces(dev.id)
-            for pos, dev in slot_to_device.items()
+    # When sync_modules was skipped the pre-blade block above didn't run, so
+    # vss_ifaces / existing_ifaces / nd_names haven't been populated yet.
+    if not sync_modules:
+        if slot_to_device:
+            vss_ifaces = {pos: nb.fetch_interfaces(dev.id) for pos, dev in slot_to_device.items()}
+        else:
+            vss_ifaces = {}
+        existing_ifaces = nb.fetch_interfaces(nb_device.id)
+        nd_names = {
+            port.get("port") or port.get("descr") for port in nd_ports
+            if not (port.get("port") or port.get("descr") or "").lower().startswith(PORT_BLACKLIST_PREFIXES)
         }
-    else:
-        vss_ifaces = {}
-
-    # For VSS, remove interfaces that ended up on the wrong member device in a prior run.
-    # e.g. TwentyFiveGigE2/1/0/47 sitting on Switch 1's device record.
-    # Delete subinterfaces (names containing ".") before parents to avoid Netbox cascade-delete
-    # causing a 404 when we try to explicitly delete the child afterwards.
-    if slot_to_device:
-        for pos, dev_ifaces in vss_ifaces.items():
-            misplaced = [
-                (iface_name, iface, owner)
-                for iface_name, iface in dev_ifaces.items()
-                if (
-                    (owner := _slot_from_iface("vss", iface_name)) is not None
-                    and owner != pos
-                    and owner in slot_to_device
-                )
-            ]
-            # subinterfaces first — Netbox rejects deleting a parent that still has children
-            misplaced.sort(key=lambda x: (0 if "." in x[0] else 1))
-            for iface_name, iface, owner_pos in misplaced:
-                try:
-                    iface.delete()
-                    del dev_ifaces[iface_name]
-                    log.info(
-                        "  %-40s moved from Switch %d → Switch %d",
-                        iface_name, pos, owner_pos,
-                    )
-                except Exception as exc:
-                    log.error("  %-40s could not remove from wrong VSS member: %s", iface_name, exc)
-
-    existing_ifaces = nb.fetch_interfaces(nb_device.id)
-
-    nd_names = {
-        port.get("port") or port.get("descr") for port in nd_ports
-        if not (port.get("port") or port.get("descr") or "").lower().startswith(PORT_BLACKLIST_PREFIXES)
-    }
-
-    # Orphan pass — runs before interface sync so stale/template-generated interfaces
-    # are removed before we try to create the real ones from Netdisco.
-    # Also evict deleted entries from the in-memory caches so the interface loop
-    # treats them as new creates rather than updates.
-    all_existing: dict = {}
-    for d in vss_ifaces.values():
-        all_existing.update(d)
-    all_existing.update(existing_ifaces)
-    orphaned_deleted = 0
-    orphaned_errors = 0
-    for name, iface in list(all_existing.items()):
-        if name not in nd_names and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
-            if housekeeping:
-                try:
-                    iface.delete()
-                    orphaned_deleted += 1
-                    log.info("  %-40s deleted (not in Netdisco)", name)
-                    # Evict from caches so the interface loop doesn't see a stale record
-                    existing_ifaces.pop(name, None)
-                    for m in vss_ifaces.values():
-                        m.pop(name, None)
-                except Exception as exc:
-                    orphaned_errors += 1
-                    log.error("  %-40s could not delete orphan: %s", name, exc)
-            else:
-                log.warning("  %-40s in Netbox but not in Netdisco", name)
-    if housekeeping and (orphaned_deleted or orphaned_errors):
-        log.info("Orphaned interfaces — deleted=%d errors=%d", orphaned_deleted, orphaned_errors)
+        # Orphan pass for the no-module-sync path
+        all_existing: dict = {}
+        for d in vss_ifaces.values():
+            all_existing.update(d)
+        all_existing.update(existing_ifaces)
+        orphaned_deleted = 0
+        orphaned_errors = 0
+        for name, iface in list(all_existing.items()):
+            if name not in nd_names and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
+                if housekeeping:
+                    try:
+                        iface.delete()
+                        orphaned_deleted += 1
+                        log.info("  %-40s deleted (not in Netdisco)", name)
+                        existing_ifaces.pop(name, None)
+                        for m in vss_ifaces.values():
+                            m.pop(name, None)
+                    except Exception as exc:
+                        orphaned_errors += 1
+                        log.error("  %-40s could not delete orphan: %s", name, exc)
+                else:
+                    log.warning("  %-40s in Netbox but not in Netdisco", name)
+        if housekeeping and (orphaned_deleted or orphaned_errors):
+            log.info("Orphaned interfaces — deleted=%d errors=%d", orphaned_deleted, orphaned_errors)
 
     # Sort: parent interfaces before subinterfaces (dot-notation) so parents exist when children are created
     nd_ports_sorted = sorted(nd_ports, key=lambda p: (1 if "." in (p.get("port") or p.get("descr") or "") else 0))
@@ -1790,6 +1817,7 @@ def sync_device(
     )
     return {
         "ok": counts["error"] == 0,
+        "hostname": nb_device.name,
         "interfaces": counts,
         "ips": ip_counts if sync_ip else {},
         "modules": mod_counts if sync_modules else {},

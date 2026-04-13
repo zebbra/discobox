@@ -121,6 +121,12 @@ ha_vip_total = Counter(
     "HA VIP redirections detected and handled",
     registry=registry,
 )
+device_sync_duration = Gauge(
+    "discobox_device_last_sync_duration_seconds",
+    "Duration of the last completed sync for each device",
+    ["instance"],
+    registry=registry,
+)
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -225,6 +231,9 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
         sync_in_progress.dec()
         with _in_flight_lock:
             _in_flight.discard(host)
+        # Per-device duration — label matches instance convention used by SNMP exporters
+        instance = result.get("hostname") or host
+        device_sync_duration.labels(instance=instance).set(elapsed)
         # Record per-action counts from result dict
         for action, count in result.get("interfaces", {}).items():
             interfaces_total.labels(action=action).inc(count)
