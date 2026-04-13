@@ -570,6 +570,7 @@ class NetboxClient:
             module_type=module_type.id,
             serial=serial,
             status="active",
+            replication_mode="adopt",
         )
         return "created", module
 
@@ -1245,10 +1246,7 @@ def sync_device(
             mod_counts[action] += 1
             if slot_key is not None and module:
                 slot_to_module[slot_key] = module.id
-            if action != "unchanged":
-                log.info("  %s  %s  serial=%s  %s", name, model, serial, action)
-            else:
-                log.debug("  %-30s unchanged", name)
+            log.info("  %s  %s  serial=%s  %s", name, model, serial, action)
 
         if is_standalone:
             # Single device — update DeviceType on the device itself
@@ -1517,10 +1515,10 @@ def sync_device(
                     log.error("  %-40s could not remove from wrong VSS member: %s", iface_name, exc)
 
     existing_ifaces = nb.fetch_interfaces(nb_device.id)
-    logger.debug("Netbox    existing interfaces: %d", len(existing_ifaces))
 
     # Sort: parent interfaces before subinterfaces (dot-notation) so parents exist when children are created
     nd_ports_sorted = sorted(nd_ports, key=lambda p: (1 if "." in (p.get("port") or p.get("descr") or "") else 0))
+    log.info("Interfaces  entries: %d  existing: %d", len(nd_ports_sorted), len(existing_ifaces))
 
     for port in nd_ports_sorted:
         iface_name = port.get("port") or port.get("descr") or "?"
@@ -1552,14 +1550,27 @@ def sync_device(
         port.get("port") or port.get("descr") for port in nd_ports
         if not (port.get("port") or port.get("descr") or "").lower().startswith(PORT_BLACKLIST_PREFIXES)
     }
-    # For VSS, warn against all member devices' interfaces
+    # For VSS, check against all member devices' interfaces
     all_existing: dict = {}
     for d in vss_ifaces.values():
         all_existing.update(d)
     all_existing.update(existing_ifaces)
-    for name in all_existing:
+    orphaned_deleted = 0
+    orphaned_errors = 0
+    for name, iface in all_existing.items():
         if name not in nd_names and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
-            log.warning("  %-40s in Netbox but not in Netdisco", name)
+            if housekeeping:
+                try:
+                    iface.delete()
+                    orphaned_deleted += 1
+                    log.info("  %-40s deleted (not in Netdisco)", name)
+                except Exception as exc:
+                    orphaned_errors += 1
+                    log.error("  %-40s could not delete orphan: %s", name, exc)
+            else:
+                log.warning("  %-40s in Netbox but not in Netdisco", name)
+    if housekeeping and (orphaned_deleted or orphaned_errors):
+        log.info("Orphaned interfaces — deleted=%d errors=%d", orphaned_deleted, orphaned_errors)
 
     # Wire up parent links for subinterfaces (e.g. GigabitEthernet0/0/1.1132 → GigabitEthernet0/0/1)
     # For VSS, wire parents per member device (subinterface and parent are always on the same device).

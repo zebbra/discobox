@@ -210,6 +210,17 @@ Syncs run in a background thread pool. Duplicate requests for the same host are 
 
 Add to your Netdisco `config.yml` to trigger a sync automatically after each device discovery:
 
+```yaml
+hooks:
+  - event: discover
+    action: HTTP
+    url: "http://discobox:8080/sync?host=[% device.ip %]"
+    method: POST
+    headers:
+      Authorization: "Bearer your-token"
+    timeout: 30000
+```
+
 ---
 
 ## Sample Log Output
@@ -351,13 +362,6 @@ INFO     discobox  Device fields updated — serial='FG6H0FTB24913847' os_name='
 
 </details>
 
-```yaml
-hooks:
-  - event: discover
-    action: HTTP
-    url: "http://discobox:8080/sync?host=[% device.ip %]"
-    method: POST
-    headers:
-      Authorization: "Bearer your-token"
-    timeout: 30000
-```
+---
+
+## Sample Log Output
