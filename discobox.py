@@ -938,8 +938,12 @@ def _handle_vip_device(
                 assigned_object_type="dcim.interface",
                 assigned_object_id=iface.id,
             ):
-                ip.update({"assigned_object_type": None, "assigned_object_id": None})
-                log.info("VIP device %r — unassigned IP %s", vip_dev.name, ip.address)
+                ip.update({
+                    "assigned_object_type": None,
+                    "assigned_object_id": None,
+                    "role": "vip",
+                })
+                log.info("VIP device %r — unassigned IP %s (role=vip)", vip_dev.name, ip.address)
         if vip_mode == "hard":
             nb.nb.dcim.devices.get(vip_dev.id).delete()
             log.info("VIP device %r deleted (hard mode)", vip_dev.name)
@@ -959,7 +963,7 @@ def sync_device(
     sync_sfp: bool = True,
     sync_poe: bool = True,
     housekeeping: bool = False,
-    vip_mode: str = "soft",   # soft | hard | off
+    vip_mode: str = "threenode",   # threenode | soft | hard | off
 ) -> dict:
     """
     Sync device fields, interfaces, MACs, IPs, modules, and SFPs.
@@ -1041,13 +1045,17 @@ def sync_device(
                     log.info("HA partner found: %r", partner_dev.name)
                 else:
                     log.warning("HA partner not found for %r — VC will have one member", nb_device.name)
+                if vip_mode == "threenode":
+                    vc_members.append((vip_device, 0))
+                    log.info("HA VIP device %r added as VC member pos=0", vip_device.name)
                 try:
                     vc_action, _ = nb.upsert_virtual_chassis(vc_name, vc_members)
                     log.info("HA VirtualChassis %r — %s", vc_name, vc_action)
                 except Exception as exc:
                     log.error("HA VirtualChassis error: %s", exc)
 
-                _handle_vip_device(nb, vip_device, vip_mode, log)
+                if vip_mode != "threenode":
+                    _handle_vip_device(nb, vip_device, vip_mode, log)
             else:
                 log.warning(
                     "Hostname mismatch for %s — Netdisco=%r  Netbox=%r",
@@ -1070,6 +1078,21 @@ def sync_device(
                 vc_base = short[:ha_m.start(1)] + short[ha_m.end(3):]
                 vc_name = vc_base.rstrip("-_") or short
                 vc_members = [(nb_device, node_num), (partner_dev, partner_num)]
+
+                # Find VIP device (e.g. p0h) by replacing node number with 0
+                found_vip_dev = None
+                domain = nb_device.name[len(short):]
+                vip_short = short[:ha_m.start(2)] + "0" + short[ha_m.end(2):]
+                for candidate in (vip_short + domain, vip_short):
+                    vip_results = list(nb.nb.dcim.devices.filter(name__ie=candidate))
+                    if vip_results:
+                        found_vip_dev = vip_results[0]
+                        break
+
+                if vip_mode == "threenode" and found_vip_dev:
+                    vc_members.append((found_vip_dev, 0))
+                    log.info("HA VIP device %r added as VC member pos=0", found_vip_dev.name)
+
                 try:
                     vc_action, _ = nb.upsert_virtual_chassis(vc_name, vc_members)
                     log.info(
@@ -1079,16 +1102,8 @@ def sync_device(
                 except Exception as exc:
                     log.error("HA peer VirtualChassis error: %s", exc)
 
-                # Handle VIP device (e.g. p0h): free its IPs or delete it, per vip_mode.
-                # Derive the VIP hostname by replacing the node number with 0.
-                if vip_mode != "off":
-                    domain = nb_device.name[len(short):]
-                    vip_short = short[:ha_m.start(2)] + "0" + short[ha_m.end(2):]
-                    for candidate in (vip_short + domain, vip_short):
-                        vip_results = list(nb.nb.dcim.devices.filter(name__ie=candidate))
-                        if vip_results:
-                            _handle_vip_device(nb, vip_results[0], vip_mode, log)
-                            break
+                if found_vip_dev and vip_mode not in ("threenode", "off"):
+                    _handle_vip_device(nb, found_vip_dev, vip_mode, log)
 
     nb.update_device_fields(nb_device, nd_device)
 
