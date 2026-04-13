@@ -653,6 +653,35 @@ class NetboxClient:
                 deleted += 1
         return deleted
 
+    def remove_stale_module_bays(
+        self,
+        device: pynetbox.core.response.Record,
+        patterns: list,
+    ) -> int:
+        """
+        Delete module bays on a device whose names match any of the given compiled
+        regex patterns and have no module installed.
+
+        These are typically auto-created from the ModuleType template when a module
+        is installed (e.g. 'FAN 1', 'PS-A', 'Network Module') and should be removed
+        when discobox manages inventory via its own module bay names.
+
+        Returns the number of bays deleted.
+        """
+        deleted = 0
+        for bay in self.nb.dcim.module_bays.filter(device_id=device.id):
+            if not any(p.search(bay.name) for p in patterns):
+                continue
+            if getattr(bay, "installed_module", None):
+                logger.warning(
+                    "  Module bay %r has installed module — skipping deletion", bay.name
+                )
+                continue
+            bay.delete()
+            logger.info("  Deleted module bay %r", bay.name)
+            deleted += 1
+        return deleted
+
     def remove_empty_dummy_interfaces(
         self,
         device: pynetbox.core.response.Record,
@@ -1142,14 +1171,15 @@ def sync_device(
 
     if housekeeping:
         deleted_bays = nb.remove_stale_device_bays(nb_device, STALE_DEVICE_BAY_PATTERNS)
+        deleted_mod_bays = nb.remove_stale_module_bays(nb_device, STALE_DEVICE_BAY_PATTERNS)
         nd_port_names = {
             p.get("port") or p.get("descr") for p in nd_ports
             if p.get("port") or p.get("descr")
         }
         deleted_ifaces = nb.remove_empty_dummy_interfaces(nb_device, DUMMY_INTERFACES, nd_port_names)
         log.info(
-            "Housekeeping — deleted %d stale device bay(s), %d empty dummy interface(s)",
-            deleted_bays, deleted_ifaces,
+            "Housekeeping — deleted %d stale device bay(s), %d stale module bay(s), %d empty dummy interface(s)",
+            deleted_bays, deleted_mod_bays, deleted_ifaces,
         )
 
     counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
@@ -1493,8 +1523,48 @@ def sync_device(
         if housekeeping and (orphaned_deleted or orphaned_errors):
             log.info("Orphaned interfaces — deleted=%d errors=%d", orphaned_deleted, orphaned_errors)
 
-        # Blades (linecards / supervisors) — module bay + module per slot.
-        # Only meaningful for VSS chassis; other topologies don't produce class=module entries.
+        # Stack cables — class=other entries with a real model and serial
+        # (e.g. STACK-T1-50CM stackwise cables). One inventory item per StackPort entry.
+        stack_cables = [
+            m for m in nd_mods
+            if m.get("class") == "other"
+            and m.get("model") and m.get("serial")
+        ]
+        if stack_cables:
+            log.info("StackCables  entries: %d", len(stack_cables))
+            cable_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
+            for cable in stack_cables:
+                cable_name = cable.get("name", "")
+                cable_model = cable.get("model", "")
+                cable_serial = cable.get("serial", "")
+                # Route to correct VSS member if applicable; for traditional stacks all on nb_device
+                cable_target = nb_device
+                if slot_to_device:
+                    sw_match = re.match(r"Switch\s+(\d+)", cable_name, re.IGNORECASE)
+                    if not sw_match:
+                        sw_match = re.match(r"\w+?(\d+)/", cable_name)
+                    if sw_match:
+                        cable_target = slot_to_device.get(int(sw_match.group(1)), nb_device)
+                try:
+                    action = nb.upsert_inventory_item(
+                        cable_target, cable_name, manufacturer, cable_model, cable_serial,
+                    )
+                    cable_counts[action] += 1
+                    if action != "unchanged":
+                        log.info("  Cable %-35s model=%s  serial=%s  %s",
+                                 cable_name, cable_model, cable_serial, action)
+                    else:
+                        log.debug("  Cable %-35s unchanged", cable_name)
+                except Exception as exc:
+                    cable_counts["error"] += 1
+                    log.error("  Cable %-35s error: %s", cable_name, exc)
+            log.info(
+                "StackCables — created=%d updated=%d unchanged=%d errors=%d",
+                cable_counts["created"], cable_counts["updated"],
+                cable_counts["unchanged"], cable_counts["error"],
+            )
+
+        # Blades (linecards / supervisors / FRU uplink modules) — module bay + module per slot.
         blades = [
             m for m in nd_mods
             if m.get("class") == "module"
@@ -1508,9 +1578,11 @@ def sync_device(
             blade_name = blade.get("name", "")
             blade_model = blade.get("model", "")
             blade_serial = blade.get("serial", "")
-            # Extract slot number from name: "Switch 1 Slot 3 Supervisor" → 3
-            slot_match = re.search(r"Slot\s+(\d+)", blade_name, re.IGNORECASE)
-            position = slot_match.group(1) if slot_match else ""
+            # Extract slot/position from name.
+            # Try "Slot N" first (linecards), then "Module N" (FRU uplink modules).
+            pos_match = re.search(r"Slot\s+(\d+)", blade_name, re.IGNORECASE) \
+                     or re.search(r"Module\s+(\d+)", blade_name, re.IGNORECASE)
+            position = pos_match.group(1) if pos_match else ""
             # For VSS route to the correct member device via "Switch N" prefix
             target_device = nb_device
             if slot_to_device:
