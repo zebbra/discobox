@@ -432,10 +432,18 @@ class NetboxClient:
                 )
                 return "moved"
 
-            logger.warning(
-                "  IP %-20s already in Netbox (id=%s, assigned to %s) — skipping",
-                address, nb_ip.id, nb_ip.assigned_object or "unassigned",
-            )
+            # IP is shared across HA members — ensure it carries the vip role
+            if getattr(nb_ip, "role", None) != "vip":
+                nb_ip.update({"role": "vip"})
+                logger.info(
+                    "  IP %-20s already assigned to %s — role set to vip",
+                    address, nb_ip.assigned_object or "unassigned",
+                )
+            else:
+                logger.warning(
+                    "  IP %-20s already in Netbox (id=%s, assigned to %s) — skipping",
+                    address, nb_ip.id, nb_ip.assigned_object or "unassigned",
+                )
             return "skipped"
 
         self.nb.ipam.ip_addresses.create(
@@ -918,11 +926,13 @@ def _handle_vip_device(
     vip_dev: "pynetbox.core.response.Record",
     vip_mode: str,
     log: logging.Logger,
+    active_device: "pynetbox.core.response.Record | None" = None,
 ) -> None:
     """
     Handle a VIP/cluster placeholder device according to vip_mode:
 
-    threenode      — keep the device as a VC member; set role=vip on its primary_ip4.
+    threenode      — keep the device as a VC member; mirror device_type from the
+                     active node; set role=vip on its primary_ip4.
     soft           — clear primary_ip4 and unassign all IPs from the device's
                      interfaces so they can be claimed by the physical nodes on
                      the next IP sync. Device record is kept.
@@ -933,6 +943,17 @@ def _handle_vip_device(
         return
     if vip_mode == "threenode":
         try:
+            patch: dict = {}
+            # Mirror device_type from the active physical node
+            if active_device:
+                active_dt_id = nb._nb_value(getattr(active_device, "device_type", None))
+                vip_dt_id   = nb._nb_value(getattr(vip_dev,       "device_type", None))
+                if active_dt_id and active_dt_id != vip_dt_id:
+                    patch["device_type"] = active_dt_id
+            if patch:
+                vip_dev.update(patch)
+                log.info("VIP device %r — device_type updated", vip_dev.name)
+            # Set role=vip on primary IP
             primary = getattr(vip_dev, "primary_ip4", None)
             if primary:
                 ip_obj = nb.nb.ipam.ip_addresses.get(primary.id)
@@ -940,7 +961,7 @@ def _handle_vip_device(
                     ip_obj.update({"role": "vip"})
                     log.info("VIP device %r — primary IP %s role set to vip", vip_dev.name, ip_obj.address)
         except Exception as exc:
-            log.error("VIP device %r — could not set primary IP role: %s", vip_dev.name, exc)
+            log.error("VIP device %r — could not update in threenode mode: %s", vip_dev.name, exc)
         return
     try:
         if getattr(vip_dev, "primary_ip4", None):
@@ -1066,7 +1087,7 @@ def sync_device(
                 except Exception as exc:
                     log.error("HA VirtualChassis error: %s", exc)
 
-                _handle_vip_device(nb, vip_device, vip_mode, log)
+                _handle_vip_device(nb, vip_device, vip_mode, log, active_device=nb_device)
             else:
                 log.warning(
                     "Hostname mismatch for %s — Netdisco=%r  Netbox=%r",
