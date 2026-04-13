@@ -155,7 +155,7 @@ class NetdiscoClient:
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
         self.session.verify = verify_tls
-        self.session.headers.update({"Accept": "application/json"})
+        self.session.headers.update({"Accept": "application/json", "User-Agent": "discobox"})
         if not verify_tls:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         self._login(username, password)
@@ -206,6 +206,7 @@ class _ChangelogSession(requests.Session):
     def __init__(self, changelog_message: str):
         super().__init__()
         self._changelog_message = changelog_message
+        self.headers.update({"User-Agent": "discobox"})
 
     def request(self, method, url, **kwargs):
         if method.upper() in ("POST", "PATCH", "PUT") and self._changelog_message:
@@ -999,6 +1000,28 @@ def sync_device(
                     "Hostname mismatch for %s — Netdisco=%r  Netbox=%r",
                     ip, nd_hostname, nb_device.name,
                 )
+
+    # ── HA peer detection (no VIP) ────────────────────────────────────────────────
+    # Signal: device hostname contains an HA node indicator (p1h/p2h, node1/node2, -1/-2)
+    # and a partner device exists in Netbox at the swapped hostname.
+    # Handles pairs where Netdisco hooks each physical node directly with no shared VIP.
+    if not vip_device:
+        short = nb_device.name.split(".")[0]
+        ha_m = re.search(r"(p|node|-)([12])(h?)", short, re.IGNORECASE)
+        if ha_m:
+            partner_dev = nb.find_ha_partner(nb_device.name)
+            if partner_dev:
+                node_num = int(ha_m.group(2))
+                partner_num = 2 if node_num == 1 else 1
+                # VC name: strip the node indicator from the short hostname
+                vc_base = short[:ha_m.start(1)] + short[ha_m.end(3):]
+                vc_name = vc_base.rstrip("-_") or short
+                vc_members = [(nb_device, node_num), (partner_dev, partner_num)]
+                try:
+                    vc_action, _ = nb.upsert_virtual_chassis(vc_name, vc_members)
+                    log.info("HA peer VirtualChassis %r — %s", vc_name, vc_action)
+                except Exception as exc:
+                    log.error("HA peer VirtualChassis error: %s", exc)
 
     nb.update_device_fields(nb_device, nd_device)
 
