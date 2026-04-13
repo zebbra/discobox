@@ -22,7 +22,8 @@ from typing import Annotated, Optional
 import uvicorn
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, Response
-from prometheus_client import Counter, Gauge, Histogram, CollectorRegistry, MultiProcessCollector, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client import Counter, Gauge, Histogram, CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client.multiprocess import MultiProcessCollector
 from pydantic import BaseModel
 
 from discobox import NetboxClient, NetdiscoClient, sync_device, validate_ip
