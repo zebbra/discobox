@@ -1421,6 +1421,45 @@ def sync_device(
                         log.error("  OS version update error: %s", exc)
                     break
 
+        # Fans — inventory items only when model or serial is present (e.g. Nexus fan trays).
+        # C9300-style fans report neither, so they are silently skipped.
+        fans = [
+            m for m in nd_mods
+            if m.get("class") == "fan" and (m.get("model") or m.get("serial"))
+        ]
+        if fans:
+            log.info("Fans      entries: %d", len(fans))
+            fan_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
+            for fan in fans:
+                fan_name = fan.get("name", "")
+                fan_model = fan.get("model", "")
+                fan_serial = fan.get("serial", "")
+                fan_target = nb_device
+                if slot_to_device:
+                    sw_match = re.match(r"Switch\s+(\d+)", fan_name, re.IGNORECASE)
+                    if sw_match:
+                        fan_target = slot_to_device.get(int(sw_match.group(1)), nb_device)
+                try:
+                    action = nb.upsert_inventory_item(
+                        fan_target, fan_name,
+                        manufacturer if fan_model else None,
+                        fan_model, fan_serial,
+                    )
+                    fan_counts[action] += 1
+                    if action != "unchanged":
+                        log.info("  Fan  %s  model=%s  serial=%s  %s",
+                                 fan_name, fan_model or "-", fan_serial or "-", action)
+                    else:
+                        log.debug("  Fan  %-35s unchanged", fan_name)
+                except Exception as exc:
+                    fan_counts["error"] += 1
+                    log.error("  Fan  %-35s error: %s", fan_name, exc)
+            log.info(
+                "Fans — created=%d updated=%d unchanged=%d errors=%d",
+                fan_counts["created"], fan_counts["updated"],
+                fan_counts["unchanged"], fan_counts["error"],
+            )
+
         # PSUs — inventory items on the device (skip Unknown type with no model)
         psus = [
             m for m in nd_mods
