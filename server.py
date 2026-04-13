@@ -22,7 +22,7 @@ from typing import Annotated, Optional
 import uvicorn
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, Response
-from prometheus_client import Counter, Gauge, Histogram, CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client import Counter, Gauge, Histogram, CollectorRegistry, MultiProcessCollector, generate_latest, CONTENT_TYPE_LATEST
 from pydantic import BaseModel
 
 from discobox import NetboxClient, NetdiscoClient, sync_device, validate_ip
@@ -332,7 +332,13 @@ async def sync(
 
 @app.get(_METRICS_PATH, include_in_schema=False)
 async def metrics() -> Response:
-    return Response(content=generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
+    if _MULTIPROC_DIR:
+        reg = CollectorRegistry()
+        MultiProcessCollector(reg)
+        content = generate_latest(reg)
+    else:
+        content = generate_latest(_custom_registry)
+    return Response(content=content, media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/health", summary="Liveness check")
