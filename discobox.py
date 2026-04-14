@@ -1657,6 +1657,13 @@ def sync_device(
 
     # When sync_modules was skipped the pre-blade block above didn't run, so
     # vss_ifaces / existing_ifaces / nd_names haven't been populated yet.
+    # When sync_modules ran, blade sync may have created interfaces via module
+    # type templates — refresh the cache so we update rather than re-create them.
+    if sync_modules:
+        existing_ifaces = nb.fetch_interfaces(nb_device.id)
+        if slot_to_device:
+            vss_ifaces = {pos: nb.fetch_interfaces(dev.id) for pos, dev in slot_to_device.items()}
+
     if not sync_modules:
         if slot_to_device:
             vss_ifaces = {pos: nb.fetch_interfaces(dev.id) for pos, dev in slot_to_device.items()}
