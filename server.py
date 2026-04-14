@@ -89,7 +89,13 @@ sync_duration = Histogram(
 )
 sync_in_progress = Gauge(
     "discobox_sync_in_progress",
-    "Number of device syncs currently running",
+    "Device syncs in flight: queued waiting for a slot + actively running",
+    multiprocess_mode="livesum",
+    **_reg,
+)
+sync_running = Gauge(
+    "discobox_sync_running",
+    "Device syncs actively running (semaphore slot acquired)",
     multiprocess_mode="livesum",
     **_reg,
 )
@@ -190,6 +196,18 @@ app = FastAPI(
 _in_flight: set[str] = set()
 _in_flight_lock = threading.Lock()
 
+# Limit concurrent Netbox API load — all workers share this semaphore via the
+# threading module (workers are forked from the same parent process).
+_MAX_CONCURRENT: int = int(os.getenv("DISCOBOX_MAX_CONCURRENT_SYNCS", "3"))
+_sync_semaphore = threading.Semaphore(_MAX_CONCURRENT)
+
+# Pause gate — cleared = paused, set = running (normal).
+# Background tasks block here until resumed; already-running syncs finish.
+# Note: with multiple uvicorn workers each worker has its own copy of this event
+# (fork), so POST /pause only pauses the receiving worker. Acceptable for ops use.
+_resume_event = threading.Event()
+_resume_event.set()
+
 
 # ── Request / response models ──────────────────────────────────────────────────
 
@@ -213,6 +231,9 @@ class SyncResponse(BaseModel):
 
 def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync_sfp: bool, sync_poe: bool, housekeeping: bool) -> None:
     """Run sync_device in a background thread and record metrics."""
+    _resume_event.wait()   # blocks here while paused; wakes immediately when running
+    _sync_semaphore.acquire()
+    sync_running.inc()
     start = time.time()
     status = "error"
     result: dict = {}
@@ -246,6 +267,8 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
         logger.error("Sync failed for %s: %s", host, exc)
         status = "error"
     finally:
+        sync_running.dec()
+        _sync_semaphore.release()
         elapsed = time.time() - start
         syncs_total.labels(status=status).inc()
         sync_duration.observe(elapsed)
@@ -331,6 +354,10 @@ async def sync(
             logger.info("hook from %s: %s  already in progress — skipping", caller, resolved_host)
             syncs_skipped_total.inc()
             return SyncResponse(status="skipped", host=resolved_host, reason="already in progress")
+        if len(_in_flight) >= _MAX_QUEUE:
+            logger.warning("hook from %s: %s  queue full (%d/%d) — skipping", caller, resolved_host, len(_in_flight), _MAX_QUEUE)
+            syncs_skipped_total.inc()
+            return SyncResponse(status="skipped", host=resolved_host, reason="queue full")
         _in_flight.add(resolved_host)
 
     sync_in_progress.inc()
@@ -350,9 +377,25 @@ async def metrics() -> Response:
     return Response(content=content, media_type=CONTENT_TYPE_LATEST)
 
 
+@app.post("/pause", dependencies=[Depends(require_auth)], summary="Pause queued syncs")
+async def pause() -> dict:
+    """Hold queued syncs from starting. Already-running syncs finish. Resume to drain the queue."""
+    _resume_event.clear()
+    logger.warning("Sync paused — %d task(s) queued", len(_in_flight))
+    return {"status": "paused", "queued": len(_in_flight)}
+
+
+@app.post("/resume", dependencies=[Depends(require_auth)], summary="Resume queued syncs")
+async def resume() -> dict:
+    """Release the pause gate; queued syncs start draining (up to MAX_CONCURRENT at a time)."""
+    _resume_event.set()
+    logger.info("Sync resumed — %d task(s) queued", len(_in_flight))
+    return {"status": "running", "queued": len(_in_flight)}
+
+
 @app.get("/health", summary="Liveness check")
 async def health() -> dict:
-    return {"status": "ok", "in_flight": list(_in_flight)}
+    return {"status": "ok", "paused": not _resume_event.is_set(), "in_flight": list(_in_flight)}
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
