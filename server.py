@@ -200,6 +200,7 @@ _in_flight_lock = threading.Lock()
 # threading module (workers are forked from the same parent process).
 _MAX_CONCURRENT: int = int(os.getenv("DISCOBOX_MAX_CONCURRENT_SYNCS", "3"))
 _sync_semaphore = threading.Semaphore(_MAX_CONCURRENT)
+_MAX_QUEUE: int = int(os.getenv("DISCOBOX_MAX_QUEUE", "100"))
 
 # Pause gate — cleared = paused, set = running (normal).
 # Background tasks block here until resumed; already-running syncs finish.
