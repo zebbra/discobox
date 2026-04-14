@@ -90,8 +90,8 @@ sync_duration = Histogram(
     **_reg,
 )
 sync_in_progress = Gauge(
-    "discobox_sync_in_progress",
-    "Device syncs in flight: queued waiting for a slot + actively running",
+    "discobox_sync_queued",
+    "Device syncs in flight: waiting for a slot + actively running",
     multiprocess_mode="livesum",
     **_reg,
 )
@@ -146,6 +146,12 @@ device_sync_timestamp = Gauge(
     "discobox_device_last_sync_timestamp_seconds",
     "Unix timestamp of the last completed sync for each device",
     ["instance"],
+    multiprocess_mode="livemax",
+    **_reg,
+)
+sync_paused = Gauge(
+    "discobox_sync_paused",
+    "1 if sync intake is paused, 0 if running",
     multiprocess_mode="livemax",
     **_reg,
 )
@@ -204,12 +210,23 @@ _MAX_CONCURRENT: int = int(os.getenv("DISCOBOX_MAX_CONCURRENT_SYNCS", "3"))
 _sync_semaphore = threading.Semaphore(_MAX_CONCURRENT)
 _MAX_QUEUE: int = int(os.getenv("DISCOBOX_MAX_QUEUE", "100"))
 
-# Pause gate — cleared = paused, set = running (normal).
-# Background tasks block here until resumed; already-running syncs finish.
-# Note: with multiple uvicorn workers each worker has its own copy of this event
-# (fork), so POST /pause only pauses the receiving worker. Acceptable for ops use.
-_resume_event = threading.Event()
-_resume_event.set()
+# Pause gate — file-based so all workers see it regardless of which handled the request.
+# Presence of the file = paused; absence = running.
+_PAUSE_FILE: str = os.path.join(
+    os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp"), "discobox.pause"
+)
+
+def _is_paused() -> bool:
+    return os.path.exists(_PAUSE_FILE)
+
+def _set_paused(paused: bool) -> None:
+    if paused:
+        open(_PAUSE_FILE, "w").close()
+    else:
+        try:
+            os.unlink(_PAUSE_FILE)
+        except FileNotFoundError:
+            pass
 
 
 # ── Request / response models ──────────────────────────────────────────────────
@@ -234,8 +251,12 @@ class SyncResponse(BaseModel):
 
 def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync_sfp: bool, sync_poe: bool, housekeeping: bool) -> None:
     """Run sync_device in a background thread and record metrics."""
-    _resume_event.wait()   # blocks here while paused; wakes immediately when running
-    _sync_semaphore.acquire()
+    while True:
+        _sync_semaphore.acquire()
+        if not _is_paused():
+            break
+        _sync_semaphore.release()
+        time.sleep(5)
     sync_running.inc()
     start = time.time()
     status = "error"
@@ -380,25 +401,27 @@ async def metrics() -> Response:
     return Response(content=content, media_type=CONTENT_TYPE_LATEST)
 
 
-@app.post("/sync/pause", dependencies=[Depends(require_auth)], summary="Pause queued syncs")
+@app.api_route("/sync/pause", methods=["GET", "POST"], dependencies=[Depends(require_auth)], summary="Pause queued syncs")
 async def pause() -> dict:
-    """Hold queued syncs from starting. Already-running syncs finish. Resume to drain the queue."""
-    _resume_event.clear()
+    """Hold queued syncs from starting across all workers. Already-running syncs finish."""
+    _set_paused(True)
+    sync_paused.set(1)
     logger.warning("Sync paused — %d task(s) queued", len(_in_flight))
     return {"status": "paused", "queued": len(_in_flight)}
 
 
-@app.post("/sync/resume", dependencies=[Depends(require_auth)], summary="Resume queued syncs")
+@app.api_route("/sync/resume", methods=["GET", "POST"], dependencies=[Depends(require_auth)], summary="Resume queued syncs")
 async def resume() -> dict:
     """Release the pause gate; queued syncs start draining (up to MAX_CONCURRENT at a time)."""
-    _resume_event.set()
+    _set_paused(False)
+    sync_paused.set(0)
     logger.info("Sync resumed — %d task(s) queued", len(_in_flight))
     return {"status": "running", "queued": len(_in_flight)}
 
 
 @app.get("/health", summary="Liveness check")
 async def health() -> dict:
-    return {"status": "ok", "paused": not _resume_event.is_set(), "in_flight": list(_in_flight)}
+    return {"status": "ok", "paused": _is_paused(), "in_flight": list(_in_flight)}
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
