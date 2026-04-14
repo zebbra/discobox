@@ -8,6 +8,8 @@ same host are dropped while a sync is already in progress.
 
 Endpoints:
   POST /sync             Trigger a device sync
+  POST /sync/pause       Hold queued syncs from starting
+  POST /sync/resume      Release the pause gate
   GET  /metrics          Prometheus metrics
   GET  /health           Liveness check
   GET  /docs             Swagger UI (auto-generated)
@@ -378,7 +380,7 @@ async def metrics() -> Response:
     return Response(content=content, media_type=CONTENT_TYPE_LATEST)
 
 
-@app.post("/pause", dependencies=[Depends(require_auth)], summary="Pause queued syncs")
+@app.post("/sync/pause", dependencies=[Depends(require_auth)], summary="Pause queued syncs")
 async def pause() -> dict:
     """Hold queued syncs from starting. Already-running syncs finish. Resume to drain the queue."""
     _resume_event.clear()
@@ -386,7 +388,7 @@ async def pause() -> dict:
     return {"status": "paused", "queued": len(_in_flight)}
 
 
-@app.post("/resume", dependencies=[Depends(require_auth)], summary="Resume queued syncs")
+@app.post("/sync/resume", dependencies=[Depends(require_auth)], summary="Resume queued syncs")
 async def resume() -> dict:
     """Release the pause gate; queued syncs start draining (up to MAX_CONCURRENT at a time)."""
     _resume_event.set()
