@@ -141,6 +141,13 @@ device_sync_timestamp = Gauge(
     multiprocess_mode="livemax",
     **_reg,
 )
+device_sync_failed = Gauge(
+    "discobox_device_last_sync_failed",
+    "1 if the last sync attempt for this device failed, 0 if it succeeded",
+    ["instance"],
+    multiprocess_mode="livemax",
+    **_reg,
+)
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -245,10 +252,12 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
         sync_in_progress.dec()
         with _in_flight_lock:
             _in_flight.discard(host)
-        # Per-device metrics — only on success so a persistently failing device
-        # goes stale and timestamp-based alerts fire correctly.
+        # Per-device metrics — duration/timestamp only on success so a persistently
+        # failing device goes stale and timestamp-based alerts fire correctly.
+        # device_sync_failed is always updated so failure is immediately visible.
+        instance = result.get("hostname") or host
+        device_sync_failed.labels(instance=instance).set(0 if status == "success" else 1)
         if status == "success":
-            instance = result.get("hostname") or host
             device_sync_duration.labels(instance=instance).set(elapsed)
             device_sync_timestamp.labels(instance=instance).set(start)
         # Record per-action counts from result dict
