@@ -182,6 +182,7 @@ _DEFAULT_SFP          = not _flag("DISCOBOX_NO_SFP")
 _DEFAULT_POE          = not _flag("DISCOBOX_NO_POE")
 _DEFAULT_HOUSEKEEPING =     _flag("DISCOBOX_HOUSEKEEPING")
 _VIP_MODE: str = os.getenv("DISCOBOX_VIP_MODE", "threenode").lower()  # threenode | soft | hard | off
+_PAUSE_ON_ERROR: bool = _flag("DISCOBOX_PAUSE_ON_ERROR")
 
 
 async def require_auth(authorization: Annotated[str, Header()] = "") -> None:
@@ -304,6 +305,10 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
         # device_sync_failed is always updated so failure is immediately visible.
         instance = result.get("hostname") or host
         device_sync_failed.labels(instance=instance).set(0 if status == "success" else 1)
+        if status == "error" and _PAUSE_ON_ERROR and not _is_paused():
+            _set_paused(True)
+            sync_paused.set(1)
+            logger.warning("Sync error for %s — auto-pausing intake (DISCOBOX_PAUSE_ON_ERROR)", host)
         if status == "success":
             device_sync_duration.labels(instance=instance).set(elapsed)
             device_sync_timestamp.labels(instance=instance).set(start)

@@ -1756,6 +1756,34 @@ def sync_device(
     if parent_updated:
         log.info("Subinterfaces — linked %d parent(s)", parent_updated)
 
+    # Wire up LAG bonding from Netdisco "slave_of" (e.g. Fortinet: port3 slave_of LAG-ecn).
+    # Physical members → Netbox `lag` field; virtual children (l2vlan, etc.) → `parent`.
+    flat_ifaces: dict = {}
+    for m in member_iface_maps:
+        flat_ifaces.update(m)
+    lag_linked = 0
+    for port in nd_ports:
+        parent_name = port.get("slave_of")
+        if not parent_name:
+            continue
+        iface_name = port.get("port") or port.get("descr") or ""
+        iface = flat_ifaces.get(iface_name)
+        parent = flat_ifaces.get(parent_name)
+        if not iface or not parent:
+            continue
+        field = "parent" if map_iftype(port.get("type"), iface_name) == "virtual" else "lag"
+        current = nb._nb_value(getattr(iface, field, None))
+        if current == parent.id:
+            continue
+        try:
+            iface.update({field: parent.id})
+            lag_linked += 1
+            log.debug("  %s → %s %s", iface_name, field, parent_name)
+        except Exception as exc:
+            log.error("  %s %s link error: %s", iface_name, field, exc)
+    if lag_linked:
+        log.info("LAG members — linked %d parent(s)", lag_linked)
+
     # ── Interface → Module assignment ─────────────────────────────────────────────
 
     if slot_to_module:

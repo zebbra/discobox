@@ -16,13 +16,13 @@ services:
       traefik.docker.network: traefik
       # HTTP → HTTPS redirect
       traefik.http.routers.discobox-http-router.entrypoints: http
-      traefik.http.routers.discobox-http-router.rule: Host(`${DISCOBOX_HOSTNAME}`) && PathPrefix(`/sync`, `/metrics`, `/health`, `/docs`, `/openapi.json`)
+      traefik.http.routers.discobox-http-router.rule: Host(`${DISCOBOX_HOSTNAME}`) && PathPrefix(`/sync`, `/discobox/metrics`)
       traefik.http.routers.discobox-http-router.middlewares: discobox-redirect
       traefik.http.middlewares.discobox-redirect.redirectscheme.scheme: https
       # HTTPS
       traefik.http.routers.discobox-https-router.entrypoints: https
       traefik.http.routers.discobox-https-router.tls: "true"
-      traefik.http.routers.discobox-https-router.rule: Host(`${DISCOBOX_HOSTNAME}`) && PathPrefix(`/sync`, `/metrics`, `/health`, `/docs`, `/openapi.json`)
+      traefik.http.routers.discobox-https-router.rule: Host(`${DISCOBOX_HOSTNAME}`) && PathPrefix(`/sync`, `/discobox/metrics`)
       traefik.http.services.discobox-service.loadbalancer.server.port: "8080"
       traefik.http.services.discobox-service.loadbalancer.server.scheme: http
 

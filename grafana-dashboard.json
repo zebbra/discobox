@@ -167,7 +167,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "rate(discobox_syncs_total{status=\"error\"}[5m]) / ignoring(status) rate(discobox_syncs_total[5m])",
+          "expr": "sum(rate(discobox_syncs_total{status=\"error\"}[5m])) / sum(rate(discobox_syncs_total[5m]))",
           "legendFormat": "error rate",
           "refId": "A"
         }
