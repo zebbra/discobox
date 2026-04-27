@@ -51,8 +51,9 @@ def map_iftype(nd_type: Optional[str], iface_name: Optional[str]) -> str:
     if lname.startswith(("loopback", "lo")):                        return "virtual"
     if lname.startswith("vlan"):                                     return "virtual"
     if lname.startswith(("tunnel", "tun", "gr", "ipip", "null")):   return "virtual"
-    if lname.startswith(("port-channel", "po", "bundle-ether", "be",
+    if lname.startswith(("port-channel", "bundle-ether", "be",
                           "etherchannel", "eth-trunk", "ae")):      return "lag"
+    if re.match(r"po\d", lname):                                    return "lag"
     if lname.startswith(("management", "mgmt", "fxp", "em")):       return "1000base-t"
     if lname.startswith(("hundredgig", "hu", "ce", "et")):          return "100gbase-x-qsfp28"
     if lname.startswith("fiftygig"):                                 return "50gbase-x-sfp28"
@@ -826,11 +827,12 @@ DUMMY_INTERFACES: set[str] = {
     "main", "mgmt", "mgmt0",
 }
 
-# Interface name prefixes (case-insensitive) to skip during port sync.
+# Interface name prefixes startwith (case-insensitive) to skip during port sync.
 PORT_BLACKLIST_PREFIXES: tuple[str, ...] = (
     "null",
     "modem",
     "bluetooth",
+    "ssl."
 )
 
 def vendor_from_chassis(chassis: dict) -> Optional[str]:
