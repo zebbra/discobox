@@ -11,12 +11,8 @@ ENV http_proxy=$http_proxy \
     https_proxy=$https_proxy \
     no_proxy=$no_proxy
 
-# Place ca-bundle.pem in repo root before building (gitignored):
-#   cp /etc/ssl/ca-bundle.pem .
-COPY ca-bundle.pem /etc/ssl/ca-bundle.pem
-
 COPY requirements.txt .
-RUN pip install --no-cache-dir --cert /etc/ssl/ca-bundle.pem -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY discobox.py server.py cli.py ./
 

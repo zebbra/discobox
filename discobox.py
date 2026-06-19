@@ -6,9 +6,11 @@ Imported by cli.py (one-shot CLI) and server.py (FastAPI webhook receiver).
 """
 
 import ipaddress
+import json
 import logging
 import os
 import re
+import sys
 from typing import Optional
 
 import pynetbox
@@ -152,14 +154,29 @@ def validate_ip(value: str) -> str:
 # ── Netdisco client ────────────────────────────────────────────────────────────
 
 class NetdiscoClient:
-    def __init__(self, base_url: str, username: str, password: str, verify_tls: bool = True):
+    def __init__(
+        self,
+        base_url: str,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        token: Optional[str] = None,
+        verify_tls: bool = True,
+    ):
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
         self.session.verify = verify_tls
         self.session.headers.update({"Accept": "application/json", "User-Agent": "discobox"})
         if not verify_tls:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        self._login(username, password)
+        self._username = username
+        self._password = password
+        if token:
+            self.session.headers["Authorization"] = f"Bearer {token}"
+            logger.debug("Netdisco auth via static token")
+        elif username and password:
+            self._login(username, password)
+        else:
+            raise ValueError("NetdiscoClient requires either token or username+password")
 
     def _login(self, username: str, password: str) -> None:
         url = f"{self.base_url}/login"
@@ -173,10 +190,33 @@ class NetdiscoClient:
         self.session.headers["Authorization"] = token
         logger.debug("Netdisco login OK")
 
+    def _reauth(self) -> bool:
+        """Re-login with username/password if credentials are available. Returns True on success."""
+        if self._username and self._password:
+            logger.warning("Netdisco token expired — re-authenticating")
+            self._login(self._username, self._password)
+            return True
+        return False
+
     def _get(self, path: str) -> dict | list:
         url = f"{self.base_url}{path}"
         logger.debug("GET %s", url)
         resp = self.session.get(url, timeout=30)
+        if resp.status_code == 401 and self._reauth():
+            resp = self.session.get(url, timeout=30)
+        if resp.status_code == 401:
+            logger.error("Netdisco 401 GET %s — response: %s", url, resp.text[:200])
+        resp.raise_for_status()
+        return resp.json()
+
+    def _post(self, path: str, body) -> dict | list:
+        url = f"{self.base_url}{path}"
+        logger.debug("POST %s", url)
+        resp = self.session.post(url, json=body, timeout=30)
+        if resp.status_code == 401 and self._reauth():
+            resp = self.session.post(url, json=body, timeout=30)
+        if resp.status_code == 401:
+            logger.error("Netdisco 401 POST %s — response: %s", url, resp.text[:200])
         resp.raise_for_status()
         return resp.json()
 
@@ -198,6 +238,21 @@ class NetdiscoClient:
 
     def get_powered_ports(self, ip: str) -> list[dict]:
         return self._get(f"/api/v1/object/device/{ip}/powered_ports")
+
+    def get_all_devices(self) -> list[dict]:
+        return self._get("/api/v1/object/devices?fields=ip,dns,name")
+
+    def get_queue_status(self, since: str = "1h") -> dict:
+        return self._get(f"/api/v1/queue/status?since={since}")
+
+    def enqueue_discover(self, ip: str, snmp_tag: Optional[str] = None, snmp_timeout_us: Optional[int] = None) -> None:
+        extra: dict = {
+            "snmptimeout": snmp_timeout_us if snmp_timeout_us is not None else 3_000_000,
+            "skip_neighbor_queue": True,
+        }
+        if snmp_tag:
+            extra["snmp_tag"] = snmp_tag
+        self._post("/api/v1/queue/jobs", [{"action": "discover", "device": ip, "extra": json.dumps(extra)}])
 
 
 # ── Netbox client ──────────────────────────────────────────────────────────────
@@ -324,13 +379,17 @@ class NetboxClient:
 
         MAC address is handled separately via upsert_mac() because in Netbox 4.x
         it is its own model (dcim.mac-addresses) rather than a plain string field.
+        Custom fields are compared key-by-key to avoid overwriting unrelated fields.
 
         Returns one of: "created", "updated", "unchanged".
         """
         mac = data.pop("mac_address", None)
+        custom_fields = data.pop("custom_fields", None)
 
         if existing is None:
             iface = self.nb.dcim.interfaces.create(**data, device=device_id)
+            if custom_fields:
+                iface.update({"custom_fields": custom_fields})
             action = "created"
         else:
             patch = {}
@@ -341,6 +400,11 @@ class NetboxClient:
                 if nb_val != v:
                     logger.debug("  diff %-20s  nb=%r  nd=%r", k, nb_val, v)
                     patch[k] = v
+            if custom_fields:
+                existing_cf = dict(getattr(existing, "custom_fields", {}) or {})
+                cf_patch = {k: v for k, v in custom_fields.items() if existing_cf.get(k) != v}
+                if cf_patch:
+                    patch["custom_fields"] = cf_patch
             if patch:
                 existing.update(patch)
                 action = "updated"
@@ -917,7 +981,7 @@ def clean_mac(raw: Optional[str]) -> Optional[str]:
         return None
     return mac
 
-def port_to_netbox(port: dict) -> dict:
+def port_to_netbox(port: dict, lldp_clear_stale: bool = False) -> dict:
     """
     Map a Netdisco port dict to Netbox dcim.interfaces fields.
 
@@ -939,7 +1003,7 @@ def port_to_netbox(port: dict) -> dict:
     alias = port.get("name", "")
     description = alias if alias and alias.lower() != full_name.lower() else ""
 
-    return {
+    data: dict = {
         "name":        full_name,
         "type":        map_iftype(port.get("type"), full_name),
         "enabled":     port.get("up_admin", "").lower() == "up",
@@ -949,6 +1013,18 @@ def port_to_netbox(port: dict) -> dict:
         "duplex":      duplex,
         "description": description,
     }
+
+    lldp: dict = {}
+    if port.get("remote_id"):
+        lldp["lldp_neighbor"] = port["remote_id"]
+    if port.get("remote_port"):
+        lldp["lldp_neighbor_port"] = port["remote_port"]
+    if lldp:
+        data["custom_fields"] = lldp
+    elif lldp_clear_stale:
+        data["custom_fields"] = {"lldp_neighbor": None, "lldp_neighbor_port": None}
+
+    return data
 
 
 # ── Sync logic ─────────────────────────────────────────────────────────────────
@@ -1018,6 +1094,101 @@ def _handle_vip_device(
         log.error("VIP device %r handling error: %s", vip_dev.name, exc)
 
 
+_TIMEOUT_UNITS = {"us": 1, "ms": 1_000, "s": 1_000_000, "m": 60_000_000, "h": 3_600_000_000}
+
+def _parse_snmp_timeout_us(value: Optional[str]) -> Optional[int]:
+    """Parse a Netbox snmp_polling_timeout string (e.g. '3m', '30s') to microseconds."""
+    if not value:
+        return None
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(us|ms|s|m|h)?", value.strip(), re.IGNORECASE)
+    if not m:
+        return None
+    amount, unit = float(m.group(1)), (m.group(2) or "s").lower()
+    return int(amount * _TIMEOUT_UNITS[unit])
+
+
+def reconcile_devices(
+    nd: "NetdiscoClient",
+    nb: "NetboxClient",
+    max_queued: Optional[int] = None,
+    max_failed: Optional[int] = None,
+    max_enqueue: Optional[int] = None,
+    offset: Optional[int] = None,
+) -> dict:
+    """
+    Compare Netbox active devices against Netdisco and enqueue discovery
+    for any device present in Netbox but missing from Netdisco.
+
+    If the Netdisco queue exceeds max_queued or max_failed (last 1h), the
+    enqueue step is skipped to avoid overloading Netdisco.
+
+    Returns counts: enqueued / skipped (no primary IP) / already_known /
+                    netbox_total / netdisco_total / aborted (bool).
+    """
+    log = logging.getLogger("discobox.reconcile")
+    _aborted = {"aborted": True, "enqueued": 0, "skipped": 0, "already_known": 0, "netbox_total": 0, "netdisco_total": 0}
+
+    if max_queued is not None or max_failed is not None:
+        try:
+            qs = nd.get_queue_status(since="1h")
+        except requests.HTTPError as exc:
+            log.error("Reconcile aborted — could not fetch Netdisco queue status: %s", exc)
+            return _aborted
+        queued, failed = qs.get("queued", 0), qs.get("failed", 0)
+        if (max_queued is not None and queued > max_queued) or \
+           (max_failed is not None and failed > max_failed):
+            log.warning(
+                "Reconcile aborted — queue too busy (queued=%d failed=%d, limits queued=%s failed=%s)",
+                queued, failed, max_queued, max_failed,
+            )
+            return _aborted
+
+    try:
+        nd_ips = {d["ip"] for d in nd.get_all_devices() if d.get("ip")}
+    except requests.HTTPError as exc:
+        log.error("Reconcile aborted — could not fetch Netdisco devices: %s", exc)
+        return _aborted
+    log.info("Netdisco knows %d devices", len(nd_ips))
+
+    nb_total = nb.nb.dcim.devices.count(status="active", has_primary_ip=True)
+    counts = {"enqueued": 0, "skipped": 0, "already_known": 0, "netdisco_total": len(nd_ips), "netbox_total": nb_total}
+
+    for device in nb.nb.dcim.devices.filter(status="active", has_primary_ip=True):
+        primary = device.primary_ip4
+        if not primary:
+            counts["skipped"] += 1
+            continue
+        ip = str(primary).split("/")[0]
+
+        if ip in nd_ips:
+            counts["already_known"] += 1
+            continue
+
+        cf = getattr(device, "custom_fields", {}) or {}
+        snmp_tag = cf.get("snmp_auth_profile") or None
+        snmp_timeout_us = _parse_snmp_timeout_us(cf.get("snmp_polling_timeout"))
+
+        if offset and counts["enqueued"] + counts.get("offset_skipped", 0) < offset:
+            counts["offset_skipped"] = counts.get("offset_skipped", 0) + 1
+            continue
+
+        if max_enqueue is not None and counts["enqueued"] >= max_enqueue:
+            log.info("Enqueue cap reached (%d) — deferring remaining devices to next run", max_enqueue)
+            break
+
+        try:
+            nd.enqueue_discover(ip, snmp_tag=snmp_tag, snmp_timeout_us=snmp_timeout_us)
+            effective_timeout = snmp_timeout_us if snmp_timeout_us is not None else 3_000_000
+            log.info("Enqueued discover for %s (%s) snmp_tag=%r timeout=%dus",
+                     ip, device.name, snmp_tag, effective_timeout)
+            counts["enqueued"] += 1
+        except Exception as exc:
+            log.error("Failed to enqueue discover for %s: %s", ip, exc)
+
+    log.info("Reconcile done — %s", counts)
+    return counts
+
+
 def sync_device(
     ip: str,
     nd: NetdiscoClient,
@@ -1028,6 +1199,7 @@ def sync_device(
     sync_sfp: bool = True,
     sync_poe: bool = True,
     housekeeping: bool = False,
+    lldp_clear_stale: bool = False,
     vip_mode: str = "threenode",   # threenode | soft | hard | off
 ) -> dict:
     """
@@ -1056,7 +1228,8 @@ def sync_device(
     nb_device = nb.find_device_by_ip(ip, hostname=nd_hostname, serial=nd_serial)
     if not nb_device:
         log.error("No Netbox device found for IP %s or hostname %r — skipping", ip, nd_hostname)
-        return {"ok": False, "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
+        return {"ok": False, "reason": "device_not_found", "hostname": nd_hostname,
+                "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
 
     logger.info("Netbox    device=%r  id=%s", nb_device.name, nb_device.id)
 
@@ -1711,7 +1884,7 @@ def sync_device(
             log.debug("  %-40s blacklisted — skipping", iface_name)
             continue
         try:
-            nb_data = port_to_netbox(port)
+            nb_data = port_to_netbox(port, lldp_clear_stale=lldp_clear_stale)
             if not sync_mac:
                 nb_data.pop("mac_address", None)
             if slot_to_device:

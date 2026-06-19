@@ -150,13 +150,14 @@ Copy `.env.example` to `.env` and fill in the values:
 
 ```env
 NETDISCO_URL=https://netdisco.example.com
-NETDISCO_USERNAME=admin
+NETDISCO_TOKEN=your-long-lived-token    # preferred; takes priority over username/password (Bearer prefix added automatically)
+NETDISCO_USERNAME=admin                 # fallback if NETDISCO_TOKEN is not set
 NETDISCO_PASSWORD=secret
 NETBOX_URL=https://netbox.example.com
 NETBOX_TOKEN=your-token-here
 
 # Server mode
-DISCOBOX_PORT=8080          # default: 8080
+DISCOBOX_LISTEN_PORT=8080   # default: 8080 (avoid DISCOBOX_PORT — Docker overrides it with a service URL)
 DISCOBOX_WORKERS=4          # uvicorn worker count, default: 4
 DISCOBOX_AUTH_TOKEN=secret  # bearer token for /sync; leave unset to disable auth
 
@@ -166,7 +167,8 @@ DISCOBOX_NO_IP=true         # disable IP sync globally (e.g. if Netdisco is not 
 DISCOBOX_NO_MODULES=true    # disable module bay sync globally
 DISCOBOX_NO_SFP=true        # disable SFP inventory sync globally
 DISCOBOX_NO_POE=true        # disable PoE sync globally
-DISCOBOX_HOUSEKEEPING=true  # enable housekeeping globally
+DISCOBOX_HOUSEKEEPING=true       # enable housekeeping globally
+DISCOBOX_LLDP_CLEAR_STALE=true  # clear lldp_neighbor fields when a port loses its neighbor
 
 # HA / VIP device handling — controls what happens to the VIP placeholder device (e.g. p0h)
 # threenode (default) — add VIP device as VC member at pos 0; management VIP IP stays on it (role=vip)
@@ -174,6 +176,14 @@ DISCOBOX_HOUSEKEEPING=true  # enable housekeeping globally
 # hard               — delete VIP device entirely
 # off                — do nothing
 DISCOBOX_VIP_MODE=threenode
+
+# Reconcile loop — daily job comparing Netbox against Netdisco; enqueues discovery for devices
+# present in Netbox (SoT) but missing from Netdisco
+DISCOBOX_RECONCILE_INTERVAL=86400  # seconds between runs, default: 86400 (24h)
+DISCOBOX_RECONCILE_MAX_ENQUEUE=200 # max devices enqueued per run; unset = no limit
+                                   # use this to throttle the initial backfill on large inventories
+DISCOBOX_RECONCILE_MAX_QUEUED=50   # abort run if Netdisco queue has more than N jobs queued (last 1h)
+DISCOBOX_RECONCILE_MAX_FAILED=20   # abort run if Netdisco reports more than N failures (last 1h)
 ```
 
 **venv setup:**
@@ -186,11 +196,50 @@ set -a && source .env && set +a
 
 ---
 
+## Netbox Custom Fields
+
+### Written by discobox (Netdisco → Netbox)
+
+These fields are updated on every sync. Create them on the **Device** object in Netbox.
+
+| Slug | Type | Description |
+|---|---|---|
+| `os_version` | Text | OS version string (e.g. `17.3.4`) |
+| `os_name` | Text | OS platform name (e.g. `ios-xe`, `fortios`, `nx-os`) |
+| `os_release` | Text | IOS release name parsed from device description (e.g. `Gibraltar`) |
+
+### Read by discobox (Netbox → Netdisco, reconcile loop)
+
+These fields are optional. If set on a Device they are passed to the Netdisco discovery queue.
+
+| Slug | Type | Description |
+|---|---|---|
+| `snmp_auth_profile` | Select | SNMP credential tag in Netdisco (maps to `snmp_tag`) |
+| `snmp_polling_timeout` | Select | Discovery timeout, e.g. `30s`, `3m` (default: `3s` if unset) |
+
+### Written by discobox on Interfaces (Netdisco → Netbox)
+
+CDP/LLDP neighbor data from Netdisco, written on every interface sync. Text fields — no dependency on the neighbor existing in Netbox.
+
+| Slug | Type | Object | Description |
+|---|---|---|---|
+| `lldp_neighbor` | Text | `dcim.interface` | Neighbor device hostname as reported by CDP/LLDP |
+| `lldp_neighbor_port` | Text | `dcim.interface` | Neighbor port name as reported by CDP/LLDP |
+
+---
+
 ## Server Endpoints
 
 | Endpoint | Method | Auth | Description |
 |---|---|---|---|
+| `/` | GET | no | Status page — endpoints, in-flight syncs, unknown devices |
 | `/sync?host=<ip>` | GET, POST | yes | Trigger device sync |
+| `/sync/pause` | GET, POST | yes | Pause queued syncs (also skips reconcile) |
+| `/sync/resume` | GET, POST | yes | Resume queued syncs |
+| `/reconcile` | GET, POST | yes | Trigger reconcile run immediately; optional `?max_enqueue=N&offset=N` |
+| `/unknown-devices` | GET | no | Devices seen in Netdisco webhooks but not found in Netbox (JSON) |
+| `/sync/resume` | GET, POST | yes | Resume queued syncs |
+| `/unknown-devices` | GET | no | Devices seen in Netdisco webhooks but not found in Netbox (JSON) |
 | `/metrics` | GET | no | Prometheus metrics |
 | `/health` | GET | no | Liveness check + in-flight hosts |
 | `/docs` | GET | no | Swagger UI |
