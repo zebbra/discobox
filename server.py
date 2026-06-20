@@ -16,6 +16,7 @@ Endpoints:
 """
 
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -39,6 +40,17 @@ _LOG_DATE = "%Y-%m-%dT%H:%M:%S"
 
 logging.basicConfig(level=logging.INFO, format=_LOG_FMT, datefmt=_LOG_DATE)
 logger = logging.getLogger("discobox.server")
+
+
+class _CapturingHandler(logging.Handler):
+    """Collects log records into a list for returning in a debug response."""
+    def __init__(self, level: int = logging.DEBUG):
+        super().__init__(level)
+        self.setFormatter(logging.Formatter("%(levelname)1.1s %(name)-16s %(message)s"))
+        self.lines: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.lines.append(self.format(record))
 
 # Rename uvicorn.error → uvicorn (the name is misleading; it's their general logger)
 logging.getLogger("uvicorn.error").name = "uvicorn"
@@ -223,6 +235,15 @@ _DEFAULT_SFP          = not _flag("DISCOBOX_NO_SFP")
 _DEFAULT_POE          = not _flag("DISCOBOX_NO_POE")
 _DEFAULT_HOUSEKEEPING     =     _flag("DISCOBOX_HOUSEKEEPING")
 _DEFAULT_LLDP_CLEAR_STALE =     _flag("DISCOBOX_LLDP_CLEAR_STALE")
+# Neighbor custom field names — set to empty string to disable that field
+_CF_NEIGHBOR_TEXT:   Optional[str] = os.getenv("DISCOBOX_CF_NEIGHBOR_TEXT",   "neighbor")        or None
+_CF_NEIGHBOR_PORT:   Optional[str] = os.getenv("DISCOBOX_CF_NEIGHBOR_PORT",   "neighbor_port")   or None
+_CF_NEIGHBOR_DEVICE: Optional[str] = os.getenv("DISCOBOX_CF_NEIGHBOR_DEVICE", "neighbor_device") or None
+_CF_NEIGHBOR_IFACE:  Optional[str] = os.getenv("DISCOBOX_CF_NEIGHBOR_IFACE",  "neighbor_iface")  or None
+# Cabling — scope "" disables, "site" restricts to same-site pairs
+_CABLE_SCOPE:        str            = os.getenv("DISCOBOX_CABLE_SCOPE", "site").lower()   # "" | "site"
+_CABLE_SOURCE_CF:    Optional[str]  = os.getenv("DISCOBOX_CABLE_SOURCE_CF",  "source")   or None
+_CABLE_SOURCE_VALUE: Optional[str]  = os.getenv("DISCOBOX_CABLE_SOURCE_VALUE", "netdisco") or None
 _VIP_MODE: str = os.getenv("DISCOBOX_VIP_MODE", "threenode").lower()  # threenode | soft | hard | off
 _PAUSE_ON_ERROR: bool = _flag("DISCOBOX_PAUSE_ON_ERROR")
 
@@ -315,8 +336,22 @@ _in_flight: set[str] = set()
 _in_flight_lock = threading.Lock()
 
 # Devices seen in Netdisco webhooks but not found in Netbox
-_unknown_devices: dict[str, dict] = {}
+# Unknown devices — file-backed so all workers share state.
+_UNKNOWN_DEVICES_FILE: str = os.path.join(
+    os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp"), "discobox.unknown.json"
+)
 _unknown_devices_lock = threading.Lock()
+
+def _load_unknown_devices() -> dict[str, dict]:
+    try:
+        with open(_UNKNOWN_DEVICES_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def _save_unknown_devices(devices: dict[str, dict]) -> None:
+    with open(_UNKNOWN_DEVICES_FILE, "w") as f:
+        json.dump(devices, f)
 
 # Limit concurrent Netbox API load — all workers share this semaphore via the
 # threading module (workers are forked from the same parent process).
@@ -364,7 +399,7 @@ class SyncResponse(BaseModel):
 
 # ── Background sync ────────────────────────────────────────────────────────────
 
-def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync_sfp: bool, sync_poe: bool, housekeeping: bool, lldp_clear_stale: bool = False) -> None:
+def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync_sfp: bool, sync_poe: bool, housekeeping: bool, lldp_clear_stale: bool = False, cf_neighbor_text: Optional[str] = None, cf_neighbor_port: Optional[str] = None, cf_neighbor_device: Optional[str] = None, cf_neighbor_iface: Optional[str] = None, cable_scope: str = "", cable_source_cf: Optional[str] = None, cable_source_value: Optional[str] = None) -> None:
     """Run sync_device in a background thread and record metrics."""
     while True:
         _sync_semaphore.acquire()
@@ -396,16 +431,25 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             housekeeping=housekeeping,
             lldp_clear_stale=lldp_clear_stale,
             vip_mode=_VIP_MODE,
+            cf_neighbor_text=cf_neighbor_text,
+            cf_neighbor_port=cf_neighbor_port,
+            cf_neighbor_device=cf_neighbor_device,
+            cf_neighbor_iface=cf_neighbor_iface,
+            cable_scope=cable_scope,
+            cable_source_cf=cable_source_cf,
+            cable_source_value=cable_source_value,
         )
         status = "success" if result.get("ok") else "error"
         if result.get("reason") == "device_not_found":
             unknown_devices_total.inc()
             with _unknown_devices_lock:
-                _unknown_devices[host] = {
+                devices = _load_unknown_devices()
+                devices[host] = {
                     "ip": host,
                     "hostname": result.get("hostname") or "",
                     "last_seen": time.time(),
                 }
+                _save_unknown_devices(devices)
     except Exception as exc:
         logger.error("Sync failed for %s: %s", host, exc)
         status = "error"
@@ -465,6 +509,7 @@ async def sync(
     sync_poe: Annotated[bool, Query(description="Sync PoE mode")] = _DEFAULT_POE,
     housekeeping: Annotated[bool, Query(description="Remove stale device bays and empty dummy interfaces")] = _DEFAULT_HOUSEKEEPING,
     lldp_clear_stale: Annotated[bool, Query(description="Clear LLDP neighbor fields when no neighbor is present")] = _DEFAULT_LLDP_CLEAR_STALE,
+    debug: Annotated[bool, Query(description="Run synchronously and return debug logs as plain text")] = False,
     body: Optional[SyncRequest] = None,
 ) -> SyncResponse:
     """
@@ -510,7 +555,27 @@ async def sync(
         _in_flight.add(resolved_host)
 
     sync_in_progress.inc()
-    background_tasks.add_task(_run_sync, resolved_host, sync_mac, sync_ip, sync_modules, sync_sfp, sync_poe, housekeeping, lldp_clear_stale)
+
+    if debug:
+        cap = _CapturingHandler()
+        discobox_log = logging.getLogger("discobox")
+        prev_level = discobox_log.level
+        discobox_log.setLevel(logging.DEBUG)
+        discobox_log.addHandler(cap)
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None, _run_sync,
+                resolved_host, sync_mac, sync_ip, sync_modules, sync_sfp, sync_poe, housekeeping, lldp_clear_stale,
+                _CF_NEIGHBOR_TEXT, _CF_NEIGHBOR_PORT, _CF_NEIGHBOR_DEVICE, _CF_NEIGHBOR_IFACE,
+                _CABLE_SCOPE, _CABLE_SOURCE_CF, _CABLE_SOURCE_VALUE,
+            )
+        finally:
+            discobox_log.removeHandler(cap)
+            discobox_log.setLevel(prev_level)
+        return PlainTextResponse("\n".join(cap.lines))
+
+    background_tasks.add_task(_run_sync, resolved_host, sync_mac, sync_ip, sync_modules, sync_sfp, sync_poe, housekeeping, lldp_clear_stale, _CF_NEIGHBOR_TEXT, _CF_NEIGHBOR_PORT, _CF_NEIGHBOR_DEVICE, _CF_NEIGHBOR_IFACE, _CABLE_SCOPE, _CABLE_SOURCE_CF, _CABLE_SOURCE_VALUE)
     logger.info("hook from %s: %s  queued", caller, resolved_host)
     return SyncResponse(status="queued", host=resolved_host)
 
@@ -548,7 +613,7 @@ async def resume() -> dict:
 async def index() -> str:
     paused = _is_paused()
     with _unknown_devices_lock:
-        unknown_count = len(_unknown_devices)
+        unknown_count = len(_load_unknown_devices())
     in_flight = list(_in_flight)
     last_reconcile = reconcile_last_run_timestamp._value.get() if hasattr(reconcile_last_run_timestamp, "_value") else 0
     last_reconcile_str = (
@@ -619,7 +684,8 @@ async def trigger_reconcile(
 @app.get("/unknown-devices", summary="Devices seen in Netdisco webhooks but not found in Netbox")
 async def unknown_devices() -> list:
     with _unknown_devices_lock:
-        return sorted(_unknown_devices.values(), key=lambda d: d["last_seen"], reverse=True)
+        devices = _load_unknown_devices()
+    return sorted(devices.values(), key=lambda d: d["last_seen"], reverse=True)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

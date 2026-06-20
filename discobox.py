@@ -77,6 +77,12 @@ def map_iftype(nd_type: Optional[str], iface_name: Optional[str]) -> str:
     return "other"
 
 
+_COPPER_IFACE_TYPES = {"100base-tx", "1000base-t", "2.5gbase-t", "5gbase-t", "10gbase-t"}
+
+def cable_type_from_iface_type(iface_type: str) -> str:
+    return "cat5e" if iface_type in _COPPER_IFACE_TYPES else "smf"
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def parse_os_release(description: Optional[str]) -> Optional[str]:
@@ -381,7 +387,7 @@ class NetboxClient:
         it is its own model (dcim.mac-addresses) rather than a plain string field.
         Custom fields are compared key-by-key to avoid overwriting unrelated fields.
 
-        Returns one of: "created", "updated", "unchanged".
+        Returns (action, iface) where action is one of: "created", "updated", "unchanged".
         """
         mac = data.pop("mac_address", None)
         custom_fields = data.pop("custom_fields", None)
@@ -415,7 +421,55 @@ class NetboxClient:
         if mac:
             self._upsert_mac(iface, mac)
 
-        return action
+        return action, iface
+
+    def upsert_cable(
+        self,
+        iface_a_id: int,
+        iface_b_id: int,
+        cable_type: str = "smf",
+        source_cf: Optional[str] = "source",
+        source_value: Optional[str] = "netdisco",
+    ) -> str:
+        """
+        Create a cable between two dcim.interface endpoints if none exists.
+        If a cable already exists on either termination and is NOT tagged with
+        source_value, log an error and skip (don't touch manually maintained cables).
+        Returns one of: "created", "exists", "conflict", "skipped".
+        """
+        iface_a = self.nb.dcim.interfaces.get(iface_a_id)
+        iface_b = self.nb.dcim.interfaces.get(iface_b_id)
+        if not iface_a or not iface_b:
+            return "skipped"
+
+        cable_a = getattr(iface_a, "cable", None)
+        cable_b = getattr(iface_b, "cable", None)
+        existing_cable = cable_a or cable_b
+
+        if existing_cable:
+            if source_cf:
+                cf = dict(getattr(existing_cable, "custom_fields", {}) or {})
+                if cf.get(source_cf) == source_value:
+                    return "exists"
+            logger.error(
+                "Cable conflict: iface %s ↔ %s — existing cable %s not owned by discobox, skipping",
+                iface_a_id, iface_b_id, existing_cable.id,
+            )
+            return "conflict"
+
+        cable = self.nb.dcim.cables.create(
+            a_terminations=[{"object_type": "dcim.interface", "object_id": iface_a_id}],
+            b_terminations=[{"object_type": "dcim.interface", "object_id": iface_b_id}],
+            type=cable_type,
+        )
+        if source_cf and source_value:
+            cable.update({"custom_fields": {source_cf: source_value}})
+        return "created"
+
+    def delete_cable(self, cable_id: int) -> None:
+        cable = self.nb.dcim.cables.get(cable_id)
+        if cable:
+            cable.delete()
 
     def _upsert_mac(self, iface: pynetbox.core.response.Record, mac: str) -> None:
         """
@@ -981,7 +1035,73 @@ def clean_mac(raw: Optional[str]) -> Optional[str]:
         return None
     return mac
 
-def port_to_netbox(port: dict, lldp_clear_stale: bool = False) -> dict:
+def _resolve_neighbor(
+    nb: "NetboxClient", remote_ip: str, remote_port: str
+) -> tuple[Optional[int], Optional[int]]:
+    """
+    Resolve a (remote_ip, remote_port) pair to (device_id, interface_id).
+
+    Strategy:
+    1. Find device by primary_ip4 match (common case).
+    2. Fall back to any IP address assignment (covers VLAN/loopback IPs on L3 devices).
+    Once the device is found, look up the interface by name.
+    Either value may be None independently.
+    """
+    log = logging.getLogger("discobox.sync")
+    if not remote_ip:
+        return None, None
+
+    def _iface_on_device(device_id: int) -> Optional[int]:
+        if not remote_port:
+            return None
+        ifaces = list(nb.nb.dcim.interfaces.filter(device_id=device_id, name=remote_port))
+        log.debug("    ifaces_found=%d", len(ifaces))
+        return ifaces[0].id if ifaces else None
+
+    try:
+        # Pass 1: match by primary IP
+        devs = list(nb.nb.dcim.devices.filter(q=remote_ip))
+        log.debug("  neighbor resolve  ip=%s port=%s  primary_candidates=%d", remote_ip, remote_port, len(devs))
+        for dev in devs:
+            p4 = dev.primary_ip4
+            p4_addr = str(p4).split("/")[0] if p4 else None
+            log.debug("    dev=%s primary_ip4=%s match=%s", dev.name, p4_addr, p4_addr == remote_ip)
+            if p4_addr == remote_ip:
+                return dev.id, _iface_on_device(dev.id)
+
+        # Pass 2: find by any IP address assignment (e.g. VLAN interface on L3 switch)
+        ip_objs = list(nb.nb.ipam.ip_addresses.filter(q=remote_ip))
+        log.debug("  neighbor resolve  ip=%s  ip_objects=%d (fallback)", remote_ip, len(ip_objs))
+        for ip_obj in ip_objs:
+            if str(ip_obj).split("/")[0] != remote_ip:
+                continue
+            if getattr(ip_obj, "assigned_object_type", None) != "dcim.interface":
+                continue
+            assigned = ip_obj.assigned_object
+            if not assigned:
+                continue
+            device_id = getattr(getattr(assigned, "device", None), "id", None)
+            if not device_id:
+                continue
+            log.debug("    fallback dev=%s via ip-object", getattr(assigned, "device", "?"))
+            return device_id, _iface_on_device(device_id)
+
+        return None, None
+    except Exception as exc:
+        log.debug("  neighbor resolve  ip=%s port=%s  error: %s", remote_ip, remote_port, exc)
+        return None, None
+
+
+def port_to_netbox(
+    port: dict,
+    lldp_clear_stale: bool = False,
+    neighbor_device_id: Optional[int] = None,
+    neighbor_iface_id: Optional[int] = None,
+    cf_neighbor_text: Optional[str] = "neighbor",
+    cf_neighbor_port: Optional[str] = "neighbor_port",
+    cf_neighbor_device: Optional[str] = "neighbor_device",
+    cf_neighbor_iface: Optional[str] = "neighbor_iface",
+) -> dict:
     """
     Map a Netdisco port dict to Netbox dcim.interfaces fields.
 
@@ -1014,15 +1134,24 @@ def port_to_netbox(port: dict, lldp_clear_stale: bool = False) -> dict:
         "description": description,
     }
 
-    lldp: dict = {}
-    if port.get("remote_id"):
-        lldp["lldp_neighbor"] = port["remote_id"]
-    if port.get("remote_port"):
-        lldp["lldp_neighbor_port"] = port["remote_port"]
-    if lldp:
-        data["custom_fields"] = lldp
+    nb_cf: dict = {}
+    if port.get("remote_ip"):
+        # Port has a neighbor — write all configured fields; object fields may be None (unresolved)
+        if cf_neighbor_text and port.get("remote_id"):
+            nb_cf[cf_neighbor_text] = port["remote_id"]
+        if cf_neighbor_port and port.get("remote_port"):
+            nb_cf[cf_neighbor_port] = port["remote_port"]
+        if cf_neighbor_device:
+            nb_cf[cf_neighbor_device] = neighbor_device_id
+        if cf_neighbor_iface:
+            nb_cf[cf_neighbor_iface] = neighbor_iface_id
+    if nb_cf:
+        data["custom_fields"] = nb_cf
     elif lldp_clear_stale:
-        data["custom_fields"] = {"lldp_neighbor": None, "lldp_neighbor_port": None}
+        # No neighbor on this port — clear all stale neighbor fields
+        stale = {k: None for k in [cf_neighbor_text, cf_neighbor_port, cf_neighbor_device, cf_neighbor_iface] if k}
+        if stale:
+            data["custom_fields"] = stale
 
     return data
 
@@ -1201,6 +1330,13 @@ def sync_device(
     housekeeping: bool = False,
     lldp_clear_stale: bool = False,
     vip_mode: str = "threenode",   # threenode | soft | hard | off
+    cf_neighbor_text: Optional[str] = "neighbor",
+    cf_neighbor_port: Optional[str] = "neighbor_port",
+    cf_neighbor_device: Optional[str] = "neighbor_device",
+    cf_neighbor_iface: Optional[str] = "neighbor_iface",
+    cable_scope: str = "",          # "" = disabled, "site" = same-site only
+    cable_source_cf: Optional[str] = "source",
+    cable_source_value: Optional[str] = "netdisco",
 ) -> dict:
     """
     Sync device fields, interfaces, MACs, IPs, modules, and SFPs.
@@ -1878,13 +2014,42 @@ def sync_device(
     nd_ports_sorted = sorted(nd_ports, key=lambda p: (1 if "." in (p.get("port") or p.get("descr") or "") else 0))
     log.info("Interfaces  entries: %d  existing: %d", len(nd_ports_sorted), len(existing_ifaces))
 
+    neighbors = neighbors_linked = 0
+    seen_cable_iface_ids: set[int] = set()
+    cable_counts: dict[str, int] = {"created": 0, "conflict": 0, "deleted": 0, "error": 0}
     for port in nd_ports_sorted:
         iface_name = port.get("port") or port.get("descr") or "?"
         if iface_name.lower().startswith(PORT_BLACKLIST_PREFIXES):
             log.debug("  %-40s blacklisted — skipping", iface_name)
             continue
         try:
-            nb_data = port_to_netbox(port, lldp_clear_stale=lldp_clear_stale)
+            nb_device_id, nb_iface_id = (
+                _resolve_neighbor(nb, port.get("remote_ip", ""), port.get("remote_port", ""))
+                if (cf_neighbor_device or cf_neighbor_iface or cable_scope) and port.get("remote_ip")
+                else (None, None)
+            )
+            # For cabling, gate nb_iface_id on same-site check
+            cable_iface_id = nb_iface_id
+            if cable_scope == "site" and cable_iface_id and nb_device_id:
+                remote_dev = nb.nb.dcim.devices.get(nb_device_id)
+                local_site = getattr(getattr(nb_device, "site", None), "id", None)
+                remote_site = getattr(getattr(remote_dev, "site", None), "id", None) if remote_dev else None
+                if not local_site or local_site != remote_site:
+                    cable_iface_id = None
+            if port.get("remote_ip"):
+                neighbors += 1
+                if nb_device_id is not None:
+                    neighbors_linked += 1
+            nb_data = port_to_netbox(
+                port,
+                lldp_clear_stale=lldp_clear_stale,
+                neighbor_device_id=nb_device_id,
+                neighbor_iface_id=nb_iface_id,
+                cf_neighbor_text=cf_neighbor_text,
+                cf_neighbor_port=cf_neighbor_port,
+                cf_neighbor_device=cf_neighbor_device,
+                cf_neighbor_iface=cf_neighbor_iface,
+            )
             if not sync_mac:
                 nb_data.pop("mac_address", None)
             if slot_to_device:
@@ -1894,15 +2059,60 @@ def sync_device(
             else:
                 target_id = nb_device.id
                 target_existing = existing_ifaces
-            action = nb.upsert_interface(target_id, nb_data, target_existing.get(iface_name))
+            action, nb_iface = nb.upsert_interface(target_id, nb_data, target_existing.get(iface_name))
             counts[action] += 1
             if action != "unchanged":
                 log.info("  %-40s %s", iface_name, action)
             else:
                 log.debug("  %-40s unchanged", iface_name)
+
+            # Cabling
+            if cable_scope and cable_iface_id and nb_iface:
+                seen_cable_iface_ids.add(nb_iface.id)
+                try:
+                    c_action = nb.upsert_cable(
+                        nb_iface.id, cable_iface_id,
+                        cable_type=cable_type_from_iface_type(nb_data.get("type", "")),
+                        source_cf=cable_source_cf,
+                        source_value=cable_source_value,
+                    )
+                    if c_action == "created":
+                        cable_counts["created"] += 1
+                        log.info("  %-40s cable → iface %d (%s)", iface_name, nb_iface_id, c_action)
+                    elif c_action == "conflict":
+                        cable_counts["conflict"] += 1
+                except Exception as exc:
+                    cable_counts["error"] += 1
+                    log.error("  %-40s cable error: %s", iface_name, exc)
+
         except Exception as exc:
             counts["error"] += 1
             log.error("  %-40s error: %s", iface_name, exc)
+
+    if neighbors:
+        log.info("Neighbors   — found: %d  linked: %d  unresolved: %d",
+                 neighbors, neighbors_linked, neighbors - neighbors_linked)
+
+    # Delete stale cables — owned cables on interfaces that no longer have a neighbor
+    if cable_scope and cable_source_cf:
+        for iface_name, iface_obj in existing_ifaces.items():
+            if iface_obj.id in seen_cable_iface_ids:
+                continue
+            cable = getattr(iface_obj, "cable", None)
+            if not cable:
+                continue
+            cf = dict(getattr(cable, "custom_fields", {}) or {})
+            if cf.get(cable_source_cf) != cable_source_value:
+                continue
+            try:
+                nb.delete_cable(cable.id)
+                cable_counts["deleted"] += 1
+                log.info("  %-40s cable deleted (stale)", iface_name)
+            except Exception as exc:
+                log.error("  %-40s cable delete error: %s", iface_name, exc)
+
+    if any(cable_counts.values()):
+        log.info("Cables      — %s", "  ".join(f"{k}: {v}" for k, v in cable_counts.items() if v))
 
     # Wire up parent links for subinterfaces (e.g. GigabitEthernet0/0/1.1132 → GigabitEthernet0/0/1)
     # For VSS, wire parents per member device (subinterface and parent are always on the same device).
