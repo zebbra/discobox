@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-discobox — Netdisco → Netbox sync library.
+discobox: Netdisco → Netbox sync library.
 
 Imported by cli.py (one-shot CLI) and server.py (FastAPI webhook receiver).
 """
@@ -34,7 +34,7 @@ def map_iftype(nd_type: Optional[str], iface_name: Optional[str]) -> str:
     Map a Netdisco interface to a Netbox type slug.
 
     Name-prefix matching is tried first because Netdisco reports nearly every
-    physical port as ifType=ethernetCsmacd regardless of speed — the interface
+    physical port as ifType=ethernetCsmacd regardless of speed: the interface
     name (e.g. "TenGigabitEthernet0/1") carries the real type information.
     SNMP ifType is used as a fallback for LAG and virtual interfaces.
 
@@ -43,7 +43,7 @@ def map_iftype(nd_type: Optional[str], iface_name: Optional[str]) -> str:
     lname = (iface_name or "").lower()
     nd_type_l = (nd_type or "").lower()
 
-    # LAG / virtual via ifType — these are reliable regardless of name
+    # LAG / virtual via ifType: these are reliable regardless of name
     if "lag" in nd_type_l:                                          return "lag"
     if nd_type_l in ("softwareloopback", "propvirtual", "l2vlan",
                      "l3ipvlan"):                                   return "virtual"
@@ -199,7 +199,7 @@ class NetdiscoClient:
     def _reauth(self) -> bool:
         """Re-login with username/password if credentials are available. Returns True on success."""
         if self._username and self._password:
-            logger.warning("Netdisco token expired — re-authenticating")
+            logger.warning("Netdisco token expired: re-authenticating")
             self._login(self._username, self._password)
             return True
         return False
@@ -211,7 +211,7 @@ class NetdiscoClient:
         if resp.status_code == 401 and self._reauth():
             resp = self.session.get(url, timeout=30)
         if resp.status_code == 401:
-            logger.error("Netdisco 401 GET %s — response: %s", url, resp.text[:200])
+            logger.error("Netdisco 401 GET %s: response: %s", url, resp.text[:200])
         resp.raise_for_status()
         return resp.json()
 
@@ -222,7 +222,7 @@ class NetdiscoClient:
         if resp.status_code == 401 and self._reauth():
             resp = self.session.post(url, json=body, timeout=30)
         if resp.status_code == 401:
-            logger.error("Netdisco 401 POST %s — response: %s", url, resp.text[:200])
+            logger.error("Netdisco 401 POST %s: response: %s", url, resp.text[:200])
         resp.raise_for_status()
         return resp.json()
 
@@ -294,10 +294,10 @@ class NetboxClient:
         Strategy:
           1. Search IPAM for the address; walk the assignment back to a device.
           2. Scan devices whose primary_ip4 matches.
-          3. Exact hostname match (name__ie) — works when Netdisco has the full FQDN.
-          4. Short-name contains match (name__ic) — fallback for when Netdisco returns
+          3. Exact hostname match (name__ie): works when Netdisco has the full FQDN.
+          4. Short-name contains match (name__ic): fallback for when Netdisco returns
              a hostname from PTR that differs from the Netbox FQDN (e.g. wrong domain).
-          5. Serial match — most reliable identifier when IP and hostname both fail.
+          5. Serial match: most reliable identifier when IP and hostname both fail.
         """
         for addr in self.nb.ipam.ip_addresses.filter(address=ip):
             if addr.assigned_object_type == "dcim.interface" and addr.assigned_object:
@@ -329,33 +329,43 @@ class NetboxClient:
 
         return None
 
-    def update_device_fields(self, device: pynetbox.core.response.Record, nd_device: dict) -> None:
+    def update_device_fields(
+        self,
+        device: pynetbox.core.response.Record,
+        nd_device: dict,
+        log: Optional[logging.Logger] = None,
+        cf_os_version: Optional[str] = "os_version",
+        cf_os_name: Optional[str] = "os_name",
+        cf_os_release: Optional[str] = "os_release",
+    ) -> None:
         """Update serial, and custom fields os_ver / os_name / os_release."""
+        _log = log or logger
         patch: dict = {}
 
         if nd_device.get("serial"):
             patch["serial"] = nd_device["serial"]
 
         custom: dict = {}
-        if nd_device.get("os_ver"):
-            custom["os_version"] = nd_device["os_ver"]
-        if nd_device.get("os"):
-            custom["os_name"] = nd_device["os"]
-        os_release = parse_os_release(nd_device.get("description"))
-        if os_release:
-            custom["os_release"] = os_release
+        if cf_os_version and nd_device.get("os_ver"):
+            custom[cf_os_version] = nd_device["os_ver"]
+        if cf_os_name and nd_device.get("os"):
+            custom[cf_os_name] = nd_device["os"]
+        if cf_os_release:
+            os_release = parse_os_release(nd_device.get("description"))
+            if os_release:
+                custom[cf_os_release] = os_release
         if custom:
             patch["custom_fields"] = custom
 
         if not patch:
-            logger.debug("Device fields — nothing to update")
+            _log.debug("Device fields: nothing to update")
             return
 
         device.update(patch)
-        logger.info(
-            "Device fields updated — serial=%r os_name=%r os_ver=%r os_release=%r",
-            patch.get("serial"), custom.get("os_name"),
-            custom.get("os_ver"), custom.get("os_release"),
+        _log.debug(
+            "Device fields: serial=%r os_name=%r os_ver=%r os_release=%r",
+            patch.get("serial"), custom.get(cf_os_name or ""),
+            custom.get(cf_os_version or ""), custom.get(cf_os_release or ""),
         )
 
     def fetch_interfaces(self, device_id: int) -> dict[str, pynetbox.core.response.Record]:
@@ -379,25 +389,52 @@ class NetboxClient:
         device_id: int,
         data: dict,
         existing: Optional[pynetbox.core.response.Record],
-    ) -> str:
+        source_cf: Optional[str] = None,
+        source_value: str = "netdisco",
+    ) -> tuple:
         """
         Create or update a Netbox interface.
+
+        If source_cf is set and the existing interface has that CF set to a value
+        other than empty or source_value, the interface is left untouched ("skipped").
 
         MAC address is handled separately via upsert_mac() because in Netbox 4.x
         it is its own model (dcim.mac-addresses) rather than a plain string field.
         Custom fields are compared key-by-key to avoid overwriting unrelated fields.
 
-        Returns (action, iface) where action is one of: "created", "updated", "unchanged".
+        Returns (action, iface) where action is one of: "created", "updated", "unchanged", "skipped".
         """
         mac = data.pop("mac_address", None)
-        custom_fields = data.pop("custom_fields", None)
+        custom_fields = data.pop("custom_fields", None) or {}
+
+        # Inject ownership marker so we can identify our interfaces later
+        if source_cf and source_value:
+            custom_fields[source_cf] = source_value
 
         if existing is None:
-            iface = self.nb.dcim.interfaces.create(**data, device=device_id)
-            if custom_fields:
-                iface.update({"custom_fields": custom_fields})
-            action = "created"
-        else:
+            try:
+                iface = self.nb.dcim.interfaces.create(**data, device=device_id)
+                if custom_fields:
+                    iface.update({"custom_fields": custom_fields})
+                action = "created"
+            except pynetbox.RequestError as exc:
+                if "already exists" in str(exc):
+                    # Cache miss: interface exists in NetBox but wasn't in the snapshot — update instead
+                    fetched = list(self.nb.dcim.interfaces.filter(device_id=device_id, name=data["name"]))
+                    if fetched:
+                        existing = fetched[0]
+                    else:
+                        raise
+                else:
+                    raise
+        if existing is not None:
+            # Skip interfaces owned by someone else
+            if source_cf:
+                existing_cf = dict(getattr(existing, "custom_fields", {}) or {})
+                owner = existing_cf.get(source_cf) or ""
+                if owner and owner != source_value:
+                    return "skipped", existing
+
             patch = {}
             for k, v in data.items():
                 if v is None:
@@ -449,13 +486,17 @@ class NetboxClient:
         if existing_cable:
             if source_cf:
                 cf = dict(getattr(existing_cable, "custom_fields", {}) or {})
-                if cf.get(source_cf) == source_value:
-                    return "exists"
-            logger.error(
-                "Cable conflict: iface %s ↔ %s — existing cable %s not owned by discobox, skipping",
-                iface_a_id, iface_b_id, existing_cable.id,
-            )
-            return "conflict"
+                owner = cf.get(source_cf) or ""
+                if owner and owner != source_value:
+                    logger.error(
+                        "Cable conflict: iface %s ↔ %s: existing cable %s not owned by discobox, skipping",
+                        iface_a_id, iface_b_id, existing_cable.id,
+                    )
+                    return "conflict"
+                # Unowned cable: claim it
+                if not owner and source_value:
+                    existing_cable.update({"custom_fields": {source_cf: source_value}})
+            return "exists"
 
         cable = self.nb.dcim.cables.create(
             a_terminations=[{"object_type": "dcim.interface", "object_id": iface_a_id}],
@@ -519,11 +560,11 @@ class NetboxClient:
                 nd_host = str(ipaddress.ip_interface(address).ip)
                 if nb_ip.address == address or nb_host != nd_host:
                     return "unchanged"
-                # Same host, different prefix — fix it
+                # Same host, different prefix: fix it
                 nb_ip.update({"address": address})
                 return "fixed"
 
-            # Unassigned IP (e.g. after VIP device was deleted) — claim it
+            # Unassigned IP (e.g. after VIP device was deleted): claim it
             if not nb_ip.assigned_object:
                 nb_ip.update({
                     "address": address,
@@ -551,16 +592,16 @@ class NetboxClient:
                 )
                 return "moved"
 
-            # IP is shared across HA members — ensure it carries the vip role
+            # IP is shared across HA members: ensure it carries the vip role
             if getattr(nb_ip, "role", None) != "vip":
                 nb_ip.update({"role": "vip"})
                 logger.info(
-                    "  IP %-20s already assigned to %s — role set to vip",
+                    "  IP %-20s already assigned to %s: role set to vip",
                     address, nb_ip.assigned_object or "unassigned",
                 )
             else:
                 logger.warning(
-                    "  IP %-20s already in Netbox (id=%s, assigned to %s) — skipping",
+                    "  IP %-20s already in Netbox (id=%s, assigned to %s): skipping",
                     address, nb_ip.id, nb_ip.assigned_object or "unassigned",
                 )
             return "skipped"
@@ -648,6 +689,7 @@ class NetboxClient:
         position: str,
     ) -> pynetbox.core.response.Record:
         """Return an existing ModuleBay or create one on the device."""
+        name = name[:64]
         results = list(self.nb.dcim.module_bays.filter(device_id=device.id, name=name))
         if len(results) > 1:
             logger.warning("  ModuleBay %r: %d duplicates in Netbox, using first", name, len(results))
@@ -763,7 +805,7 @@ class NetboxClient:
             if any(p.search(bay.name) for p in patterns):
                 if bay.installed_device:
                     logger.warning(
-                        "  Device bay %r has installed device %r — skipping deletion",
+                        "  Device bay %r has installed device %r: skipping deletion",
                         bay.name, bay.installed_device,
                     )
                     continue
@@ -793,7 +835,7 @@ class NetboxClient:
                 continue
             if getattr(bay, "installed_module", None):
                 logger.warning(
-                    "  Module bay %r has installed module — skipping deletion", bay.name
+                    "  Module bay %r has installed module: skipping deletion", bay.name
                 )
                 continue
             bay.delete()
@@ -812,7 +854,7 @@ class NetboxClient:
         appear in Netdisco's port list (interfaces present in Netdisco are real,
         not placeholders, regardless of their name).
 
-        Safe to run after IP sync — if the IP was moved to the real interface
+        Safe to run after IP sync: if the IP was moved to the real interface
         the dummy is now empty and can be removed.
 
         Returns the number of interfaces deleted.
@@ -825,7 +867,7 @@ class NetboxClient:
                 continue
             if iface.name.lower() in nd_lower:
                 logger.debug(
-                    "  Dummy interface %r exists in Netdisco — keeping", iface.name,
+                    "  Dummy interface %r exists in Netdisco: keeping", iface.name,
                 )
                 continue
             ips = list(self.nb.ipam.ip_addresses.filter(
@@ -834,7 +876,7 @@ class NetboxClient:
             ))
             if ips:
                 logger.warning(
-                    "  Dummy interface %r still has %d IP(s) — skipping deletion",
+                    "  Dummy interface %r still has %d IP(s): skipping deletion",
                     iface.name, len(ips),
                 )
                 continue
@@ -964,8 +1006,8 @@ def vendor_from_chassis(chassis: dict) -> Optional[str]:
     Cisco ENTITY-MIB OID names all start with "cev" (e.g. cevChassisN9KC93600CDGX)
     and never contain a leading vendor prefix.
     """
-    type_str = chassis.get("type", "")
-    # Cisco types — let caller use the device's existing Netbox manufacturer
+    type_str = chassis.get("type") or ""
+    # Cisco types: let caller use the device's existing Netbox manufacturer
     if type_str.lower().startswith("cev"):
         return None
     # Other vendors encode their name before the first dot
@@ -980,7 +1022,8 @@ NULL_MAC = "00:00:00:00:00:00"
 
 
 _CISCO_ABBREV = [
-    ("HundredGigE",          "Hu"),
+    ("HundredGigabitEthernet", "HundredGigE"),
+    ("HundredGigabitEthernet", "Hu"),
     ("FortyGigabitEthernet",  "Fo"),
     ("TwentyFiveGigE",        "Twe"),
     ("TenGigabitEthernet",    "Te"),
@@ -1126,7 +1169,7 @@ def port_to_netbox(
     data: dict = {
         "name":        full_name,
         "type":        map_iftype(port.get("type"), full_name),
-        "enabled":     port.get("up_admin", "").lower() == "up",
+        "enabled":     (port.get("up_admin") or "").lower() == "up",
         "mtu":         port.get("mtu") or None,
         "mac_address": clean_mac(port.get("mac")),
         "speed":       speed_kbps,
@@ -1136,7 +1179,7 @@ def port_to_netbox(
 
     nb_cf: dict = {}
     if port.get("remote_ip"):
-        # Port has a neighbor — write all configured fields; object fields may be None (unresolved)
+        # Port has a neighbor: write all configured fields; object fields may be None (unresolved)
         if cf_neighbor_text and port.get("remote_id"):
             nb_cf[cf_neighbor_text] = port["remote_id"]
         if cf_neighbor_port and port.get("remote_port"):
@@ -1148,7 +1191,7 @@ def port_to_netbox(
     if nb_cf:
         data["custom_fields"] = nb_cf
     elif lldp_clear_stale:
-        # No neighbor on this port — clear all stale neighbor fields
+        # No neighbor on this port: clear all stale neighbor fields
         stale = {k: None for k in [cf_neighbor_text, cf_neighbor_port, cf_neighbor_device, cf_neighbor_iface] if k}
         if stale:
             data["custom_fields"] = stale
@@ -1168,13 +1211,13 @@ def _handle_vip_device(
     """
     Handle a VIP/cluster placeholder device according to vip_mode:
 
-    threenode      — keep the device as a VC member; mirror device_type from the
+    threenode     : keep the device as a VC member; mirror device_type from the
                      active node; set role=vip on its primary_ip4.
-    soft           — clear primary_ip4 and unassign all IPs from the device's
+    soft          : clear primary_ip4 and unassign all IPs from the device's
                      interfaces so they can be claimed by the physical nodes on
                      the next IP sync. Device record is kept.
-    hard           — delete the device entirely (implies soft cleanup first).
-    off            — do nothing.
+    hard          : delete the device entirely (implies soft cleanup first).
+    off           : do nothing.
     """
     if vip_mode == "off":
         return
@@ -1189,16 +1232,16 @@ def _handle_vip_device(
                     patch["device_type"] = active_dt_id
             if patch:
                 vip_dev.update(patch)
-                log.info("VIP device %r — device_type updated", vip_dev.name)
+                log.info("VIP device %r: device_type updated", vip_dev.name)
             # Set role=vip on primary IP
             primary = getattr(vip_dev, "primary_ip4", None)
             if primary:
                 ip_obj = nb.nb.ipam.ip_addresses.get(primary.id)
                 if ip_obj and getattr(ip_obj, "role", None) != "vip":
                     ip_obj.update({"role": "vip"})
-                    log.info("VIP device %r — primary IP %s role set to vip", vip_dev.name, ip_obj.address)
+                    log.info("VIP device %r: primary IP %s role set to vip", vip_dev.name, ip_obj.address)
         except Exception as exc:
-            log.error("VIP device %r — could not update in threenode mode: %s", vip_dev.name, exc)
+            log.error("VIP device %r: could not update in threenode mode: %s", vip_dev.name, exc)
         return
     try:
         if getattr(vip_dev, "primary_ip4", None):
@@ -1213,12 +1256,12 @@ def _handle_vip_device(
                     "assigned_object_id": None,
                     "role": "vip",
                 })
-                log.info("VIP device %r — unassigned IP %s (role=vip)", vip_dev.name, ip.address)
+                log.info("VIP device %r: unassigned IP %s (role=vip)", vip_dev.name, ip.address)
         if vip_mode == "hard":
             nb.nb.dcim.devices.get(vip_dev.id).delete()
             log.info("VIP device %r deleted (hard mode)", vip_dev.name)
         else:
-            log.info("VIP device %r — IPs freed (soft mode)", vip_dev.name)
+            log.info("VIP device %r: IPs freed (soft mode)", vip_dev.name)
     except Exception as exc:
         log.error("VIP device %r handling error: %s", vip_dev.name, exc)
 
@@ -1236,6 +1279,195 @@ def _parse_snmp_timeout_us(value: Optional[str]) -> Optional[int]:
     return int(amount * _TIMEOUT_UNITS[unit])
 
 
+def _slugify(text: str) -> str:
+    import re as _re
+    return _re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def _resolve_location_chain(
+    nb: "NetboxClient", fallback_site_id: int, location_str: str
+) -> tuple[int, Optional[int]]:
+    """
+    Parse a comma-separated SNMP location string.
+
+    If the first part matches an existing NetBox site slug, that site is used
+    and the remaining parts become the location chain.  Otherwise all parts are
+    treated as locations under fallback_site_id.
+
+    Returns (site_id, deepest_location_id).  deepest_location_id is None when
+    no location parts remain or all fail.
+    """
+    log = logging.getLogger("discobox.reconcile")
+    SKIP = {"", "unknown", "-", "n/a", "na", "tbd"}
+    parts = [p.strip() for p in location_str.split(",")]
+    parts = [p for p in parts if p.lower() not in SKIP]
+    if not parts:
+        return fallback_site_id, None
+
+    site_slug = _slugify(parts[0])
+    matched_sites = list(nb.nb.dcim.sites.filter(slug=site_slug))
+    if matched_sites:
+        site_id = matched_sites[0].id
+        log.debug("SNMP location: site %r (id=%s)", matched_sites[0].name, site_id)
+    else:
+        log.warning("SNMP location: site slug %r not found, falling back to configured site", site_slug)
+        site_id = fallback_site_id
+    parts = parts[1:]
+
+    parent_id: Optional[int] = None
+    location_id: Optional[int] = None
+
+    for part in parts:
+        slug = _slugify(part)
+        filter_kwargs: dict = {"site_id": site_id, "slug": slug}
+        if parent_id is not None:
+            filter_kwargs["parent_id"] = parent_id
+        else:
+            filter_kwargs["parent_id__isnull"] = True
+
+        existing = list(nb.nb.dcim.locations.filter(**filter_kwargs))
+        if existing:
+            loc = existing[0]
+        else:
+            create_kwargs: dict = {"name": part, "slug": slug, "site": site_id}
+            if parent_id is not None:
+                create_kwargs["parent"] = parent_id
+            try:
+                loc = nb.nb.dcim.locations.create(**create_kwargs)
+                log.debug("Auto-create location: %r (slug=%s, parent_id=%s)", part, slug, parent_id)
+            except Exception as exc:
+                log.warning("Auto-create location %r failed: %s — stopping chain", part, exc)
+                break
+
+        parent_id = loc.id
+        location_id = loc.id
+
+    return site_id, location_id
+
+
+def _create_device_from_nd(
+    nb: "NetboxClient",
+    nd: "NetdiscoClient",
+    ip: str,
+    nd_device: dict,
+    role_slug: str,
+    site_slug: str,
+    status: str = "active",
+    auto_create_location: bool = False,
+    iface_source_cf: Optional[str] = None,
+    iface_source_value: str = "netdisco",
+) -> bool:
+    """
+    Bootstrap a new NetBox device from Netdisco discovery data.
+    Creates the device, its management interface, and primary IP.
+    Returns True on success (even if IP assignment partially fails).
+    """
+    log = logging.getLogger("discobox.reconcile")
+    hostname = nd_device.get("name") or nd_device.get("dns") or ip
+
+    roles = list(nb.nb.dcim.device_roles.filter(slug=role_slug))
+    if not roles:
+        log.error("Auto-create %s: role slug %r not found in NetBox", ip, role_slug)
+        return False
+    sites = list(nb.nb.dcim.sites.filter(slug=site_slug))
+    if not sites:
+        log.error("Auto-create %s: site slug %r not found in NetBox", ip, site_slug)
+        return False
+
+    try:
+        nd_mods = nd.get_modules(ip)
+    except Exception as exc:
+        log.warning("Auto-create %s: could not fetch modules: %s: using description as model", ip, exc)
+        nd_mods = []
+    chassis = [m for m in nd_mods if m.get("class") == "chassis" and m.get("model")]
+    primary_ch = chassis[0] if chassis else {}
+    vendor_name = vendor_from_chassis(primary_ch) if primary_ch else None
+    vendor_name = vendor_name or nd_device.get("vendor") or None
+    model = primary_ch.get("model") or nd_device.get("model") or nd_device.get("description") or "Unknown"
+    serial = primary_ch.get("serial") or nd_device.get("serial") or ""
+
+    try:
+        mfr = nb.get_or_create_manufacturer(vendor_name or "Unknown")
+        device_type = nb.get_or_create_device_type(mfr, model)
+    except Exception as exc:
+        log.error("Auto-create %s: device type %r/%r failed: %s", ip, vendor_name, model, exc)
+        return False
+
+    resolved_site_id = sites[0].id
+    location_id: Optional[int] = None
+    if auto_create_location:
+        nd_location = nd_device.get("location") or ""
+        if nd_location:
+            resolved_site_id, location_id = _resolve_location_chain(nb, sites[0].id, nd_location)
+
+    existing = list(nb.nb.dcim.devices.filter(name=hostname, site_id=resolved_site_id))
+    if existing:
+        log.debug("Auto-create %s: device %r already exists, skipping", ip, hostname)
+        nb_device = existing[0]
+    else:
+        try:
+            create_kwargs: dict = dict(
+                name=hostname,
+                device_type=device_type.id,
+                role=roles[0].id,
+                site=resolved_site_id,
+                status=status,
+            )
+            if serial:
+                create_kwargs["serial"] = serial
+            if location_id is not None:
+                create_kwargs["location"] = location_id
+            if iface_source_cf:
+                create_kwargs["custom_fields"] = {iface_source_cf: iface_source_value}
+            nb_device = nb.nb.dcim.devices.create(**create_kwargs)
+        except Exception as exc:
+            log.error("Auto-create %s: device create failed: %s", ip, exc)
+            return False
+
+    log.info("Auto-create: created %r (%s)  type=%s/%s", hostname, ip, vendor_name or "?", model)
+
+    # Find management interface name and address from device_ips
+    try:
+        nd_ips_list = nd.get_device_ips(ip)
+    except Exception as exc:
+        log.warning("Auto-create %s: could not fetch device_ips: %s", ip, exc)
+        nd_ips_list = []
+
+    mgmt_entry = next(
+        (e for e in nd_ips_list if (e.get("ip") or "").split("/")[0] == ip),
+        None,
+    )
+    port_name = (mgmt_entry or {}).get("port") or "mgmt0"
+    subnet = (mgmt_entry or {}).get("subnet")
+    address = ip
+    if "/" not in address and subnet:
+        try:
+            prefix = ipaddress.ip_network(subnet, strict=False).prefixlen
+            address = f"{ip}/{prefix}"
+        except ValueError:
+            address = f"{ip}/32"
+
+    try:
+        iface_kwargs: dict = dict(device=nb_device.id, name=port_name, type="1000base-t")
+        iface = nb.nb.dcim.interfaces.create(**iface_kwargs)
+        if iface_source_cf:
+            iface.update({"custom_fields": {iface_source_cf: iface_source_value}})
+    except Exception as exc:
+        log.error("Auto-create %s: interface %r create failed: %s", ip, port_name, exc)
+        return True
+
+    try:
+        nb.upsert_ip(address, iface)
+        ip_objs = list(nb.nb.ipam.ip_addresses.filter(address=ip))
+        if ip_objs:
+            nb_device.update({"primary_ip4": ip_objs[0].id})
+            log.info("Auto-create: IP %s → %r set as primary on %r", address, port_name, hostname)
+    except Exception as exc:
+        log.error("Auto-create %s: IP assignment failed: %s", ip, exc)
+
+    return True
+
+
 def reconcile_devices(
     nd: "NetdiscoClient",
     nb: "NetboxClient",
@@ -1243,10 +1475,19 @@ def reconcile_devices(
     max_failed: Optional[int] = None,
     max_enqueue: Optional[int] = None,
     offset: Optional[int] = None,
+    auto_create_role: Optional[str] = None,
+    auto_create_site: Optional[str] = None,
+    auto_create_status: str = "active",
+    auto_create_location: bool = False,
+    iface_source_cf: Optional[str] = None,
+    iface_source_value: str = "netdisco",
 ) -> dict:
     """
     Compare Netbox active devices against Netdisco and enqueue discovery
     for any device present in Netbox but missing from Netdisco.
+
+    If auto_create_role and auto_create_site are set, also creates NetBox
+    devices for any Netdisco device not yet present in NetBox.
 
     If the Netdisco queue exceeds max_queued or max_failed (last 1h), the
     enqueue step is skipped to avoid overloading Netdisco.
@@ -1261,37 +1502,43 @@ def reconcile_devices(
         try:
             qs = nd.get_queue_status(since="1h")
         except requests.HTTPError as exc:
-            log.error("Reconcile aborted — could not fetch Netdisco queue status: %s", exc)
+            log.error("Reconcile aborted: could not fetch Netdisco queue status: %s", exc)
             return _aborted
         queued, failed = qs.get("queued", 0), qs.get("failed", 0)
         if (max_queued is not None and queued > max_queued) or \
            (max_failed is not None and failed > max_failed):
             log.warning(
-                "Reconcile aborted — queue too busy (queued=%d failed=%d, limits queued=%s failed=%s)",
+                "Reconcile aborted: queue too busy (queued=%d failed=%d, limits queued=%s failed=%s)",
                 queued, failed, max_queued, max_failed,
             )
             return _aborted
 
     try:
-        nd_ips = {d["ip"] for d in nd.get_all_devices() if d.get("ip")}
+        nd_all_devices = nd.get_all_devices()
+        nd_ips = {d["ip"] for d in nd_all_devices if d.get("ip")}
     except requests.HTTPError as exc:
-        log.error("Reconcile aborted — could not fetch Netdisco devices: %s", exc)
+        log.error("Reconcile aborted: could not fetch Netdisco devices: %s", exc)
         return _aborted
     log.info("Netdisco knows %d devices", len(nd_ips))
 
     nb_total = nb.nb.dcim.devices.count(status="active", has_primary_ip=True)
     counts = {"enqueued": 0, "skipped": 0, "already_known": 0, "netdisco_total": len(nd_ips), "netbox_total": nb_total}
 
+    nb_primary_ips: set[str] = set()
+    not_in_netdisco: list[dict] = []
     for device in nb.nb.dcim.devices.filter(status="active", has_primary_ip=True):
         primary = device.primary_ip4
         if not primary:
             counts["skipped"] += 1
             continue
         ip = str(primary).split("/")[0]
+        nb_primary_ips.add(ip)
 
         if ip in nd_ips:
             counts["already_known"] += 1
             continue
+
+        not_in_netdisco.append({"ip": ip, "name": device.name})
 
         cf = getattr(device, "custom_fields", {}) or {}
         snmp_tag = cf.get("snmp_auth_profile") or None
@@ -1302,7 +1549,7 @@ def reconcile_devices(
             continue
 
         if max_enqueue is not None and counts["enqueued"] >= max_enqueue:
-            log.info("Enqueue cap reached (%d) — deferring remaining devices to next run", max_enqueue)
+            log.info("Enqueue cap reached (%d): deferring remaining devices to next run", max_enqueue)
             break
 
         try:
@@ -1314,7 +1561,52 @@ def reconcile_devices(
         except Exception as exc:
             log.error("Failed to enqueue discover for %s: %s", ip, exc)
 
-    log.info("Reconcile done — %s", counts)
+    # Build full nb_all_ips across all statuses for gap reporting and auto-create
+    nb_all_ips = nb_primary_ips | {
+        str(d.primary_ip4).split("/")[0]
+        for d in nb.nb.dcim.devices.filter(primary_ip4__isnull=False, status__n="active")
+        if d.primary_ip4
+    }
+    not_in_netbox: list[dict] = [
+        {"ip": d["ip"], "name": d.get("name") or d.get("dns") or d["ip"]}
+        for d in nd_all_devices
+        if d.get("ip") and d["ip"] not in nb_all_ips
+    ]
+    counts["not_in_netdisco"] = len(not_in_netdisco)
+    counts["not_in_netbox"] = len(not_in_netbox)
+    if not_in_netdisco or not_in_netbox:
+        log.info("Gaps: not_in_netdisco=%d  not_in_netbox=%d", len(not_in_netdisco), len(not_in_netbox))
+
+    # Auto-create: bootstrap NetBox devices for Netdisco entries not yet in NetBox
+    if auto_create_role and auto_create_site:
+        create_counts: dict[str, int] = {"created": 0, "failed": 0}
+        for nd_dev in nd_all_devices:
+            nd_ip = nd_dev.get("ip")
+            if not nd_ip or nd_ip in nb_all_ips:
+                continue
+            try:
+                nd_device_full = nd.get_device(nd_ip)
+            except Exception as exc:
+                log.error("Auto-create %s: could not fetch device info: %s", nd_ip, exc)
+                create_counts["failed"] += 1
+                continue
+            ok = _create_device_from_nd(
+                nb, nd, nd_ip, nd_device_full,
+                role_slug=auto_create_role,
+                site_slug=auto_create_site,
+                status=auto_create_status,
+                auto_create_location=auto_create_location,
+                iface_source_cf=iface_source_cf,
+                iface_source_value=iface_source_value,
+            )
+            create_counts["created" if ok else "failed"] += 1
+        if any(create_counts.values()):
+            log.info("Auto-create: %s", "  ".join(f"{k}: {v}" for k, v in create_counts.items() if v))
+        counts.update(create_counts)
+
+    log.info("Reconcile done: %s", counts)
+    counts["not_in_netdisco_list"] = not_in_netdisco
+    counts["not_in_netbox_list"] = not_in_netbox
     return counts
 
 
@@ -1337,37 +1629,42 @@ def sync_device(
     cable_scope: str = "",          # "" = disabled, "site" = same-site only
     cable_source_cf: Optional[str] = "source",
     cable_source_value: Optional[str] = "netdisco",
+    iface_source_cf: Optional[str] = "source",
+    iface_source_value: str = "netdisco",
+    cf_os_version: Optional[str] = "os_version",
+    cf_os_name: Optional[str] = "os_name",
+    cf_os_release: Optional[str] = "os_release",
 ) -> dict:
     """
     Sync device fields, interfaces, MACs, IPs, modules, and SFPs.
 
     Returns a dict with:
-      ok          bool   — True if no errors occurred
-      interfaces  dict   — created/updated/unchanged/error counts
-      ips         dict   — created/fixed/moved/unchanged/skipped/error counts
-      modules     dict   — created/updated/unchanged/error counts
+      ok          bool  : True if no errors occurred
+      interfaces  dict  : created/updated/unchanged/error counts
+      ips         dict  : created/fixed/moved/unchanged/skipped/error counts
+      modules     dict  : created/updated/unchanged/error counts
     """
     log = logging.getLogger(f"discobox.{ip}")
-    log.info("── device %s", ip)
 
     try:
         nd_device = nd.get_device(ip)
         nd_ports = nd.get_ports(ip)
     except requests.HTTPError as exc:
-        log.error("Netdisco request failed for %s: %s", ip, exc)
+        log.error("Netdisco request failed: %s", exc)
         return {"ok": False, "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
 
     nd_hostname = nd_device.get("name") or nd_device.get("dns") or ""
     nd_serial = nd_device.get("serial") or ""
-    logger.info("Netdisco  hostname=%r  ports=%d", nd_hostname, len(nd_ports))
+    log.info("sync start %s", nd_hostname or ip)
+    log.debug("Netdisco  hostname=%r  ports=%d", nd_hostname, len(nd_ports))
 
     nb_device = nb.find_device_by_ip(ip, hostname=nd_hostname, serial=nd_serial)
     if not nb_device:
-        log.error("No Netbox device found for IP %s or hostname %r — skipping", ip, nd_hostname)
+        log.error("No Netbox device found for IP %s or hostname %r: skipping", ip, nd_hostname)
         return {"ok": False, "reason": "device_not_found", "hostname": nd_hostname,
                 "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
 
-    logger.info("Netbox    device=%r  id=%s", nb_device.name, nb_device.id)
+    logger.debug("Netbox    device=%r  id=%s", nb_device.name, nb_device.id)
 
     # ── HA / VIP detection ────────────────────────────────────────────────────────
     # Signal: SNMP hostname belongs to a different Netbox device than the IP lookup found.
@@ -1398,7 +1695,7 @@ def sync_device(
 
             if real_device and real_device.id != nb_device.id:
                 log.info(
-                    "HA VIP detected — %r → redirecting to %r",
+                    "HA VIP detected: %r → redirecting to %r",
                     nb_device.name, real_device.name,
                 )
                 vip_device = nb_device
@@ -1418,20 +1715,20 @@ def sync_device(
                     vc_members.append((partner_dev, partner_pos))
                     log.info("HA partner found: %r", partner_dev.name)
                 else:
-                    log.warning("HA partner not found for %r — VC will have one member", nb_device.name)
+                    log.warning("HA partner not found for %r: VC will have one member", nb_device.name)
                 if vip_mode == "threenode":
                     vc_members.append((vip_device, 0))
                     log.info("HA VIP device %r added as VC member pos=0", vip_device.name)
                 try:
                     vc_action, _ = nb.upsert_virtual_chassis(vc_name, vc_members)
-                    log.info("HA VirtualChassis %r — %s", vc_name, vc_action)
+                    log.info("HA VirtualChassis %r: %s", vc_name, vc_action)
                 except Exception as exc:
                     log.error("HA VirtualChassis error: %s", exc)
 
                 _handle_vip_device(nb, vip_device, vip_mode, log, active_device=nb_device)
             else:
                 log.warning(
-                    "Hostname mismatch for %s — Netdisco=%r  Netbox=%r",
+                    "Hostname mismatch for %s: Netdisco=%r  Netbox=%r",
                     ip, nd_hostname, nb_device.name,
                 )
 
@@ -1469,7 +1766,7 @@ def sync_device(
                 try:
                     vc_action, _ = nb.upsert_virtual_chassis(vc_name, vc_members)
                     log.info(
-                        "HA peer VirtualChassis %r — %s  (topology=standalone per Netdisco; VC is Netbox-side)",
+                        "HA peer VirtualChassis %r: %s  (topology=standalone per Netdisco; VC is Netbox-side)",
                         vc_name, vc_action,
                     )
                 except Exception as exc:
@@ -1478,7 +1775,8 @@ def sync_device(
                 if found_vip_dev:
                     _handle_vip_device(nb, found_vip_dev, vip_mode, log, active_device=nb_device)
 
-    nb.update_device_fields(nb_device, nd_device)
+    nb.update_device_fields(nb_device, nd_device, log=log,
+                            cf_os_version=cf_os_version, cf_os_name=cf_os_name, cf_os_release=cf_os_release)
 
     if housekeeping:
         deleted_bays = nb.remove_stale_device_bays(nb_device, STALE_DEVICE_BAY_PATTERNS)
@@ -1488,12 +1786,12 @@ def sync_device(
             if p.get("port") or p.get("descr")
         }
         deleted_ifaces = nb.remove_empty_dummy_interfaces(nb_device, DUMMY_INTERFACES, nd_port_names)
-        log.info(
-            "Housekeeping — deleted %d stale device bay(s), %d stale module bay(s), %d empty dummy interface(s)",
+        log.debug(
+            "Housekeeping: deleted %d stale device bay(s), %d stale module bay(s), %d empty dummy interface(s)",
             deleted_bays, deleted_mod_bays, deleted_ifaces,
         )
 
-    counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
+    counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "skipped": 0, "error": 0}
     ip_counts: dict[str, int] = {"created": 0, "fixed": 0, "moved": 0, "unchanged": 0, "skipped": 0, "error": 0}
     mod_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
     sfp_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
@@ -1528,15 +1826,15 @@ def sync_device(
         # Log tree
         root = next((m for m in nd_mods if not m.get("parent")), None)
         if root:
-            log.info("  %s (root)  %r  type=%s  model=%s  serial=%s",
+            log.debug("  %s (root)  %r  type=%s  model=%s  serial=%s",
                         root.get("class", "?"), root.get("name", ""),
                         root.get("type", ""), root.get("model", ""), root.get("serial", ""))
         for i, ch in enumerate(chassis):
             prefix = "└──" if i == len(chassis) - 1 else "├──"
-            log.info("  %s chassis  %r  model=%s  serial=%s",
+            log.debug("  %s chassis  %r  model=%s  serial=%s",
                         prefix, ch.get("name", ""), ch.get("model", ""), ch.get("serial", ""))
         topo = "fex" if is_fex else ("vss" if is_vss else ("standalone" if is_standalone else "stack"))
-        log.info("Modules   chassis=%d  topology=%s", len(chassis), topo)
+        log.debug("Modules   chassis=%d  topology=%s", len(chassis), topo)
 
         manufacturer = nb_device.device_type.manufacturer
 
@@ -1545,14 +1843,14 @@ def sync_device(
             part_number = ch.get("model", "") or ""
             serial = ch.get("serial") or ""
             # Skip device type update when model looks like a raw OID fragment
-            # (e.g. ".112.100.1003") — keep whatever is already set in Netbox.
+            # (e.g. ".112.100.1003"): keep whatever is already set in Netbox.
             model = parse_sw_model(ch.get("sw_ver", "")) or part_number
             if not model or model.startswith("."):
                 if serial and (nb_device.serial or "") != serial:
                     nb_device.update({"serial": serial})
-                    log.info("  serial=%s updated (no valid model from Netdisco)", serial)
+                    log.debug("  serial=%s updated (no valid model from Netdisco)", serial)
                 else:
-                    log.debug("  DeviceType skipped — no valid model from Netdisco")
+                    log.debug("  DeviceType skipped: no valid model from Netdisco")
                 mod_counts["unchanged"] += 1
                 return
             vendor_name = vendor_from_chassis(ch)
@@ -1565,9 +1863,9 @@ def sync_device(
                 patch["serial"] = serial
             if patch:
                 nb_device.update(patch)
-                # pynetbox replaces device_type with a plain int after update — restore the object
+                # pynetbox replaces device_type with a plain int after update: restore the object
                 nb_device.device_type = device_type
-                log.info("  DeviceType → %s / %s  serial=%s  updated", mfr.name, model, serial)
+                log.debug("  DeviceType → %s / %s  serial=%s  updated", mfr.name, model, serial)
                 mod_counts["updated"] += 1
             else:
                 log.debug("  DeviceType unchanged")
@@ -1587,10 +1885,10 @@ def sync_device(
             mod_counts[action] += 1
             if slot_key is not None and module:
                 slot_to_module[slot_key] = module.id
-            log.info("  %s  %s  serial=%s  %s", name, model, serial, action)
+            log.debug("  %s  %s  serial=%s  %s", name, model, serial, action)
 
         if is_standalone:
-            # Single device — update DeviceType on the device itself
+            # Single device: update DeviceType on the device itself
             try:
                 _update_device_type(chassis[0])
             except Exception as exc:
@@ -1618,7 +1916,7 @@ def sync_device(
                     log.error("  %-30s error: %s", ch.get("name", ""), exc)
 
         elif is_vss:
-            # Cat9500 StackWise Virtual — two physical devices in separate Netbox records.
+            # Cat9500 StackWise Virtual: two physical devices in separate Netbox records.
             # Create/update a Virtual Chassis to link them; no module bays on either device.
             device_serial = nd_device.get("serial", "")
             primary_ch = next((c for c in chassis if c.get("serial") == device_serial), chassis[0])
@@ -1657,7 +1955,7 @@ def sync_device(
 
                 if not partner_dev:
                     log.warning(
-                        "  VSS partner not found (serial=%r) — Virtual Chassis will be incomplete",
+                        "  VSS partner not found (serial=%r): Virtual Chassis will be incomplete",
                         partner_serial,
                     )
                     mod_counts["error"] += 1
@@ -1694,7 +1992,7 @@ def sync_device(
             vc_name = nd_hostname.split(".")[0] if nd_hostname else f"vc-{ip}"
             try:
                 vc_action, _vc = nb.upsert_virtual_chassis(vc_name, vc_members)
-                log.info("  VirtualChassis %r — %s", vc_name, vc_action)
+                log.info("  VirtualChassis %r: %s", vc_name, vc_action)
             except Exception as exc:
                 log.error("  VirtualChassis error: %s", exc)
 
@@ -1703,7 +2001,7 @@ def sync_device(
                 slot_to_device[_pos] = _dev
 
         else:
-            # Traditional stack — create a module bay + module per chassis member.
+            # Traditional stack: create a module bay + module per chassis member.
             # Netdisco pos is 0-indexed; Cisco interface names are 1-indexed (Gi1/0/1 = member 1).
             for ch in chassis:
                 try:
@@ -1713,33 +2011,33 @@ def sync_device(
                     mod_counts["error"] += 1
                     log.error("  %-30s error: %s", ch.get("name", ""), exc)
 
-        log.info(
-            "Modules — updated=%d unchanged=%d errors=%d",
+        log.debug(
+            "Modules: updated=%d unchanged=%d errors=%d",
             mod_counts.get("updated", 0) + mod_counts.get("created", 0),
             mod_counts["unchanged"], mod_counts["error"],
         )
 
         # Supplement os_version from chassis sw_ver when the device field was empty
         # (e.g. Fortinet: "FortiGate-600F v7.4.8,build2795,250523 (GA.M)" → "7.4.8")
-        if not nd_device.get("os_ver"):
+        if cf_os_version and not nd_device.get("os_ver"):
             for ch in chassis:
                 ver = parse_sw_ver(ch.get("sw_ver", ""))
                 if ver:
                     try:
-                        nb_device.update({"custom_fields": {"os_version": ver}})
-                        log.info("  OS version from chassis sw_ver: %s", ver)
+                        nb_device.update({"custom_fields": {cf_os_version: ver}})
+                        log.debug("  OS version from chassis sw_ver: %s", ver)
                     except Exception as exc:
                         log.error("  OS version update error: %s", exc)
                     break
 
-        # Fans — inventory items only when model or serial is present (e.g. Nexus fan trays).
+        # Fans: inventory items only when model or serial is present (e.g. Nexus fan trays).
         # C9300-style fans report neither, so they are silently skipped.
         fans = [
             m for m in nd_mods
             if m.get("class") == "fan" and (m.get("model") or m.get("serial"))
         ]
         if fans:
-            log.info("Fans      entries: %d", len(fans))
+            log.debug("Fans      entries: %d", len(fans))
             fan_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
             for fan in fans:
                 fan_name = fan.get("name", "")
@@ -1758,25 +2056,25 @@ def sync_device(
                     )
                     fan_counts[action] += 1
                     if action != "unchanged":
-                        log.info("  Fan  %s  model=%s  serial=%s  %s",
-                                 fan_name, fan_model or "-", fan_serial or "-", action)
+                        log.debug("  Fan  %s  model=%s  serial=%s  %s",
+                                  fan_name, fan_model or "-", fan_serial or "-", action)
                     else:
                         log.debug("  Fan  %-35s unchanged", fan_name)
                 except Exception as exc:
                     fan_counts["error"] += 1
                     log.error("  Fan  %-35s error: %s", fan_name, exc)
-            log.info(
-                "Fans — created=%d updated=%d unchanged=%d errors=%d",
+            log.debug(
+                "Fans: created=%d updated=%d unchanged=%d errors=%d",
                 fan_counts["created"], fan_counts["updated"],
                 fan_counts["unchanged"], fan_counts["error"],
             )
 
-        # PSUs — inventory items on the device (skip Unknown type with no model)
+        # PSUs: inventory items on the device (skip Unknown type with no model)
         psus = [
             m for m in nd_mods
             if m.get("class") == "powerSupply" and m.get("type") != "cevPowerSupplyUnknown"
         ]
-        log.info("PSUs      entries: %d", len(psus))
+        log.debug("PSUs      entries: %d", len(psus))
         psu_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
         for psu in psus:
             psu_name = psu.get("name", "")
@@ -1796,20 +2094,20 @@ def sync_device(
                 )
                 psu_counts[action] += 1
                 if action != "unchanged":
-                    log.info("  PSU %s  model=%s  serial=%s  %s",
-                                psu_name, psu_model or "-", psu_serial or "-", action)
+                    log.debug("  PSU %s  model=%s  serial=%s  %s",
+                              psu_name, psu_model or "-", psu_serial or "-", action)
                 else:
                     log.debug("  PSU %-35s unchanged", psu_name)
             except Exception as exc:
                 psu_counts["error"] += 1
                 log.error("  PSU %-35s error: %s", psu_name, exc)
 
-        log.info(
-            "PSUs — created=%d updated=%d unchanged=%d errors=%d",
+        log.debug(
+            "PSUs: created=%d updated=%d unchanged=%d errors=%d",
             psu_counts["created"], psu_counts["updated"], psu_counts["unchanged"], psu_counts["error"],
         )
 
-        # Pre-blade orphan pass — fetch existing interfaces and delete any that are not
+        # Pre-blade orphan pass: fetch existing interfaces and delete any that are not
         # in Netdisco before blade sync fires, so Netbox's template auto-creation doesn't
         # hit duplicate-key errors on stale / wrongly-named interfaces.
         if slot_to_device:
@@ -1834,8 +2132,8 @@ def sync_device(
                     try:
                         iface.delete()
                         del dev_ifaces[iface_name]
-                        log.info("  %-40s moved from Switch %d → Switch %d",
-                                 iface_name, pos, owner_pos)
+                        log.debug("  %-40s moved from Switch %d → Switch %d",
+                                  iface_name, pos, owner_pos)
                     except Exception as exc:
                         log.error("  %-40s could not remove from wrong VSS member: %s",
                                   iface_name, exc)
@@ -1858,22 +2156,25 @@ def sync_device(
         for name, iface in list(all_existing.items()):
             if name not in nd_names and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
                 if housekeeping:
+                    if iface_source_cf:
+                        owner = (dict(getattr(iface, "custom_fields", {}) or {}).get(iface_source_cf) or "")
+                        if owner and owner != iface_source_value:
+                            log.debug("  %-40s skipping orphan delete: owned by %r", name, owner)
+                            continue
                     try:
                         iface.delete()
                         orphaned_deleted += 1
-                        log.info("  %-40s deleted (not in Netdisco)", name)
+                        log.debug("  %-40s deleted (not in Netdisco)", name)
                         existing_ifaces.pop(name, None)
                         for m in vss_ifaces.values():
                             m.pop(name, None)
                     except Exception as exc:
                         orphaned_errors += 1
                         log.error("  %-40s could not delete orphan: %s", name, exc)
-                else:
-                    log.warning("  %-40s in Netbox but not in Netdisco", name)
         if housekeeping and (orphaned_deleted or orphaned_errors):
-            log.info("Orphaned interfaces — deleted=%d errors=%d", orphaned_deleted, orphaned_errors)
+            log.debug("Orphaned interfaces: deleted=%d errors=%d", orphaned_deleted, orphaned_errors)
 
-        # Stack cables — class=other entries with a real model and serial
+        # Stack cables: class=other entries with a real model and serial
         # (e.g. STACK-T1-50CM stackwise cables). One inventory item per StackPort entry.
         stack_cables = [
             m for m in nd_mods
@@ -1881,7 +2182,7 @@ def sync_device(
             and m.get("model") and m.get("serial")
         ]
         if stack_cables:
-            log.info("StackCables  entries: %d", len(stack_cables))
+            log.debug("StackCables  entries: %d", len(stack_cables))
             cable_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
             for cable in stack_cables:
                 cable_name = cable.get("name", "")
@@ -1901,20 +2202,20 @@ def sync_device(
                     )
                     cable_counts[action] += 1
                     if action != "unchanged":
-                        log.info("  Cable %-35s model=%s  serial=%s  %s",
-                                 cable_name, cable_model, cable_serial, action)
+                        log.debug("  Cable %-35s model=%s  serial=%s  %s",
+                                  cable_name, cable_model, cable_serial, action)
                     else:
                         log.debug("  Cable %-35s unchanged", cable_name)
                 except Exception as exc:
                     cable_counts["error"] += 1
                     log.error("  Cable %-35s error: %s", cable_name, exc)
-            log.info(
-                "StackCables — created=%d updated=%d unchanged=%d errors=%d",
+            log.debug(
+                "StackCables: created=%d updated=%d unchanged=%d errors=%d",
                 cable_counts["created"], cable_counts["updated"],
                 cable_counts["unchanged"], cable_counts["error"],
             )
 
-        # Blades (linecards / supervisors / FRU uplink modules) — module bay + module per slot.
+        # Blades (linecards / supervisors / FRU uplink modules): module bay + module per slot.
         blades = [
             m for m in nd_mods
             if m.get("class") == "module"
@@ -1922,7 +2223,7 @@ def sync_device(
             and m.get("serial")
             and "transceiver" not in m.get("name", "").lower()
         ]
-        log.info("Blades    entries: %d", len(blades))
+        log.debug("Blades    entries: %d", len(blades))
         blade_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
         for blade in blades:
             blade_name = blade.get("name", "")
@@ -1936,11 +2237,11 @@ def sync_device(
             target_device = nb_device
             sw_match = re.match(r"Switch\s+(\d+)", blade_name, re.IGNORECASE)
             if sw_match and slot_to_device:
-                # VSS — route blade to the right member device; position within that device
+                # VSS: route blade to the right member device; position within that device
                 target_device = slot_to_device.get(int(sw_match.group(1)), nb_device)
                 sw_match = None  # fall through to Slot/Module extraction below
             if sw_match:
-                # Stack — switch number doubles as the module bay position
+                # Stack: switch number doubles as the module bay position
                 position = sw_match.group(1)
             else:
                 m = re.search(r"Slot\s+(\d+)", blade_name, re.IGNORECASE) \
@@ -1953,14 +2254,14 @@ def sync_device(
                 bay = nb.upsert_module_bay(target_device, blade_name, position)
                 action, _ = nb.upsert_module(target_device, bay, module_type, blade_serial)
                 blade_counts[action] += 1
-                log.info("  Blade %s  model=%s  serial=%s  %s",
-                            blade_name, blade_model, blade_serial, action)
+                log.debug("  Blade %s  model=%s  serial=%s  %s",
+                          blade_name, blade_model, blade_serial, action)
             except Exception as exc:
                 blade_counts["error"] += 1
                 log.error("  Blade %-35s error: %s", blade_name, exc)
 
-        log.info(
-            "Blades — created=%d updated=%d unchanged=%d errors=%d",
+        log.debug(
+            "Blades: created=%d updated=%d unchanged=%d errors=%d",
             blade_counts["created"], blade_counts["updated"], blade_counts["unchanged"], blade_counts["error"],
         )
 
@@ -1969,7 +2270,7 @@ def sync_device(
     # When sync_modules was skipped the pre-blade block above didn't run, so
     # vss_ifaces / existing_ifaces / nd_names haven't been populated yet.
     # When sync_modules ran, blade sync may have created interfaces via module
-    # type templates — refresh the cache so we update rather than re-create them.
+    # type templates: refresh the cache so we update rather than re-create them.
     if sync_modules:
         existing_ifaces = nb.fetch_interfaces(nb_device.id)
         if slot_to_device:
@@ -1995,24 +2296,27 @@ def sync_device(
         for name, iface in list(all_existing.items()):
             if name not in nd_names and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
                 if housekeeping:
+                    if iface_source_cf:
+                        owner = (dict(getattr(iface, "custom_fields", {}) or {}).get(iface_source_cf) or "")
+                        if owner and owner != iface_source_value:
+                            log.debug("  %-40s skipping orphan delete: owned by %r", name, owner)
+                            continue
                     try:
                         iface.delete()
                         orphaned_deleted += 1
-                        log.info("  %-40s deleted (not in Netdisco)", name)
+                        log.debug("  %-40s deleted (not in Netdisco)", name)
                         existing_ifaces.pop(name, None)
                         for m in vss_ifaces.values():
                             m.pop(name, None)
                     except Exception as exc:
                         orphaned_errors += 1
                         log.error("  %-40s could not delete orphan: %s", name, exc)
-                else:
-                    log.warning("  %-40s in Netbox but not in Netdisco", name)
         if housekeeping and (orphaned_deleted or orphaned_errors):
-            log.info("Orphaned interfaces — deleted=%d errors=%d", orphaned_deleted, orphaned_errors)
+            log.debug("Orphaned interfaces: deleted=%d errors=%d", orphaned_deleted, orphaned_errors)
 
     # Sort: parent interfaces before subinterfaces (dot-notation) so parents exist when children are created
     nd_ports_sorted = sorted(nd_ports, key=lambda p: (1 if "." in (p.get("port") or p.get("descr") or "") else 0))
-    log.info("Interfaces  entries: %d  existing: %d", len(nd_ports_sorted), len(existing_ifaces))
+    log.debug("Interfaces  entries: %d  existing: %d", len(nd_ports_sorted), len(existing_ifaces))
 
     neighbors = neighbors_linked = 0
     seen_cable_iface_ids: set[int] = set()
@@ -2020,7 +2324,7 @@ def sync_device(
     for port in nd_ports_sorted:
         iface_name = port.get("port") or port.get("descr") or "?"
         if iface_name.lower().startswith(PORT_BLACKLIST_PREFIXES):
-            log.debug("  %-40s blacklisted — skipping", iface_name)
+            log.debug("  %-40s blacklisted: skipping", iface_name)
             continue
         try:
             nb_device_id, nb_iface_id = (
@@ -2059,43 +2363,51 @@ def sync_device(
             else:
                 target_id = nb_device.id
                 target_existing = existing_ifaces
-            action, nb_iface = nb.upsert_interface(target_id, nb_data, target_existing.get(iface_name))
+            action, nb_iface = nb.upsert_interface(
+                target_id, nb_data, target_existing.get(iface_name),
+                source_cf=iface_source_cf, source_value=iface_source_value,
+            )
             counts[action] += 1
             if action != "unchanged":
-                log.info("  %-40s %s", iface_name, action)
+                log.debug("  %-40s %s", iface_name, action)
             else:
                 log.debug("  %-40s unchanged", iface_name)
 
             # Cabling
-            if cable_scope and cable_iface_id and nb_iface:
+            _iface_type = nb_data.get("type", "")
+            if cable_scope and cable_iface_id and nb_iface and _iface_type not in ("virtual", "lag", "bridge"):
                 seen_cable_iface_ids.add(nb_iface.id)
                 try:
                     c_action = nb.upsert_cable(
                         nb_iface.id, cable_iface_id,
-                        cable_type=cable_type_from_iface_type(nb_data.get("type", "")),
+                        cable_type=cable_type_from_iface_type(_iface_type),
                         source_cf=cable_source_cf,
                         source_value=cable_source_value,
                     )
                     if c_action == "created":
                         cable_counts["created"] += 1
-                        log.info("  %-40s cable → iface %d (%s)", iface_name, nb_iface_id, c_action)
+                        log.debug("  %-40s cable → iface %d (%s)", iface_name, nb_iface_id, c_action)
                     elif c_action == "conflict":
                         cable_counts["conflict"] += 1
                 except Exception as exc:
                     cable_counts["error"] += 1
-                    log.error("  %-40s cable error: %s", iface_name, exc)
+                    log.warning("  %-40s cable error (not counted in errors): %s ↔ %s/%s: %s",
+                                iface_name, iface_name, port.get("remote_ip", "?"), port.get("remote_port", "?"), exc)
 
         except Exception as exc:
             counts["error"] += 1
             log.error("  %-40s error: %s", iface_name, exc)
 
     if neighbors:
-        log.info("Neighbors   — found: %d  linked: %d  unresolved: %d",
-                 neighbors, neighbors_linked, neighbors - neighbors_linked)
+        log.debug("Neighbors  : found: %d  linked: %d  unresolved: %d",
+                  neighbors, neighbors_linked, neighbors - neighbors_linked)
 
-    # Delete stale cables — owned cables on interfaces that no longer have a neighbor
+    # Delete stale cables: owned cables on interfaces that no longer have a neighbor
     if cable_scope and cable_source_cf:
-        for iface_name, iface_obj in existing_ifaces.items():
+        all_ifaces = dict(existing_ifaces)
+        for d in vss_ifaces.values():
+            all_ifaces.update(d)
+        for iface_name, iface_obj in all_ifaces.items():
             if iface_obj.id in seen_cable_iface_ids:
                 continue
             cable = getattr(iface_obj, "cable", None)
@@ -2107,12 +2419,12 @@ def sync_device(
             try:
                 nb.delete_cable(cable.id)
                 cable_counts["deleted"] += 1
-                log.info("  %-40s cable deleted (stale)", iface_name)
+                log.debug("  %-40s cable deleted (stale)", iface_name)
             except Exception as exc:
                 log.error("  %-40s cable delete error: %s", iface_name, exc)
 
     if any(cable_counts.values()):
-        log.info("Cables      — %s", "  ".join(f"{k}: {v}" for k, v in cable_counts.items() if v))
+        log.debug("Cables     : %s", "  ".join(f"{k}: {v}" for k, v in cable_counts.items() if v))
 
     # Wire up parent links for subinterfaces (e.g. GigabitEthernet0/0/1.1132 → GigabitEthernet0/0/1)
     # For VSS, wire parents per member device (subinterface and parent are always on the same device).
@@ -2139,7 +2451,7 @@ def sync_device(
                 except Exception as exc:
                     log.error("  %s parent link error: %s", iface_name, exc)
     if parent_updated:
-        log.info("Subinterfaces — linked %d parent(s)", parent_updated)
+        log.debug("Subinterfaces: linked %d parent(s)", parent_updated)
 
     # Wire up LAG bonding from Netdisco "slave_of" (e.g. Fortinet: port3 slave_of LAG-ecn).
     # Physical members → Netbox `lag` field; virtual children (l2vlan, etc.) → `parent`.
@@ -2167,7 +2479,7 @@ def sync_device(
         except Exception as exc:
             log.error("  %s %s link error: %s", iface_name, field, exc)
     if lag_linked:
-        log.info("LAG members — linked %d parent(s)", lag_linked)
+        log.debug("LAG members: linked %d parent(s)", lag_linked)
 
     # ── Interface → Module assignment ─────────────────────────────────────────────
 
@@ -2187,8 +2499,8 @@ def sync_device(
                 log.debug("  %-40s → module slot %s", iface_name, slot)
             else:
                 mod_iface_counts["unchanged"] += 1
-        log.info(
-            "Interface→Module — updated=%d unchanged=%d skipped=%d",
+        log.debug(
+            "Interface→Module: updated=%d unchanged=%d skipped=%d",
             mod_iface_counts["updated"], mod_iface_counts["unchanged"], mod_iface_counts["skipped"],
         )
 
@@ -2224,21 +2536,21 @@ def sync_device(
                     pass
             iface = existing_ifaces.get(port_name)
             if not iface:
-                log.warning("  IP %-20s skipped — interface %r not found in Netbox", address, port_name)
+                log.warning("  IP %-20s skipped: interface %r not found in Netbox", address, port_name)
                 ip_counts["skipped"] += 1
                 continue
             try:
                 action = nb.upsert_ip(address, iface)
                 ip_counts[action] += 1
                 if action in ("created", "fixed", "moved"):
-                    log.info("  IP %-20s → %s on %s", address, action, port_name)
+                    log.debug("  IP %-20s → %s on %s", address, action, port_name)
                 elif action == "unchanged":
                     log.debug("  IP %-20s → unchanged on %s", address, port_name)
             except Exception as exc:
                 if "primary IP" in str(exc):
                     ip_counts["skipped"] += 1
                     log.warning(
-                        "  IP %-20s on %-30s skipped — designated primary IP of another device"
+                        "  IP %-20s on %-30s skipped: designated primary IP of another device"
                         " (enable housekeeping to remove the VIP device first)",
                         address, port_name,
                     )
@@ -2246,8 +2558,8 @@ def sync_device(
                     ip_counts["error"] += 1
                     log.error("  IP %-20s on %-30s error: %s", address, port_name, exc)
 
-        log.info(
-            "IPs — created=%d fixed=%d moved=%d unchanged=%d skipped=%d errors=%d",
+        log.debug(
+            "IPs: created=%d fixed=%d moved=%d unchanged=%d skipped=%d errors=%d",
             ip_counts["created"], ip_counts["fixed"], ip_counts["moved"],
             ip_counts["unchanged"], ip_counts["skipped"], ip_counts["error"],
         )
@@ -2267,7 +2579,7 @@ def sync_device(
             m for m in nd_mods
             if m.get("class") == "port" and m.get("model") and m.get("serial")
         ]
-        log.info("SFPs      entries: %d", len(sfps))
+        log.debug("SFPs      entries: %d", len(sfps))
 
         # Re-fetch interfaces to include anything created this run.
         # For VSS, build a per-member interface cache so Switch 2 SFPs land on the right device.
@@ -2295,21 +2607,21 @@ def sync_device(
             target_device = slot_to_device.get(sw_pos, nb_device) if slot_to_device else nb_device
             iface = target_ifaces.get(expanded)
             if not iface:
-                log.warning("  SFP %-20s skipped — interface not in Netbox", name)
+                log.debug("  SFP %-20s skipped: interface not in Netbox", name)
                 continue
             try:
                 action = nb.upsert_sfp(target_device, iface, manufacturer, name, model, serial)
                 sfp_counts[action] += 1
                 if action != "unchanged":
-                    log.info("  SFP %-20s model=%-20s serial=%s → %s", name, model, serial, action)
+                    log.debug("  SFP %-20s model=%-20s serial=%s → %s", name, model, serial, action)
                 else:
                     log.debug("  SFP %-20s unchanged", name)
             except Exception as exc:
                 sfp_counts["error"] += 1
                 log.error("  SFP %-20s error: %s", name, exc)
 
-        log.info(
-            "SFPs — created=%d updated=%d unchanged=%d errors=%d",
+        log.debug(
+            "SFPs: created=%d updated=%d unchanged=%d errors=%d",
             sfp_counts["created"], sfp_counts["updated"], sfp_counts["unchanged"], sfp_counts["error"],
         )
 
@@ -2344,15 +2656,33 @@ def sync_device(
                     poe_counts["error"] += 1
                     log.error("  PoE %s error: %s", port_name, exc)
 
-            log.info(
-                "PoE — updated=%d unchanged=%d skipped=%d errors=%d",
+            log.debug(
+                "PoE: updated=%d unchanged=%d skipped=%d errors=%d",
                 poe_counts["updated"], poe_counts["unchanged"], poe_counts["skipped"], poe_counts["error"],
             )
 
-    logger.info(
-        "── done %s  created=%d updated=%d unchanged=%d errors=%d",
-        ip, counts["created"], counts["updated"], counts["unchanged"], counts["error"],
+    def _fmt(label: str, c: dict) -> Optional[str]:
+        changed = c.get("created", 0) + c.get("updated", 0)
+        errors = c.get("error", 0)
+        if not changed and not errors:
+            return None
+        s = f"{label}=+{c.get('created', 0)}/~{c.get('updated', 0)}"
+        if errors:
+            s += f"/!{errors}"
+        return s
+
+    total_errors = sum(
+        c.get("error", 0)
+        for c in [counts, ip_counts, mod_counts, sfp_counts, poe_counts]
     )
+    parts = list(filter(None, [
+        _fmt("ifaces", counts),
+        _fmt("ips", ip_counts) if sync_ip else None,
+        _fmt("mods", mod_counts) if sync_modules else None,
+        _fmt("sfps", sfp_counts) if sync_sfp else None,
+    ]))
+    summary = ("  " + "  ".join(parts)) if parts else "  no changes"
+    log.info("sync done %s%s  errors=%d", nb_device.name, summary, total_errors)
     return {
         "ok": counts["error"] == 0,
         "hostname": nb_device.name,

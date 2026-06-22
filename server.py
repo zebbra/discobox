@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-discobox server — FastAPI webhook receiver + Prometheus metrics.
+discobox server: FastAPI webhook receiver + Prometheus metrics.
 
 Netdisco calls POST /sync after each discovery job.
 Syncs run in a background thread pool; duplicate requests for the
@@ -22,7 +22,10 @@ import os
 import threading
 import time
 from contextlib import asynccontextmanager
-from typing import Annotated, Optional
+from pathlib import Path
+from typing import Annotated, Any, Optional
+
+import yaml
 
 import uvicorn
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
@@ -54,7 +57,7 @@ class _CapturingHandler(logging.Handler):
 
 # Rename uvicorn.error → uvicorn (the name is misleading; it's their general logger)
 logging.getLogger("uvicorn.error").name = "uvicorn"
-# Suppress per-request access lines — sync results are logged by _run_sync
+# Suppress per-request access lines: sync results are logged by _run_sync
 logging.getLogger("uvicorn.access").propagate = False
 
 _UVICORN_LOG_CONFIG = {
@@ -215,37 +218,100 @@ unknown_devices_total = Counter(
     "Sync webhooks received for devices not found in Netbox",
     **_reg,
 )
+reconcile_not_in_netdisco = Gauge(
+    "discobox_reconcile_not_in_netdisco",
+    "Active Netbox devices not found in Netdisco (last reconcile)",
+    multiprocess_mode="livemax",
+    **_reg,
+)
+reconcile_not_in_netbox = Gauge(
+    "discobox_reconcile_not_in_netbox",
+    "Netdisco devices not found in Netbox (last reconcile)",
+    multiprocess_mode="livemax",
+    **_reg,
+)
+
+# ── Config ─────────────────────────────────────────────────────────────────────
+
+def _load_config() -> dict:
+    path = os.getenv("DISCOBOX_CONFIG") or "discobox.yaml"
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+        logging.getLogger("discobox").info("Config loaded from %s", path)
+        return data
+    except FileNotFoundError:
+        if os.getenv("DISCOBOX_CONFIG"):
+            logging.getLogger("discobox").warning("Config file not found: %s", path)
+        return {}
+    except Exception as exc:
+        logging.getLogger("discobox").error("Failed to load config %s: %s", path, exc)
+        return {}
+
+_MISSING = object()
+
+def _c(cfg: dict, *keys: str, default: Any = None) -> Any:
+    """Navigate nested config dict; return default when key is missing.
+    Explicit null/~ in YAML returns None, not the default."""
+    node = cfg
+    for k in keys:
+        if not isinstance(node, dict) or k not in node:
+            return default
+        node = node[k]
+    return node
+
+def _cstr(cfg: dict, *keys: str, default: Optional[str] = None) -> Optional[str]:
+    """Like _c but returns None for empty strings (disables the feature).
+    Explicit null/~ disables; missing key falls back to default."""
+    val = _c(cfg, *keys, default=_MISSING)
+    if val is _MISSING:
+        return default
+    if val is None:
+        return None
+    return str(val).strip() or None
+
+def _cbool(cfg: dict, *keys: str, default: bool = False) -> bool:
+    val = _c(cfg, *keys, default=_MISSING)
+    if val is _MISSING or val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    return str(val).lower() in ("1", "true", "yes")
+
+_CFG = _load_config()
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
-_AUTH_TOKEN: Optional[str] = os.getenv("DISCOBOX_AUTH_TOKEN")
-_METRICS_PATH: str = os.getenv("DISCOBOX_METRICS_PATH", "/metrics")
+_AUTH_TOKEN: Optional[str] = os.getenv("DISCOBOX_AUTH_TOKEN") or _cstr(_CFG, "auth", "token")
+_METRICS_PATH: str = _c(_CFG, "auth", "metrics_path", default=os.getenv("DISCOBOX_METRICS_PATH", "/metrics"))
 
 # ── Sync defaults (overridable per-request) ────────────────────────────────────
 
-def _flag(env: str) -> bool:
-    """Return True if env var is set to a truthy value."""
-    return os.getenv(env, "").lower() in ("1", "true", "yes")
+_DEFAULT_MAC              = not _cbool(_CFG, "sync", "no_mac",          default=False)
+_DEFAULT_IP               = not _cbool(_CFG, "sync", "no_ip",           default=False)
+_DEFAULT_MODULES          = not _cbool(_CFG, "sync", "no_modules",      default=False)
+_DEFAULT_SFP              = not _cbool(_CFG, "sync", "no_sfp",          default=False)
+_DEFAULT_POE              = not _cbool(_CFG, "sync", "no_poe",          default=False)
+_DEFAULT_HOUSEKEEPING     =     _cbool(_CFG, "sync", "housekeeping",    default=False)
+_DEFAULT_LLDP_CLEAR_STALE =     _cbool(_CFG, "sync", "lldp_clear_stale", default=False)
+_VIP_MODE: str            = _c   (_CFG, "sync", "vip_mode",            default="threenode")
+_PAUSE_ON_ERROR: bool     = _cbool(_CFG, "sync", "pause_on_error",     default=False)
 
-# DISCOBOX_NO_* disables a feature; DISCOBOX_HOUSEKEEPING enables it.
-_DEFAULT_MAC          = not _flag("DISCOBOX_NO_MAC")
-_DEFAULT_IP           = not _flag("DISCOBOX_NO_IP")
-_DEFAULT_MODULES      = not _flag("DISCOBOX_NO_MODULES")
-_DEFAULT_SFP          = not _flag("DISCOBOX_NO_SFP")
-_DEFAULT_POE          = not _flag("DISCOBOX_NO_POE")
-_DEFAULT_HOUSEKEEPING     =     _flag("DISCOBOX_HOUSEKEEPING")
-_DEFAULT_LLDP_CLEAR_STALE =     _flag("DISCOBOX_LLDP_CLEAR_STALE")
-# Neighbor custom field names — set to empty string to disable that field
-_CF_NEIGHBOR_TEXT:   Optional[str] = os.getenv("DISCOBOX_CF_NEIGHBOR_TEXT",   "neighbor")        or None
-_CF_NEIGHBOR_PORT:   Optional[str] = os.getenv("DISCOBOX_CF_NEIGHBOR_PORT",   "neighbor_port")   or None
-_CF_NEIGHBOR_DEVICE: Optional[str] = os.getenv("DISCOBOX_CF_NEIGHBOR_DEVICE", "neighbor_device") or None
-_CF_NEIGHBOR_IFACE:  Optional[str] = os.getenv("DISCOBOX_CF_NEIGHBOR_IFACE",  "neighbor_iface")  or None
-# Cabling — scope "" disables, "site" restricts to same-site pairs
-_CABLE_SCOPE:        str            = os.getenv("DISCOBOX_CABLE_SCOPE", "site").lower()   # "" | "site"
-_CABLE_SOURCE_CF:    Optional[str]  = os.getenv("DISCOBOX_CABLE_SOURCE_CF",  "source")   or None
-_CABLE_SOURCE_VALUE: Optional[str]  = os.getenv("DISCOBOX_CABLE_SOURCE_VALUE", "netdisco") or None
-_VIP_MODE: str = os.getenv("DISCOBOX_VIP_MODE", "threenode").lower()  # threenode | soft | hard | off
-_PAUSE_ON_ERROR: bool = _flag("DISCOBOX_PAUSE_ON_ERROR")
+_CF_NEIGHBOR_TEXT:   Optional[str] = _cstr(_CFG, "custom_fields", "neighbor_text",   default="neighbor")
+_CF_NEIGHBOR_PORT:   Optional[str] = _cstr(_CFG, "custom_fields", "neighbor_port",   default="neighbor_port")
+_CF_NEIGHBOR_DEVICE: Optional[str] = _cstr(_CFG, "custom_fields", "neighbor_device", default="neighbor_device")
+_CF_NEIGHBOR_IFACE:  Optional[str] = _cstr(_CFG, "custom_fields", "neighbor_iface",  default="neighbor_iface")
+
+_CABLE_SCOPE:        str            = _c   (_CFG, "cabling", "scope",        default="site")
+_CABLE_SOURCE_CF:    Optional[str]  = _cstr(_CFG, "cabling", "source_cf",    default="source")
+_CABLE_SOURCE_VALUE: Optional[str]  = _cstr(_CFG, "cabling", "source_value", default="netdisco")
+
+_IFACE_SOURCE_CF:    Optional[str]  = _cstr(_CFG, "custom_fields", "source",       default="source")
+_IFACE_SOURCE_VALUE: str            = _c   (_CFG, "custom_fields", "source_value", default="netdisco")
+
+_CF_OS_VERSION:      Optional[str]  = _cstr(_CFG, "custom_fields", "os_version", default="os_version")
+_CF_OS_NAME:         Optional[str]  = _cstr(_CFG, "custom_fields", "os_name",    default="os_name")
+_CF_OS_RELEASE:      Optional[str]  = _cstr(_CFG, "custom_fields", "os_release", default="os_release")
 
 
 async def require_auth(authorization: Annotated[str, Header()] = "") -> None:
@@ -258,10 +324,15 @@ async def require_auth(authorization: Annotated[str, Header()] = "") -> None:
 
 # ── Reconcile loop ─────────────────────────────────────────────────────────────
 
-_RECONCILE_INTERVAL: int = int(os.getenv("DISCOBOX_RECONCILE_INTERVAL", str(24 * 3600)))
-_RECONCILE_MAX_QUEUED: Optional[int] = int(v) if (v := os.getenv("DISCOBOX_RECONCILE_MAX_QUEUED")) else None
-_RECONCILE_MAX_FAILED: Optional[int] = int(v) if (v := os.getenv("DISCOBOX_RECONCILE_MAX_FAILED")) else None
-_RECONCILE_MAX_ENQUEUE: Optional[int] = int(v) if (v := os.getenv("DISCOBOX_RECONCILE_MAX_ENQUEUE")) else None
+_RECONCILE_INTERVAL:    int           = int(_c(_CFG, "reconcile", "interval",    default=24 * 3600))
+_RECONCILE_MAX_QUEUED:  Optional[int] = _c (_CFG, "reconcile", "max_queued",  default=None)
+_RECONCILE_MAX_FAILED:  Optional[int] = _c (_CFG, "reconcile", "max_failed",  default=None)
+_RECONCILE_MAX_ENQUEUE: Optional[int] = _c (_CFG, "reconcile", "max_enqueue", default=None)
+
+_AUTO_CREATE_ROLE:     Optional[str] = _cstr (_CFG, "auto_create", "role",     default=None)
+_AUTO_CREATE_SITE:     Optional[str] = _cstr (_CFG, "auto_create", "site",     default=None)
+_AUTO_CREATE_STATUS:   str           = _c    (_CFG, "auto_create", "status",   default="active")
+_AUTO_CREATE_LOCATION: bool          = _cbool(_CFG, "auto_create", "location", default=False)
 
 
 def _make_netdisco_client() -> NetdiscoClient:
@@ -279,7 +350,7 @@ def _make_netdisco_client() -> NetdiscoClient:
 
 def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = None) -> None:
     if _is_paused():
-        logger.info("Reconcile skipped — sync is paused")
+        logger.info("Reconcile skipped: sync is paused")
         return
     nd = _make_netdisco_client()
     nb = NetboxClient(
@@ -288,13 +359,30 @@ def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = No
         verify_tls=os.getenv("NETBOX_TLS_VERIFY", "true").lower() != "false",
     )
     effective_max = max_enqueue if max_enqueue is not None else _RECONCILE_MAX_ENQUEUE
-    counts = reconcile_devices(nd, nb, max_queued=_RECONCILE_MAX_QUEUED, max_failed=_RECONCILE_MAX_FAILED, max_enqueue=effective_max, offset=offset)
+    counts = reconcile_devices(
+        nd, nb,
+        max_queued=_RECONCILE_MAX_QUEUED,
+        max_failed=_RECONCILE_MAX_FAILED,
+        max_enqueue=effective_max,
+        offset=offset,
+        auto_create_role=_AUTO_CREATE_ROLE,
+        auto_create_site=_AUTO_CREATE_SITE,
+        auto_create_status=_AUTO_CREATE_STATUS,
+        auto_create_location=_AUTO_CREATE_LOCATION,
+        iface_source_cf=_IFACE_SOURCE_CF,
+        iface_source_value=_IFACE_SOURCE_VALUE,
+    )
     if counts.get("aborted"):
         reconcile_aborted_total.inc()
         return
     reconcile_netbox_devices.set(counts.get("netbox_total", 0))
     reconcile_netdisco_devices.set(counts.get("netdisco_total", 0))
     reconcile_enqueued_total.inc(counts.get("enqueued", 0))
+    reconcile_not_in_netdisco.set(counts.get("not_in_netdisco", 0))
+    reconcile_not_in_netbox.set(counts.get("not_in_netbox", 0))
+    with _reconcile_gaps_lock:
+        _save_gap(_NOT_IN_NETDISCO_FILE, counts.get("not_in_netdisco_list", []))
+        _save_gap(_NOT_IN_NETBOX_FILE, counts.get("not_in_netbox_list", []))
     reconcile_runs_total.labels(status="success").inc()
     reconcile_last_run_timestamp.set(time.time())
 
@@ -331,12 +419,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Hosts currently being synced — guards against duplicate concurrent syncs
+# Hosts currently being synced: guards against duplicate concurrent syncs
 _in_flight: set[str] = set()
 _in_flight_lock = threading.Lock()
 
 # Devices seen in Netdisco webhooks but not found in Netbox
-# Unknown devices — file-backed so all workers share state.
+# Unknown devices: file-backed so all workers share state.
 _UNKNOWN_DEVICES_FILE: str = os.path.join(
     os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp"), "discobox.unknown.json"
 )
@@ -353,13 +441,33 @@ def _save_unknown_devices(devices: dict[str, dict]) -> None:
     with open(_UNKNOWN_DEVICES_FILE, "w") as f:
         json.dump(devices, f)
 
-# Limit concurrent Netbox API load — all workers share this semaphore via the
+# Reconcile gap lists: replaced wholesale after each reconcile run.
+_NOT_IN_NETDISCO_FILE: str = os.path.join(
+    os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp"), "discobox.not_in_netdisco.json"
+)
+_NOT_IN_NETBOX_FILE: str = os.path.join(
+    os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp"), "discobox.not_in_netbox.json"
+)
+_reconcile_gaps_lock = threading.Lock()
+
+def _load_gap(path: str) -> list[dict]:
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+def _save_gap(path: str, devices: list[dict]) -> None:
+    with open(path, "w") as f:
+        json.dump(devices, f)
+
+# Limit concurrent Netbox API load: all workers share this semaphore via the
 # threading module (workers are forked from the same parent process).
 _MAX_CONCURRENT: int = int(os.getenv("DISCOBOX_MAX_CONCURRENT_SYNCS", "3"))
 _sync_semaphore = threading.Semaphore(_MAX_CONCURRENT)
 _MAX_QUEUE: int = int(os.getenv("DISCOBOX_MAX_QUEUE", "100"))
 
-# Pause gate — file-based so all workers see it regardless of which handled the request.
+# Pause gate: file-based so all workers see it regardless of which handled the request.
 # Presence of the file = paused; absence = running.
 _PAUSE_FILE: str = os.path.join(
     os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp"), "discobox.pause"
@@ -399,7 +507,7 @@ class SyncResponse(BaseModel):
 
 # ── Background sync ────────────────────────────────────────────────────────────
 
-def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync_sfp: bool, sync_poe: bool, housekeeping: bool, lldp_clear_stale: bool = False, cf_neighbor_text: Optional[str] = None, cf_neighbor_port: Optional[str] = None, cf_neighbor_device: Optional[str] = None, cf_neighbor_iface: Optional[str] = None, cable_scope: str = "", cable_source_cf: Optional[str] = None, cable_source_value: Optional[str] = None) -> None:
+def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync_sfp: bool, sync_poe: bool, housekeeping: bool, lldp_clear_stale: bool = False, cf_neighbor_text: Optional[str] = None, cf_neighbor_port: Optional[str] = None, cf_neighbor_device: Optional[str] = None, cf_neighbor_iface: Optional[str] = None, cable_scope: str = "", cable_source_cf: Optional[str] = None, cable_source_value: Optional[str] = None, iface_source_cf: Optional[str] = None, iface_source_value: str = "netdisco", cf_os_version: Optional[str] = "os_version", cf_os_name: Optional[str] = "os_name", cf_os_release: Optional[str] = "os_release") -> None:
     """Run sync_device in a background thread and record metrics."""
     while True:
         _sync_semaphore.acquire()
@@ -438,6 +546,11 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             cable_scope=cable_scope,
             cable_source_cf=cable_source_cf,
             cable_source_value=cable_source_value,
+            iface_source_cf=iface_source_cf,
+            iface_source_value=iface_source_value,
+            cf_os_version=cf_os_version,
+            cf_os_name=cf_os_name,
+            cf_os_release=cf_os_release,
         )
         status = "success" if result.get("ok") else "error"
         if result.get("reason") == "device_not_found":
@@ -462,7 +575,7 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
         sync_in_progress.dec()
         with _in_flight_lock:
             _in_flight.discard(host)
-        # Per-device metrics — duration/timestamp only on success so a persistently
+        # Per-device metrics: duration/timestamp only on success so a persistently
         # failing device goes stale and timestamp-based alerts fire correctly.
         # device_sync_failed is always updated so failure is immediately visible.
         instance = result.get("hostname") or host
@@ -470,7 +583,7 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
         if status == "error" and _PAUSE_ON_ERROR and not _is_paused():
             _set_paused(True)
             sync_paused.set(1)
-            logger.warning("Sync error for %s — auto-pausing intake (DISCOBOX_PAUSE_ON_ERROR)", host)
+            logger.warning("Sync error for %s: auto-pausing intake (DISCOBOX_PAUSE_ON_ERROR)", host)
         if status == "success":
             device_sync_duration.labels(instance=instance).set(elapsed)
             device_sync_timestamp.labels(instance=instance).set(start)
@@ -485,7 +598,7 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             sfps_total.labels(action=action).inc(count)
         if result.get("ha_vip"):
             ha_vip_total.inc()
-        logger.info("Sync %s for %s in %.1fs", status, host, elapsed)
+        logger.info("Sync %s for %s in %.1fs", status, instance, elapsed)
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -545,11 +658,11 @@ async def sync(
 
     with _in_flight_lock:
         if resolved_host in _in_flight:
-            logger.info("hook from %s: %s  already in progress — skipping", caller, resolved_host)
+            logger.info("hook from %s: %s  already in progress: skipping", caller, resolved_host)
             syncs_skipped_total.inc()
             return SyncResponse(status="skipped", host=resolved_host, reason="already in progress")
         if len(_in_flight) >= _MAX_QUEUE:
-            logger.warning("hook from %s: %s  queue full (%d/%d) — skipping", caller, resolved_host, len(_in_flight), _MAX_QUEUE)
+            logger.warning("hook from %s: %s  queue full (%d/%d): skipping", caller, resolved_host, len(_in_flight), _MAX_QUEUE)
             syncs_skipped_total.inc()
             return SyncResponse(status="skipped", host=resolved_host, reason="queue full")
         _in_flight.add(resolved_host)
@@ -569,13 +682,15 @@ async def sync(
                 resolved_host, sync_mac, sync_ip, sync_modules, sync_sfp, sync_poe, housekeeping, lldp_clear_stale,
                 _CF_NEIGHBOR_TEXT, _CF_NEIGHBOR_PORT, _CF_NEIGHBOR_DEVICE, _CF_NEIGHBOR_IFACE,
                 _CABLE_SCOPE, _CABLE_SOURCE_CF, _CABLE_SOURCE_VALUE,
+                _IFACE_SOURCE_CF, _IFACE_SOURCE_VALUE,
+                _CF_OS_VERSION, _CF_OS_NAME, _CF_OS_RELEASE,
             )
         finally:
             discobox_log.removeHandler(cap)
             discobox_log.setLevel(prev_level)
         return PlainTextResponse("\n".join(cap.lines))
 
-    background_tasks.add_task(_run_sync, resolved_host, sync_mac, sync_ip, sync_modules, sync_sfp, sync_poe, housekeeping, lldp_clear_stale, _CF_NEIGHBOR_TEXT, _CF_NEIGHBOR_PORT, _CF_NEIGHBOR_DEVICE, _CF_NEIGHBOR_IFACE, _CABLE_SCOPE, _CABLE_SOURCE_CF, _CABLE_SOURCE_VALUE)
+    background_tasks.add_task(_run_sync, resolved_host, sync_mac, sync_ip, sync_modules, sync_sfp, sync_poe, housekeeping, lldp_clear_stale, _CF_NEIGHBOR_TEXT, _CF_NEIGHBOR_PORT, _CF_NEIGHBOR_DEVICE, _CF_NEIGHBOR_IFACE, _CABLE_SCOPE, _CABLE_SOURCE_CF, _CABLE_SOURCE_VALUE, _IFACE_SOURCE_CF, _IFACE_SOURCE_VALUE, _CF_OS_VERSION, _CF_OS_NAME, _CF_OS_RELEASE)
     logger.info("hook from %s: %s  queued", caller, resolved_host)
     return SyncResponse(status="queued", host=resolved_host)
 
@@ -596,7 +711,7 @@ async def pause() -> dict:
     """Hold queued syncs from starting across all workers. Already-running syncs finish."""
     _set_paused(True)
     sync_paused.set(1)
-    logger.warning("Sync paused — %d task(s) queued", len(_in_flight))
+    logger.warning("Sync paused: %d task(s) queued", len(_in_flight))
     return {"status": "paused", "queued": len(_in_flight)}
 
 
@@ -605,7 +720,7 @@ async def resume() -> dict:
     """Release the pause gate; queued syncs start draining (up to MAX_CONCURRENT at a time)."""
     _set_paused(False)
     sync_paused.set(0)
-    logger.info("Sync resumed — %d task(s) queued", len(_in_flight))
+    logger.info("Sync resumed: %d task(s) queued", len(_in_flight))
     return {"status": "running", "queued": len(_in_flight)}
 
 
@@ -624,13 +739,30 @@ async def index() -> str:
     status_label = "PAUSED" if paused else "running"
     unknown_rows = ""
     with _unknown_devices_lock:
-        for d in sorted(_unknown_devices.values(), key=lambda x: x["last_seen"], reverse=True):
+        for d in sorted(_load_unknown_devices().values(), key=lambda x: x["last_seen"], reverse=True):
             ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(d["last_seen"]))
             unknown_rows += f"<tr><td>{d['ip']}</td><td>{d['hostname']}</td><td>{ts}</td></tr>"
     unknown_section = f"""
     <h2>Unknown devices ({unknown_count})</h2>
     <table><tr><th>IP</th><th>Hostname</th><th>Last seen</th></tr>{unknown_rows}</table>
     """ if unknown_count else "<h2>Unknown devices</h2><p>None</p>"
+
+    with _reconcile_gaps_lock:
+        not_in_netdisco_list = _load_gap(_NOT_IN_NETDISCO_FILE)
+        not_in_netbox_list = _load_gap(_NOT_IN_NETBOX_FILE)
+
+    def _gap_table(devices: list[dict]) -> str:
+        rows = "".join(f"<tr><td>{d['ip']}</td><td>{d['name']}</td></tr>" for d in devices)
+        return f"<table><tr><th>IP</th><th>Name</th></tr>{rows}</table>"
+
+    not_in_netdisco_section = (
+        f"<h2>In Netbox, not in Netdisco ({len(not_in_netdisco_list)})</h2>{_gap_table(not_in_netdisco_list)}"
+        if not_in_netdisco_list else "<h2>In Netbox, not in Netdisco</h2><p>None</p>"
+    )
+    not_in_netbox_section = (
+        f"<h2>In Netdisco, not in Netbox ({len(not_in_netbox_list)})</h2>{_gap_table(not_in_netbox_list)}"
+        if not_in_netbox_list else "<h2>In Netdisco, not in Netbox</h2><p>None</p>"
+    )
 
     return f"""<!doctype html><html><head><meta charset=utf-8>
 <title>discobox</title>
@@ -652,16 +784,20 @@ async def index() -> str:
 <h2>Endpoints</h2>
 <table class="endpoints">
   <tr><th>Method</th><th>Path</th><th>Description</th></tr>
-  <tr><td>POST</td><td><a href=/docs#/default/sync_sync_post>/sync</a></td><td>Netdisco webhook — trigger device sync</td></tr>
+  <tr><td>POST</td><td><a href=/docs#/default/sync_sync_post>/sync</a></td><td>Netdisco webhook: trigger device sync</td></tr>
   <tr><td>POST</td><td>/sync/pause</td><td>Pause queued syncs</td></tr>
   <tr><td>POST</td><td>/sync/resume</td><td>Resume queued syncs</td></tr>
   <tr><td>POST</td><td>/reconcile</td><td>Trigger reconcile run manually</td></tr>
-  <tr><td>GET</td><td><a href=/unknown-devices>/unknown-devices</a></td><td>Devices in Netdisco not found in Netbox (JSON)</td></tr>
+  <tr><td>GET</td><td><a href=/unknown-devices>/unknown-devices</a></td><td>Devices seen via LLDP but not found in Netbox (JSON)</td></tr>
+  <tr><td>GET</td><td><a href=/not-in-netdisco>/not-in-netdisco</a></td><td>Active Netbox devices not in Netdisco (JSON)</td></tr>
+  <tr><td>GET</td><td><a href=/not-in-netbox>/not-in-netbox</a></td><td>Netdisco devices not in Netbox (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/metrics>/metrics</a></td><td>Prometheus metrics</td></tr>
   <tr><td>GET</td><td><a href=/health>/health</a></td><td>Liveness check</td></tr>
   <tr><td>GET</td><td><a href=/docs>/docs</a></td><td>Swagger UI</td></tr>
 </table>
 {unknown_section}
+{not_in_netdisco_section}
+{not_in_netbox_section}
 </body></html>"""
 
 
@@ -688,6 +824,18 @@ async def unknown_devices() -> list:
     return sorted(devices.values(), key=lambda d: d["last_seen"], reverse=True)
 
 
+@app.get("/not-in-netdisco", summary="Active Netbox devices not found in Netdisco (last reconcile)")
+async def not_in_netdisco() -> list:
+    with _reconcile_gaps_lock:
+        return _load_gap(_NOT_IN_NETDISCO_FILE)
+
+
+@app.get("/not-in-netbox", summary="Netdisco devices not found in Netbox (last reconcile)")
+async def not_in_netbox() -> list:
+    with _reconcile_gaps_lock:
+        return _load_gap(_NOT_IN_NETBOX_FILE)
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -698,7 +846,7 @@ if __name__ == "__main__":
         local_ip = socket.gethostbyname(socket.gethostname())
     except Exception:
         local_ip = "unknown"
-    logger.info("discobox server starting on port %d (%d workers) — outbound IP: %s", port, workers, local_ip)
+    logger.info("discobox server starting on port %d (%d workers): outbound IP: %s", port, workers, local_ip)
     uvicorn.run(
         "server:app",
         host="0.0.0.0",

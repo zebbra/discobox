@@ -1,0 +1,49 @@
+# Discobox configuration
+# Credentials stay in environment variables:
+#   NETBOX_URL, NETBOX_TOKEN
+#   NETDISCO_URL, NETDISCO_TOKEN  (or NETDISCO_USERNAME + NETDISCO_PASSWORD)
+#
+# Set any value to null (or omit it) to disable that feature/mapping.
+
+sync:
+  vip_mode: threenode       # threenode | soft | hard | off
+  lldp_clear_stale: false
+  housekeeping: false
+  pause_on_error: false
+  # no_mac: false
+  # no_ip: false
+  # no_modules: false
+  # no_sfp: false
+  # no_poe: false
+
+cabling:
+  scope: site               # site = same-site pairs only; null/empty to disable
+  source_cf: source
+  source_value: netdisco
+
+custom_fields:
+  source: source            # interface + device source CF; null to disable
+  source_value: netdisco
+  os_version: os_version    # null to disable
+  os_name: os_name          # null to disable
+  os_release: os_release    # null to disable
+  neighbor_text: neighbor
+  neighbor_port: neighbor_port
+  neighbor_device: neighbor_device
+  neighbor_iface: neighbor_iface
+
+reconcile:
+  interval: 86400           # seconds
+  max_queued: null          # abort reconcile if Netdisco queue exceeds this
+  max_failed: null
+  max_enqueue: null         # cap devices enqueued per reconcile run
+
+auto_create:
+  role: null                # NetBox device-role slug; null disables auto-create
+  site: null                # fallback NetBox site slug (overridden by SNMP location)
+  status: active
+  location: false           # parse SNMP location → NetBox location hierarchy
+
+auth:
+  metrics_path: /metrics
+  # token: null             # prefer DISCOBOX_AUTH_TOKEN env var
