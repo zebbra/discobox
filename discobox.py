@@ -951,7 +951,7 @@ class NetboxClient:
             patch = {}
             if (inv.serial or "") != serial:
                 patch["serial"] = serial
-            if (inv.part_id or "") != model:
+            if model and (inv.part_id or "") != model:
                 patch["part_id"] = model
             if not patch:
                 return "unchanged"
@@ -2468,7 +2468,7 @@ def sync_device(
         parent = flat_ifaces.get(parent_name)
         if not iface or not parent:
             continue
-        field = "parent" if map_iftype(port.get("type"), iface_name) == "virtual" else "lag"
+        field = "parent" if ("." in iface_name or map_iftype(port.get("type"), iface_name) == "virtual") else "lag"
         current = nb._nb_value(getattr(iface, field, None))
         if current == parent.id:
             continue
