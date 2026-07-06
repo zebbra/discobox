@@ -251,13 +251,13 @@ class NetdiscoClient:
     def get_queue_status(self, since: str = "1h") -> dict:
         return self._get(f"/api/v1/queue/status?since={since}")
 
-    def enqueue_discover(self, ip: str, snmp_tag: Optional[str] = None, snmp_timeout_us: Optional[int] = None) -> None:
+    def enqueue_discover(self, ip: str, device_auth_tag_hint: Optional[str] = None, snmp_timeout_us: Optional[int] = None) -> None:
         extra: dict = {
             "snmptimeout": snmp_timeout_us if snmp_timeout_us is not None else 3_000_000,
             "skip_neighbor_queue": True,
         }
-        if snmp_tag:
-            extra["snmp_tag"] = snmp_tag
+        if device_auth_tag_hint:
+            extra["device_auth_tag_hint"] = device_auth_tag_hint
         self._post("/api/v1/queue/jobs", [{"action": "discover", "device": ip, "extra": json.dumps(extra)}])
 
 
@@ -317,7 +317,7 @@ class NetboxClient:
                 logger.info("Device found by hostname %r (no IP match for %s)", dev.name, ip)
                 return dev
             for dev in self.nb.dcim.devices.filter(name__ic=short):
-                if dev.name.lower().split(".")[0] == short:
+                if dev.name and dev.name.lower().split(".")[0] == short:
                     logger.info("Device found by short hostname %r (no IP match for %s)", dev.name, ip)
                     return dev
 
@@ -373,6 +373,7 @@ class NetboxClient:
         return {
             iface.name: iface
             for iface in self.nb.dcim.interfaces.filter(device_id=device_id)
+            if iface.name is not None
         }
 
     @staticmethod
@@ -498,11 +499,16 @@ class NetboxClient:
                     existing_cable.update({"custom_fields": {source_cf: source_value}})
             return "exists"
 
-        cable = self.nb.dcim.cables.create(
-            a_terminations=[{"object_type": "dcim.interface", "object_id": iface_a_id}],
-            b_terminations=[{"object_type": "dcim.interface", "object_id": iface_b_id}],
-            type=cable_type,
-        )
+        try:
+            cable = self.nb.dcim.cables.create(
+                a_terminations=[{"object_type": "dcim.interface", "object_id": iface_a_id}],
+                b_terminations=[{"object_type": "dcim.interface", "object_id": iface_b_id}],
+                type=cable_type,
+            )
+        except pynetbox.RequestError as exc:
+            if "unique_termination" in str(exc):
+                return "exists"
+            raise
         if source_cf and source_value:
             cable.update({"custom_fields": {source_cf: source_value}})
         return "created"
@@ -712,6 +718,7 @@ class NetboxClient:
         serial: str,
     ) -> tuple[str, pynetbox.core.response.Record]:
         """Install or update a Module in a ModuleBay. Returns (action, module_record)."""
+        serial = serial or ""
         results = list(self.nb.dcim.modules.filter(module_bay_id=bay.id))
         existing = results[0] if results else None
         if existing:
@@ -810,7 +817,7 @@ class NetboxClient:
                     )
                     continue
                 bay.delete()
-                logger.info("  Deleted device bay %r", bay.name)
+                logger.debug("  Deleted device bay %r", bay.name)
                 deleted += 1
         return deleted
 
@@ -839,7 +846,7 @@ class NetboxClient:
                 )
                 continue
             bay.delete()
-            logger.info("  Deleted module bay %r", bay.name)
+            logger.debug("  Deleted module bay %r", bay.name)
             deleted += 1
         return deleted
 
@@ -863,6 +870,8 @@ class NetboxClient:
         lower_names = {n.lower() for n in dummy_names}
         nd_lower = {n.lower() for n in (nd_port_names or set())}
         for iface in self.nb.dcim.interfaces.filter(device_id=device.id):
+            if not iface.name:
+                continue
             if iface.name.lower() not in lower_names:
                 continue
             if iface.name.lower() in nd_lower:
@@ -941,6 +950,7 @@ class NetboxClient:
 
         Returns one of: "created", "updated", "unchanged".
         """
+        serial = serial or ""
         existing = list(self.nb.dcim.inventory_items.filter(
             device_id=device.id,
             name=name,
@@ -1049,6 +1059,13 @@ def expand_iface_name(name: str) -> str:
         if name.startswith(abbrev) and not name.startswith(full):
             return full + name[len(abbrev):]
     return name
+
+
+def _reraise_if_gateway_error(exc: requests.HTTPError) -> None:
+    """Re-raise 502/503/504 so server.py's retry/circuit-breaker logic can fire."""
+    resp = getattr(exc, "response", None)
+    if resp is not None and resp.status_code in (502, 503, 504):
+        raise exc
 
 
 def _slot_from_iface(topo: str, name: str) -> Optional[int]:
@@ -1471,10 +1488,12 @@ def _create_device_from_nd(
 def reconcile_devices(
     nd: "NetdiscoClient",
     nb: "NetboxClient",
-    max_queued: Optional[int] = None,
-    max_failed: Optional[int] = None,
+    max_queued: Optional[int] = 500,
+    max_failed: Optional[int] = 500,
     max_enqueue: Optional[int] = None,
     offset: Optional[int] = None,
+    roles: Optional[list] = None,  # empty/None = all roles
+    require_auth_tag: bool = False,
     auto_create_role: Optional[str] = None,
     auto_create_site: Optional[str] = None,
     auto_create_status: str = "active",
@@ -1521,12 +1540,15 @@ def reconcile_devices(
         return _aborted
     log.info("Netdisco knows %d devices", len(nd_ips))
 
-    nb_total = nb.nb.dcim.devices.count(status="active", has_primary_ip=True)
+    role_filter = {"role": roles} if roles else {}
+    nb_total = nb.nb.dcim.devices.count(status="active", has_primary_ip=True, **role_filter)
     counts = {"enqueued": 0, "skipped": 0, "already_known": 0, "netdisco_total": len(nd_ips), "netbox_total": nb_total}
+    if roles:
+        log.info("Reconcile role filter: %s", roles)
 
     nb_primary_ips: set[str] = set()
     not_in_netdisco: list[dict] = []
-    for device in nb.nb.dcim.devices.filter(status="active", has_primary_ip=True):
+    for device in nb.nb.dcim.devices.filter(status="active", has_primary_ip=True, **role_filter):
         primary = device.primary_ip4
         if not primary:
             counts["skipped"] += 1
@@ -1541,7 +1563,11 @@ def reconcile_devices(
         not_in_netdisco.append({"ip": ip, "name": device.name})
 
         cf = getattr(device, "custom_fields", {}) or {}
-        snmp_tag = cf.get("snmp_auth_profile") or None
+        device_auth_tag_hint = cf.get("snmp_auth_profile") or None
+        if require_auth_tag and not device_auth_tag_hint:
+            log.debug("Skipping %s (%s): no snmp_auth_profile set", ip, device.name)
+            counts["skipped"] += 1
+            continue
         snmp_timeout_us = _parse_snmp_timeout_us(cf.get("snmp_polling_timeout"))
 
         if offset and counts["enqueued"] + counts.get("offset_skipped", 0) < offset:
@@ -1553,10 +1579,10 @@ def reconcile_devices(
             break
 
         try:
-            nd.enqueue_discover(ip, snmp_tag=snmp_tag, snmp_timeout_us=snmp_timeout_us)
+            nd.enqueue_discover(ip, device_auth_tag_hint=device_auth_tag_hint, snmp_timeout_us=snmp_timeout_us)
             effective_timeout = snmp_timeout_us if snmp_timeout_us is not None else 3_000_000
-            log.info("Enqueued discover for %s (%s) snmp_tag=%r timeout=%dus",
-                     ip, device.name, snmp_tag, effective_timeout)
+            log.info("Enqueued discover for %s (%s) device_auth_tag_hint=%r timeout=%dus",
+                     ip, device.name, device_auth_tag_hint, effective_timeout)
             counts["enqueued"] += 1
         except Exception as exc:
             log.error("Failed to enqueue discover for %s: %s", ip, exc)
@@ -1650,6 +1676,7 @@ def sync_device(
         nd_device = nd.get_device(ip)
         nd_ports = nd.get_ports(ip)
     except requests.HTTPError as exc:
+        _reraise_if_gateway_error(exc)
         log.error("Netdisco request failed: %s", exc)
         return {"ok": False, "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
 
@@ -1684,7 +1711,7 @@ def sync_device(
                 break
             if not real_device:
                 for dev in nb.nb.dcim.devices.filter(name__ic=nd_short):
-                    if dev.name.lower().split(".")[0] == nd_short:
+                    if dev.name and dev.name.lower().split(".")[0] == nd_short:
                         real_device = dev
                         break
             # 2. Serial fallback
@@ -1808,6 +1835,7 @@ def sync_device(
         try:
             nd_mods = nd.get_modules(ip)
         except requests.HTTPError as exc:
+            _reraise_if_gateway_error(exc)
             log.error("Could not fetch modules from Netdisco: %s", exc)
             nd_mods = []
 
@@ -1816,10 +1844,10 @@ def sync_device(
         has_stack = stack_root is not None
         # Nexus FEX topology: stack root is a logical fabric, not a real member stack.
         # The primary N9K chassis + satellite FEX units all appear as chassis entries.
-        is_fex = has_stack and (stack_root.get("type", "").lower() == "cevcontainernexuslogicalfabric")
+        is_fex = has_stack and ((stack_root.get("type") or "").lower() == "cevcontainernexuslogicalfabric")
         is_vss = has_stack and (
-            "virtualstack" in stack_root.get("type", "").lower()
-            or "virtual stack" in stack_root.get("name", "").lower()
+            "virtualstack" in (stack_root.get("type") or "").lower()
+            or "virtual stack" in (stack_root.get("name") or "").lower()
         )
         is_standalone = not has_stack and len(chassis) == 1
 
@@ -2518,6 +2546,7 @@ def sync_device(
         try:
             nd_ips = nd.get_device_ips(ip)
         except requests.HTTPError as exc:
+            _reraise_if_gateway_error(exc)
             log.error("Could not fetch device IPs from Netdisco: %s", exc)
             nd_ips = []
 
@@ -2572,6 +2601,7 @@ def sync_device(
             try:
                 nd_mods = nd.get_modules(ip)
             except requests.HTTPError as exc:
+                _reraise_if_gateway_error(exc)
                 log.error("Could not fetch modules from Netdisco: %s", exc)
                 nd_mods = []
 
@@ -2633,6 +2663,7 @@ def sync_device(
         try:
             powered_ports = nd.get_powered_ports(ip)
         except requests.HTTPError as exc:
+            _reraise_if_gateway_error(exc)
             log.warning("Could not fetch powered ports (device may not support PoE): %s", exc)
             powered_ports = []
 

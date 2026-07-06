@@ -16,6 +16,8 @@ Endpoints:
 """
 
 import asyncio
+from collections import deque
+from functools import partial
 import json
 import logging
 import os
@@ -24,6 +26,8 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Optional
+
+from requests.exceptions import HTTPError, ReadTimeout
 
 import yaml
 
@@ -230,6 +234,21 @@ reconcile_not_in_netbox = Gauge(
     multiprocess_mode="livemax",
     **_reg,
 )
+sync_timeouts_total = Counter(
+    "discobox_sync_timeouts_total",
+    "Syncs that failed with a timeout or gateway error",
+    **_reg,
+)
+circuit_breaker_trips_total = Counter(
+    "discobox_circuit_breaker_trips_total",
+    "Times the circuit breaker tripped due to repeated overload errors",
+    **_reg,
+)
+sync_retries_total = Counter(
+    "discobox_sync_retries_total",
+    "Per-device sync retries scheduled after a timeout",
+    **_reg,
+)
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -278,6 +297,15 @@ def _cbool(cfg: dict, *keys: str, default: bool = False) -> bool:
         return val
     return str(val).lower() in ("1", "true", "yes")
 
+def _clist(cfg: dict, *keys: str) -> list[str]:
+    """Return a list of strings from a YAML list or comma-separated string; empty list if missing."""
+    val = _c(cfg, *keys, default=None)
+    if not val:
+        return []
+    if isinstance(val, list):
+        return [str(v).strip() for v in val if str(v).strip()]
+    return [v.strip() for v in str(val).split(",") if v.strip()]
+
 _CFG = _load_config()
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
@@ -287,6 +315,7 @@ _METRICS_PATH: str = _c(_CFG, "auth", "metrics_path", default=os.getenv("DISCOBO
 
 # ── Sync defaults (overridable per-request) ────────────────────────────────────
 
+_SYNC_COOLDOWN: int       = int(_c(_CFG, "sync", "cooldown", default=3600))  # seconds; 0 = disabled
 _DEFAULT_MAC              = not _cbool(_CFG, "sync", "no_mac",          default=False)
 _DEFAULT_IP               = not _cbool(_CFG, "sync", "no_ip",           default=False)
 _DEFAULT_MODULES          = not _cbool(_CFG, "sync", "no_modules",      default=False)
@@ -296,6 +325,16 @@ _DEFAULT_HOUSEKEEPING     =     _cbool(_CFG, "sync", "housekeeping",    default=
 _DEFAULT_LLDP_CLEAR_STALE =     _cbool(_CFG, "sync", "lldp_clear_stale", default=False)
 _VIP_MODE: str            = _c   (_CFG, "sync", "vip_mode",            default="threenode")
 _PAUSE_ON_ERROR: bool     = _cbool(_CFG, "sync", "pause_on_error",     default=False)
+
+# Circuit breaker: trip when >= _CB_THRESHOLD timeouts occur within _CB_WINDOW seconds.
+# New syncs are held for _CB_BACKOFF seconds, then automatically released.
+_CB_WINDOW:    int = int(os.getenv("DISCOBOX_CB_WINDOW",    "120"))  # look-back window (s)
+_CB_THRESHOLD: int = int(os.getenv("DISCOBOX_CB_THRESHOLD", "3"))    # timeouts to trip
+_CB_BACKOFF:   int = int(os.getenv("DISCOBOX_CB_BACKOFF",   "120"))  # pause duration (s)
+
+# Per-device retry on isolated timeouts (circuit breaker not tripped).
+_RETRY_DELAY: int = int(os.getenv("DISCOBOX_RETRY_DELAY", "60"))  # seconds before retry
+_RETRY_MAX:   int = int(os.getenv("DISCOBOX_RETRY_MAX",   "2"))   # max retries per device
 
 _CF_NEIGHBOR_TEXT:   Optional[str] = _cstr(_CFG, "custom_fields", "neighbor_text",   default="neighbor")
 _CF_NEIGHBOR_PORT:   Optional[str] = _cstr(_CFG, "custom_fields", "neighbor_port",   default="neighbor_port")
@@ -324,10 +363,12 @@ async def require_auth(authorization: Annotated[str, Header()] = "") -> None:
 
 # ── Reconcile loop ─────────────────────────────────────────────────────────────
 
-_RECONCILE_INTERVAL:    int           = int(_c(_CFG, "reconcile", "interval",    default=24 * 3600))
-_RECONCILE_MAX_QUEUED:  Optional[int] = _c (_CFG, "reconcile", "max_queued",  default=None)
-_RECONCILE_MAX_FAILED:  Optional[int] = _c (_CFG, "reconcile", "max_failed",  default=None)
-_RECONCILE_MAX_ENQUEUE: Optional[int] = _c (_CFG, "reconcile", "max_enqueue", default=None)
+_RECONCILE_INTERVAL:      int           = int(_c(_CFG, "reconcile", "interval",       default=24 * 3600))
+_RECONCILE_MAX_QUEUED:    Optional[int] = _c (_CFG, "reconcile", "max_queued",     default=None)
+_RECONCILE_MAX_FAILED:    Optional[int] = _c (_CFG, "reconcile", "max_failed",     default=None)
+_RECONCILE_MAX_ENQUEUE:   Optional[int] = _c (_CFG, "reconcile", "max_enqueue",    default=None)
+_RECONCILE_ROLES:         list[str]     = _clist(_CFG, "reconcile", "roles") or ["router", "switch", "firewall"]
+_RECONCILE_REQUIRE_AUTH_TAG: bool       = _cbool(_CFG, "reconcile", "require_auth_tag", default=False)
 
 _AUTO_CREATE_ROLE:     Optional[str] = _cstr (_CFG, "auto_create", "role",     default=None)
 _AUTO_CREATE_SITE:     Optional[str] = _cstr (_CFG, "auto_create", "site",     default=None)
@@ -365,6 +406,8 @@ def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = No
         max_failed=_RECONCILE_MAX_FAILED,
         max_enqueue=effective_max,
         offset=offset,
+        roles=_RECONCILE_ROLES,
+        require_auth_tag=_RECONCILE_REQUIRE_AUTH_TAG,
         auto_create_role=_AUTO_CREATE_ROLE,
         auto_create_site=_AUTO_CREATE_SITE,
         auto_create_status=_AUTO_CREATE_STATUS,
@@ -398,15 +441,48 @@ async def _reconcile_loop() -> None:
             reconcile_runs_total.labels(status="error").inc()
 
 
+async def _retry_loop() -> None:
+    """Drain _retry_pending: re-queue timed-out devices once their backoff has elapsed."""
+    loop = asyncio.get_running_loop()
+    while True:
+        await asyncio.sleep(10)
+        now = time.time()
+        with _retry_lock:
+            ready = {h: dict(v) for h, v in _retry_pending.items() if v["retry_after"] <= now}
+            for h in ready:
+                del _retry_pending[h]
+        for host, entry in ready.items():
+            retry_count = entry.pop("retry_count")
+            entry.pop("retry_after", None)
+            with _in_flight_lock:
+                if len(_in_flight) >= _MAX_QUEUE:
+                    logger.warning("Retry for %s dropped: queue full", host)
+                    continue
+                if not _claim_host(host):
+                    logger.debug("Retry for %s: already in flight, dropping", host)
+                    continue
+                _in_flight.add(host)
+            sync_in_progress.inc()
+            logger.info("Retrying sync for %s (attempt %d/%d)", host, retry_count, _RETRY_MAX)
+            loop.run_in_executor(None, partial(_run_sync, host, _retry_count=retry_count, **entry))
+
+
 @asynccontextmanager
 async def lifespan(app):
-    try:
-        task = asyncio.create_task(_reconcile_loop())
-    except Exception as exc:
-        logger.error("Failed to start reconcile loop: %s", exc)
-        task = None
+    for f in os.scandir(_INFLIGHT_DIR):
+        if f.name.startswith("discobox.inflight."):
+            try:
+                os.unlink(f.path)
+            except OSError:
+                pass
+    tasks = []
+    for coro, name in ((_reconcile_loop, "reconcile"), (_retry_loop, "retry")):
+        try:
+            tasks.append(asyncio.create_task(coro()))
+        except Exception as exc:
+            logger.error("Failed to start %s loop: %s", name, exc)
     yield
-    if task:
+    for task in tasks:
         task.cancel()
 
 
@@ -419,9 +495,50 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Hosts currently being synced: guards against duplicate concurrent syncs
+# Hosts currently being synced.
+# _in_flight is per-process (queue-size tracking / listing only).
+# _claim_host / _release_host use O_CREAT|O_EXCL files for cross-worker dedup.
 _in_flight: set[str] = set()
 _in_flight_lock = threading.Lock()
+_INFLIGHT_DIR: str = os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp")
+
+
+def _claim_host(host: str) -> bool:
+    """Atomically mark host as in-flight across all workers. Returns False if already claimed."""
+    path = os.path.join(_INFLIGHT_DIR, f"discobox.inflight.{host}")
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+
+
+def _release_host(host: str) -> None:
+    path = os.path.join(_INFLIGHT_DIR, f"discobox.inflight.{host}")
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+def _recently_synced(host: str) -> bool:
+    """Return True if host was successfully synced within the cooldown window."""
+    if not _SYNC_COOLDOWN:
+        return False
+    path = os.path.join(_INFLIGHT_DIR, f"discobox.synced.{host}")
+    try:
+        return (time.time() - os.stat(path).st_mtime) < _SYNC_COOLDOWN
+    except FileNotFoundError:
+        return False
+
+
+def _mark_synced(host: str) -> None:
+    path = os.path.join(_INFLIGHT_DIR, f"discobox.synced.{host}")
+    try:
+        open(path, "w").close()
+    except OSError:
+        pass
 
 # Devices seen in Netdisco webhooks but not found in Netbox
 # Unknown devices: file-backed so all workers share state.
@@ -465,7 +582,7 @@ def _save_gap(path: str, devices: list[dict]) -> None:
 # threading module (workers are forked from the same parent process).
 _MAX_CONCURRENT: int = int(os.getenv("DISCOBOX_MAX_CONCURRENT_SYNCS", "3"))
 _sync_semaphore = threading.Semaphore(_MAX_CONCURRENT)
-_MAX_QUEUE: int = int(os.getenv("DISCOBOX_MAX_QUEUE", "100"))
+_MAX_QUEUE: int = int(os.getenv("DISCOBOX_MAX_QUEUE", "1000"))
 
 # Pause gate: file-based so all workers see it regardless of which handled the request.
 # Presence of the file = paused; absence = running.
@@ -473,8 +590,79 @@ _PAUSE_FILE: str = os.path.join(
     os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp"), "discobox.pause"
 )
 
+# Circuit-breaker state: file stores resume-at timestamp (float JSON).
+_CB_FILE: str = os.path.join(os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp"), "discobox.cb.json")
+_recent_timeouts: deque = deque()
+_timeout_lock = threading.Lock()
+
+# Per-device retry queue: host → {retry_count, retry_after, **sync_kwargs}
+_retry_pending: dict[str, dict] = {}
+_retry_lock = threading.Lock()
+
+
+def _cb_is_active() -> bool:
+    try:
+        with open(_CB_FILE) as f:
+            resume_at = json.load(f)
+        if time.time() < resume_at:
+            return True
+        try:
+            os.unlink(_CB_FILE)
+        except FileNotFoundError:
+            pass
+        return False
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+
+
+def _trip_circuit_breaker() -> None:
+    resume_at = time.time() + _CB_BACKOFF
+    with open(_CB_FILE, "w") as f:
+        json.dump(resume_at, f)
+    circuit_breaker_trips_total.inc()
+    logger.warning(
+        "Circuit breaker tripped: %d timeouts in %ds — holding intake for %ds",
+        _CB_THRESHOLD, _CB_WINDOW, _CB_BACKOFF,
+    )
+
+
+def _is_overload_error(exc: Exception) -> bool:
+    """True for ReadTimeout and HTTP 502/503/504 — both indicate netdisco is overloaded."""
+    if isinstance(exc, ReadTimeout):
+        return True
+    if isinstance(exc, HTTPError):
+        resp = getattr(exc, "response", None)
+        return resp is not None and resp.status_code in (502, 503, 504)
+    return False
+
+
+def _on_timeout(host: str, retry_count: int, sync_kwargs: dict) -> None:
+    """Record a timeout, trip the circuit breaker if threshold reached, schedule a retry."""
+    sync_timeouts_total.inc()
+    now = time.time()
+    with _timeout_lock:
+        _recent_timeouts.append(now)
+        cutoff = now - _CB_WINDOW
+        while _recent_timeouts and _recent_timeouts[0] < cutoff:
+            _recent_timeouts.popleft()
+        window_count = len(_recent_timeouts)
+    if window_count >= _CB_THRESHOLD and not _cb_is_active():
+        _trip_circuit_breaker()
+    if retry_count >= _RETRY_MAX:
+        logger.warning("Timeout on %s: max retries (%d) reached, dropping", host, _RETRY_MAX)
+        return
+    with _retry_lock:
+        if host in _retry_pending:
+            logger.debug("Timeout on %s: retry already pending, dropping", host)
+            return
+        delay = _RETRY_DELAY * (2 ** retry_count)
+        _retry_pending[host] = {"retry_count": retry_count + 1, "retry_after": now + delay, **sync_kwargs}
+    sync_retries_total.inc()
+    logger.info("Timeout on %s: retry %d/%d in %ds", host, retry_count + 1, _RETRY_MAX, delay)
+
+
 def _is_paused() -> bool:
-    return os.path.exists(_PAUSE_FILE)
+    return os.path.exists(_PAUSE_FILE) or _cb_is_active()
 
 def _set_paused(paused: bool) -> None:
     if paused:
@@ -507,7 +695,7 @@ class SyncResponse(BaseModel):
 
 # ── Background sync ────────────────────────────────────────────────────────────
 
-def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync_sfp: bool, sync_poe: bool, housekeeping: bool, lldp_clear_stale: bool = False, cf_neighbor_text: Optional[str] = None, cf_neighbor_port: Optional[str] = None, cf_neighbor_device: Optional[str] = None, cf_neighbor_iface: Optional[str] = None, cable_scope: str = "", cable_source_cf: Optional[str] = None, cable_source_value: Optional[str] = None, iface_source_cf: Optional[str] = None, iface_source_value: str = "netdisco", cf_os_version: Optional[str] = "os_version", cf_os_name: Optional[str] = "os_name", cf_os_release: Optional[str] = "os_release") -> None:
+def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync_sfp: bool, sync_poe: bool, housekeeping: bool, lldp_clear_stale: bool = False, cf_neighbor_text: Optional[str] = None, cf_neighbor_port: Optional[str] = None, cf_neighbor_device: Optional[str] = None, cf_neighbor_iface: Optional[str] = None, cable_scope: str = "", cable_source_cf: Optional[str] = None, cable_source_value: Optional[str] = None, iface_source_cf: Optional[str] = None, iface_source_value: str = "netdisco", cf_os_version: Optional[str] = "os_version", cf_os_name: Optional[str] = "os_name", cf_os_release: Optional[str] = "os_release", _retry_count: int = 0) -> None:
     """Run sync_device in a background thread and record metrics."""
     while True:
         _sync_semaphore.acquire()
@@ -566,6 +754,17 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
     except Exception as exc:
         logger.error("Sync failed for %s: %s", host, exc)
         status = "error"
+        if _is_overload_error(exc):
+            _on_timeout(host, _retry_count, dict(
+                sync_mac=sync_mac, sync_ip=sync_ip, sync_modules=sync_modules,
+                sync_sfp=sync_sfp, sync_poe=sync_poe, housekeeping=housekeeping,
+                lldp_clear_stale=lldp_clear_stale, cf_neighbor_text=cf_neighbor_text,
+                cf_neighbor_port=cf_neighbor_port, cf_neighbor_device=cf_neighbor_device,
+                cf_neighbor_iface=cf_neighbor_iface, cable_scope=cable_scope,
+                cable_source_cf=cable_source_cf, cable_source_value=cable_source_value,
+                iface_source_cf=iface_source_cf, iface_source_value=iface_source_value,
+                cf_os_version=cf_os_version, cf_os_name=cf_os_name, cf_os_release=cf_os_release,
+            ))
     finally:
         sync_running.dec()
         _sync_semaphore.release()
@@ -573,6 +772,7 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
         syncs_total.labels(status=status).inc()
         sync_duration.observe(elapsed)
         sync_in_progress.dec()
+        _release_host(host)
         with _in_flight_lock:
             _in_flight.discard(host)
         # Per-device metrics: duration/timestamp only on success so a persistently
@@ -585,6 +785,7 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             sync_paused.set(1)
             logger.warning("Sync error for %s: auto-pausing intake (DISCOBOX_PAUSE_ON_ERROR)", host)
         if status == "success":
+            _mark_synced(host)
             device_sync_duration.labels(instance=instance).set(elapsed)
             device_sync_timestamp.labels(instance=instance).set(start)
         # Record per-action counts from result dict
@@ -656,15 +857,20 @@ async def sync(
     caller = request.headers.get("x-forwarded-for", "").split(",")[0].strip() \
              or (request.client.host if request.client else "unknown")
 
+    if _recently_synced(resolved_host):
+        logger.debug("hook from %s: %s  cooldown active: skipping", caller, resolved_host)
+        syncs_skipped_total.inc()
+        return SyncResponse(status="skipped", host=resolved_host, reason="cooldown")
+
     with _in_flight_lock:
-        if resolved_host in _in_flight:
-            logger.info("hook from %s: %s  already in progress: skipping", caller, resolved_host)
-            syncs_skipped_total.inc()
-            return SyncResponse(status="skipped", host=resolved_host, reason="already in progress")
         if len(_in_flight) >= _MAX_QUEUE:
-            logger.warning("hook from %s: %s  queue full (%d/%d): skipping", caller, resolved_host, len(_in_flight), _MAX_QUEUE)
+            logger.warning("hook from %s: %s  queue full (%d/%d): dropping", caller, resolved_host, len(_in_flight), _MAX_QUEUE)
             syncs_skipped_total.inc()
             return SyncResponse(status="skipped", host=resolved_host, reason="queue full")
+        if not _claim_host(resolved_host):
+            logger.info("hook from %s: %s  already in progress: dropping", caller, resolved_host)
+            syncs_skipped_total.inc()
+            return SyncResponse(status="skipped", host=resolved_host, reason="already in progress")
         _in_flight.add(resolved_host)
 
     sync_in_progress.inc()

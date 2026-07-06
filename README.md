@@ -12,6 +12,25 @@ Netbox is written to directly via [pynetbox](https://github.com/netbox-community
 
 ---
 
+## Architecture
+
+```mermaid
+flowchart LR
+    DEV["Network Devices"]
+    ND["Netdisco"]
+    DB["discobox"]
+    NB["Netbox"]
+
+    DEV -- "SNMP discovery" --> ND
+    ND -- "POST /sync\n(after each discovery job)" --> DB
+    DB -- "GET device data\n(ports, IPs, modules ...)" --> ND
+    DB -- "write inventory" --> NB
+    ND -- "enqueue discover\n(reconcile loop)" --> ND
+    DB -. "compare active devices\n(reconcile loop)" .-> NB
+```
+
+---
+
 ## Run Modes
 
 discobox can be run in two modes:
@@ -161,6 +180,10 @@ DISCOBOX_LISTEN_PORT=8080   # default: 8080 (avoid DISCOBOX_PORT — Docker over
 DISCOBOX_WORKERS=4          # uvicorn worker count, default: 4
 DISCOBOX_AUTH_TOKEN=secret  # bearer token for /sync; leave unset to disable auth
 
+# Sync concurrency
+DISCOBOX_MAX_CONCURRENT_SYNCS=3   # max parallel syncs (semaphore), default: 3
+DISCOBOX_MAX_QUEUE=1000           # max devices queued at once; excess hooks are dropped, default: 1000
+
 # Sync feature defaults (server mode) — can be overridden per-request
 DISCOBOX_NO_MAC=true        # disable MAC sync globally
 DISCOBOX_NO_IP=true         # disable IP sync globally (e.g. if Netdisco is not VRF-aware)
@@ -182,8 +205,15 @@ DISCOBOX_VIP_MODE=threenode
 DISCOBOX_RECONCILE_INTERVAL=86400  # seconds between runs, default: 86400 (24h)
 DISCOBOX_RECONCILE_MAX_ENQUEUE=200 # max devices enqueued per run; unset = no limit
                                    # use this to throttle the initial backfill on large inventories
-DISCOBOX_RECONCILE_MAX_QUEUED=50   # abort run if Netdisco queue has more than N jobs queued (last 1h)
-DISCOBOX_RECONCILE_MAX_FAILED=20   # abort run if Netdisco reports more than N failures (last 1h)
+DISCOBOX_RECONCILE_MAX_QUEUED=500  # abort run if Netdisco queue has more than N jobs queued (default: 500)
+DISCOBOX_RECONCILE_MAX_FAILED=500  # abort run if Netdisco reports more than N failures (default: 500)
+
+# Overload protection — circuit breaker and per-device retry (see below)
+DISCOBOX_CB_WINDOW=120      # look-back window in seconds for counting timeouts, default: 120
+DISCOBOX_CB_THRESHOLD=3     # number of timeouts within window to trip the breaker, default: 3
+DISCOBOX_CB_BACKOFF=120     # seconds to hold new syncs after breaker trips, default: 120
+DISCOBOX_RETRY_DELAY=60     # seconds before retrying a timed-out device, default: 60 (doubles on each retry)
+DISCOBOX_RETRY_MAX=2        # max per-device retries before dropping, default: 2
 ```
 
 **venv setup:**
@@ -238,8 +268,6 @@ CDP/LLDP neighbor data from Netdisco, written on every interface sync. Text fiel
 | `/sync/resume` | GET, POST | yes | Resume queued syncs |
 | `/reconcile` | GET, POST | yes | Trigger reconcile run immediately; optional `?max_enqueue=N&offset=N` |
 | `/unknown-devices` | GET | no | Devices seen in Netdisco webhooks but not found in Netbox (JSON) |
-| `/sync/resume` | GET, POST | yes | Resume queued syncs |
-| `/unknown-devices` | GET | no | Devices seen in Netdisco webhooks but not found in Netbox (JSON) |
 | `/metrics` | GET | no | Prometheus metrics |
 | `/health` | GET | no | Liveness check + in-flight hosts |
 | `/docs` | GET | no | Swagger UI |
@@ -252,6 +280,34 @@ POST /sync  {"host": "10.0.0.1", "housekeeping": true, "sync_mac": false}
 ```
 
 Syncs run in a background thread pool. Duplicate requests for the same host are dropped while a sync is in progress. Concurrent syncs log under `discobox.<ip>` so they are distinguishable in the log stream.
+
+---
+
+## Overload Protection
+
+discobox distinguishes between isolated device timeouts and global Netdisco overload, and handles each differently.
+
+**Errors covered:** `ReadTimeout` (TCP read timeout) and HTTP `502`/`503`/`504` (gateway/proxy errors). Both indicate Netdisco is unable to serve the request.
+
+### Circuit breaker
+
+When ≥ `DISCOBOX_CB_THRESHOLD` (default 3) timeout errors occur within `DISCOBOX_CB_WINDOW` seconds (default 120), the circuit breaker trips:
+
+- All new and queued syncs are held for `DISCOBOX_CB_BACKOFF` seconds (default 120)
+- After the backoff the breaker resets automatically — no manual intervention needed
+- The reconcile loop also skips while the breaker is active
+- Metric: `discobox_circuit_breaker_trips_total`
+
+This is distinct from `DISCOBOX_PAUSE_ON_ERROR` / `/sync/pause`, which pause permanently until manually resumed.
+
+### Per-device retry
+
+When a sync times out but the circuit breaker has **not** tripped (isolated failure), the device is automatically retried:
+
+- Retry is scheduled after `DISCOBOX_RETRY_DELAY` seconds (default 60), doubling on each attempt
+- Up to `DISCOBOX_RETRY_MAX` retries (default 2), then the device is dropped
+- If a retry fires while the circuit breaker is active, it waits until the breaker clears
+- Metric: `discobox_sync_retries_total`
 
 ---
 
@@ -270,9 +326,6 @@ hooks:
     timeout: 30000
 ```
 
----
-
-## Sample Log Output
 
 <details>
 <summary><strong>Traditional stack — Cisco C9300 (3-member)</strong></summary>
