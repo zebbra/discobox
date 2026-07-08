@@ -476,14 +476,23 @@ async def lifespan(app):
             except OSError:
                 pass
     tasks = []
-    for coro, name in ((_reconcile_loop, "reconcile"), (_retry_loop, "retry")):
+    is_reconcile_leader = _acquire_reconcile_leadership()
+    if is_reconcile_leader:
         try:
-            tasks.append(asyncio.create_task(coro()))
+            tasks.append(asyncio.create_task(_reconcile_loop()))
         except Exception as exc:
-            logger.error("Failed to start %s loop: %s", name, exc)
+            logger.error("Failed to start reconcile loop: %s", exc)
+    else:
+        logger.info("Reconcile loop not started: another worker already holds leadership")
+    try:
+        tasks.append(asyncio.create_task(_retry_loop()))
+    except Exception as exc:
+        logger.error("Failed to start retry loop: %s", exc)
     yield
     for task in tasks:
         task.cancel()
+    if is_reconcile_leader:
+        _release_reconcile_leadership()
 
 
 # ── App ────────────────────────────────────────────────────────────────────────
@@ -518,6 +527,42 @@ def _release_host(host: str) -> None:
     path = os.path.join(_INFLIGHT_DIR, f"discobox.inflight.{host}")
     try:
         os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+# Reconcile leader election: with DISCOBOX_WORKERS>1, lifespan() runs once per worker
+# process, so only one worker may run _reconcile_loop() or every run's max_enqueue/gap
+# scan gets multiplied by the worker count. The lock stores the leader's PID so a crashed
+# leader (without a clean shutdown) doesn't permanently wedge reconcile for other workers.
+_RECONCILE_LEADER_FILE: str = os.path.join(_INFLIGHT_DIR, "discobox.reconcile-leader.pid")
+
+
+def _acquire_reconcile_leadership() -> bool:
+    for _ in range(2):
+        try:
+            fd = os.open(_RECONCILE_LEADER_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return True
+        except FileExistsError:
+            try:
+                with open(_RECONCILE_LEADER_FILE) as f:
+                    leader_pid = int(f.read().strip())
+                os.kill(leader_pid, 0)
+                return False  # leader still alive
+            except (OSError, ValueError):
+                pass  # stale lock (leader pid gone or file unreadable): reclaim it
+            try:
+                os.unlink(_RECONCILE_LEADER_FILE)
+            except FileNotFoundError:
+                pass
+    return False
+
+
+def _release_reconcile_leadership() -> None:
+    try:
+        os.unlink(_RECONCILE_LEADER_FILE)
     except FileNotFoundError:
         pass
 
