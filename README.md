@@ -205,6 +205,7 @@ DISCOBOX_VIP_MODE=threenode
 DISCOBOX_RECONCILE_INTERVAL=86400  # seconds between runs, default: 86400 (24h)
 DISCOBOX_RECONCILE_MAX_ENQUEUE=200 # max devices enqueued per run; unset = no limit
                                    # use this to throttle the initial backfill on large inventories
+                                   # 0 = never enqueue, but still run the gap scan (report-only mode)
 DISCOBOX_RECONCILE_MAX_QUEUED=500  # abort run if Netdisco queue has more than N jobs queued (default: 500)
 DISCOBOX_RECONCILE_MAX_FAILED=500  # abort run if Netdisco reports more than N failures (default: 500)
 

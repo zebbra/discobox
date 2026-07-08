@@ -1511,6 +1511,10 @@ def reconcile_devices(
     If the Netdisco queue exceeds max_queued or max_failed (last 1h), the
     enqueue step is skipped to avoid overloading Netdisco.
 
+    max_enqueue=0 disables enqueueing entirely (no discovery jobs are ever
+    submitted) while still running the full not_in_netdisco/not_in_netbox
+    gap scan — use this to monitor drift without triggering discovery.
+
     Returns counts: enqueued / skipped (no primary IP) / already_known /
                     netbox_total / netdisco_total / aborted (bool).
     """
@@ -1546,15 +1550,14 @@ def reconcile_devices(
     if roles:
         log.info("Reconcile role filter: %s", roles)
 
-    nb_primary_ips: set[str] = set()
     not_in_netdisco: list[dict] = []
+    enqueue_cap_logged = False
     for device in nb.nb.dcim.devices.filter(status="active", has_primary_ip=True, **role_filter):
         primary = device.primary_ip4
         if not primary:
             counts["skipped"] += 1
             continue
         ip = str(primary).split("/")[0]
-        nb_primary_ips.add(ip)
 
         if ip in nd_ips:
             counts["already_known"] += 1
@@ -1575,8 +1578,13 @@ def reconcile_devices(
             continue
 
         if max_enqueue is not None and counts["enqueued"] >= max_enqueue:
-            log.info("Enqueue cap reached (%d): deferring remaining devices to next run", max_enqueue)
-            break
+            if not enqueue_cap_logged:
+                enqueue_cap_logged = True
+                log.info(
+                    "Enqueue cap reached (%d): skipping further enqueues this run "
+                    "(gap scan continues)", max_enqueue,
+                )
+            continue
 
         try:
             nd.enqueue_discover(ip, device_auth_tag_hint=device_auth_tag_hint, snmp_timeout_us=snmp_timeout_us)
@@ -1587,10 +1595,13 @@ def reconcile_devices(
         except Exception as exc:
             log.error("Failed to enqueue discover for %s: %s", ip, exc)
 
-    # Build full nb_all_ips across all statuses for gap reporting and auto-create
-    nb_all_ips = nb_primary_ips | {
+    # Build full nb_all_ips across all statuses/roles for gap reporting and auto-create.
+    # Deliberately NOT role_filter-scoped: the enqueue loop above only targets
+    # reconcile's target roles, but a device under any other role still counts
+    # as "in Netbox" for gap-reporting purposes.
+    nb_all_ips = {
         str(d.primary_ip4).split("/")[0]
-        for d in nb.nb.dcim.devices.filter(primary_ip4__isnull=False, status__n="active")
+        for d in nb.nb.dcim.devices.filter(primary_ip4__isnull=False)
         if d.primary_ip4
     }
     not_in_netbox: list[dict] = [
@@ -2062,7 +2073,7 @@ def sync_device(
         # C9300-style fans report neither, so they are silently skipped.
         fans = [
             m for m in nd_mods
-            if m.get("class") == "fan" and (m.get("model") or m.get("serial"))
+            if m.get("class") == "fan" and m.get("name") and (m.get("model") or m.get("serial"))
         ]
         if fans:
             log.debug("Fans      entries: %d", len(fans))
@@ -2100,7 +2111,8 @@ def sync_device(
         # PSUs: inventory items on the device (skip Unknown type with no model)
         psus = [
             m for m in nd_mods
-            if m.get("class") == "powerSupply" and m.get("type") != "cevPowerSupplyUnknown"
+            if m.get("class") == "powerSupply" and m.get("name")
+            and m.get("type") != "cevPowerSupplyUnknown"
         ]
         log.debug("PSUs      entries: %d", len(psus))
         psu_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
@@ -2249,7 +2261,7 @@ def sync_device(
             if m.get("class") == "module"
             and m.get("model") and m.get("model") != "Unknown PID"
             and m.get("serial")
-            and "transceiver" not in m.get("name", "").lower()
+            and "transceiver" not in (m.get("name") or "").lower()
         ]
         log.debug("Blades    entries: %d", len(blades))
         blade_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
