@@ -182,7 +182,7 @@ DISCOBOX_AUTH_TOKEN=secret  # bearer token for /sync; leave unset to disable aut
 
 # Sync concurrency
 DISCOBOX_MAX_CONCURRENT_SYNCS=3   # max parallel syncs (semaphore), default: 3
-DISCOBOX_MAX_QUEUE=1000           # max devices queued at once; excess hooks are dropped, default: 1000
+DISCOBOX_MAX_QUEUE=10000          # max devices queued at once; excess hooks are dropped, default: 10000
 
 # Sync feature defaults (server mode) — can be overridden per-request
 DISCOBOX_NO_MAC=true        # disable MAC sync globally
@@ -213,8 +213,9 @@ DISCOBOX_RECONCILE_MAX_FAILED=500  # abort run if Netdisco reports more than N f
 DISCOBOX_CB_WINDOW=120      # look-back window in seconds for counting timeouts, default: 120
 DISCOBOX_CB_THRESHOLD=3     # number of timeouts within window to trip the breaker, default: 3
 DISCOBOX_CB_BACKOFF=120     # seconds to hold new syncs after breaker trips, default: 120
-DISCOBOX_RETRY_DELAY=60     # seconds before retrying a timed-out device, default: 60 (doubles on each retry)
-DISCOBOX_RETRY_MAX=2        # max per-device retries before dropping, default: 2
+DISCOBOX_RETRY_DELAY=480    # seconds before first retry, default: 480 (8m); doubles each attempt
+DISCOBOX_RETRY_MAX_DELAY=1800  # cap on backoff growth, default: 1800 (30m)
+DISCOBOX_RETRY_MAX=6        # max per-device retries before dropping, default: 6
 ```
 
 **venv setup:**
@@ -305,9 +306,12 @@ This is distinct from `DISCOBOX_PAUSE_ON_ERROR` / `/sync/pause`, which pause per
 
 When a sync times out but the circuit breaker has **not** tripped (isolated failure), the device is automatically retried:
 
-- Retry is scheduled after `DISCOBOX_RETRY_DELAY` seconds (default 60), doubling on each attempt
-- Up to `DISCOBOX_RETRY_MAX` retries (default 2), then the device is dropped
+- Retry is scheduled after `DISCOBOX_RETRY_DELAY` seconds (default 480 = 8m), doubling each attempt
+  up to a cap of `DISCOBOX_RETRY_MAX_DELAY` (default 1800 = 30m)
+- Up to `DISCOBOX_RETRY_MAX` retries (default 6: 8m, 16m, 30m, 30m, 30m, 30m — then dropped)
 - If a retry fires while the circuit breaker is active, it waits until the breaker clears
+- If the queue is full when a retry becomes due, it is deferred 60s and re-attempted
+  (the attempt is not consumed) rather than dropped
 - Metric: `discobox_sync_retries_total`
 
 ---

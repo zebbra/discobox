@@ -333,8 +333,11 @@ _CB_THRESHOLD: int = int(os.getenv("DISCOBOX_CB_THRESHOLD", "3"))    # timeouts 
 _CB_BACKOFF:   int = int(os.getenv("DISCOBOX_CB_BACKOFF",   "120"))  # pause duration (s)
 
 # Per-device retry on isolated timeouts (circuit breaker not tripped).
-_RETRY_DELAY: int = int(os.getenv("DISCOBOX_RETRY_DELAY", "60"))  # seconds before retry
-_RETRY_MAX:   int = int(os.getenv("DISCOBOX_RETRY_MAX",   "2"))   # max retries per device
+# Delay doubles each attempt starting from RETRY_DELAY, capped at RETRY_MAX_DELAY:
+# default sequence is 8m, 16m, 30m, 30m, 30m, 30m across 6 attempts (~2.5h span).
+_RETRY_DELAY:     int = int(os.getenv("DISCOBOX_RETRY_DELAY",     "480"))   # seconds before first retry
+_RETRY_MAX_DELAY: int = int(os.getenv("DISCOBOX_RETRY_MAX_DELAY", "1800"))  # cap on backoff growth
+_RETRY_MAX:       int = int(os.getenv("DISCOBOX_RETRY_MAX",       "6"))    # max retries per device
 
 _CF_NEIGHBOR_TEXT:   Optional[str] = _cstr(_CFG, "custom_fields", "neighbor_text",   default="neighbor")
 _CF_NEIGHBOR_PORT:   Optional[str] = _cstr(_CFG, "custom_fields", "neighbor_port",   default="neighbor_port")
@@ -441,30 +444,47 @@ async def _reconcile_loop() -> None:
             reconcile_runs_total.labels(status="error").inc()
 
 
-async def _retry_loop() -> None:
-    """Drain _retry_pending: re-queue timed-out devices once their backoff has elapsed."""
-    loop = asyncio.get_running_loop()
-    while True:
-        await asyncio.sleep(10)
-        now = time.time()
-        with _retry_lock:
-            ready = {h: dict(v) for h, v in _retry_pending.items() if v["retry_after"] <= now}
-            for h in ready:
-                del _retry_pending[h]
-        for host, entry in ready.items():
-            retry_count = entry.pop("retry_count")
-            entry.pop("retry_after", None)
-            with _in_flight_lock:
-                if len(_in_flight) >= _MAX_QUEUE:
-                    logger.warning("Retry for %s dropped: queue full", host)
-                    continue
+def _drain_retries(now: float, submit) -> None:
+    """One retry-loop tick: hand ready entries to submit(host, retry_count, entry).
+
+    A full queue defers the entry (retry_count unchanged) instead of dropping it —
+    queue pressure is transient and shouldn't burn a backoff attempt.
+    """
+    with _retry_lock:
+        ready = {h: dict(v) for h, v in _retry_pending.items() if v["retry_after"] <= now}
+        for h in ready:
+            del _retry_pending[h]
+    for host, entry in ready.items():
+        retry_count = entry.pop("retry_count")
+        entry.pop("retry_after", None)
+        with _in_flight_lock:
+            queue_full = len(_in_flight) >= _MAX_QUEUE
+            if not queue_full:
                 if not _claim_host(host):
                     logger.debug("Retry for %s: already in flight, dropping", host)
                     continue
                 _in_flight.add(host)
-            sync_in_progress.inc()
-            logger.info("Retrying sync for %s (attempt %d/%d)", host, retry_count, _RETRY_MAX)
-            loop.run_in_executor(None, partial(_run_sync, host, _retry_count=retry_count, **entry))
+        if queue_full:
+            with _retry_lock:
+                if host not in _retry_pending:
+                    _retry_pending[host] = {"retry_count": retry_count, "retry_after": now + 60, **entry}
+            logger.warning("Retry for %s deferred 60s: queue full", host)
+            continue
+        sync_in_progress.inc()
+        logger.info("Retrying sync for %s (attempt %d/%d)", host, retry_count, _RETRY_MAX)
+        submit(host, retry_count, entry)
+
+
+async def _retry_loop() -> None:
+    """Drain _retry_pending: re-queue timed-out devices once their backoff has elapsed."""
+    loop = asyncio.get_running_loop()
+
+    def submit(host: str, retry_count: int, entry: dict) -> None:
+        loop.run_in_executor(None, partial(_run_sync, host, _retry_count=retry_count, **entry))
+
+    while True:
+        await asyncio.sleep(10)
+        _drain_retries(time.time(), submit)
 
 
 @asynccontextmanager
@@ -627,7 +647,7 @@ def _save_gap(path: str, devices: list[dict]) -> None:
 # threading module (workers are forked from the same parent process).
 _MAX_CONCURRENT: int = int(os.getenv("DISCOBOX_MAX_CONCURRENT_SYNCS", "3"))
 _sync_semaphore = threading.Semaphore(_MAX_CONCURRENT)
-_MAX_QUEUE: int = int(os.getenv("DISCOBOX_MAX_QUEUE", "1000"))
+_MAX_QUEUE: int = int(os.getenv("DISCOBOX_MAX_QUEUE", "10000"))
 
 # Pause gate: file-based so all workers see it regardless of which handled the request.
 # Presence of the file = paused; absence = running.
@@ -700,7 +720,7 @@ def _on_timeout(host: str, retry_count: int, sync_kwargs: dict) -> None:
         if host in _retry_pending:
             logger.debug("Timeout on %s: retry already pending, dropping", host)
             return
-        delay = _RETRY_DELAY * (2 ** retry_count)
+        delay = min(_RETRY_DELAY * (2 ** retry_count), _RETRY_MAX_DELAY)
         _retry_pending[host] = {"retry_count": retry_count + 1, "retry_after": now + delay, **sync_kwargs}
     sync_retries_total.inc()
     logger.info("Timeout on %s: retry %d/%d in %ds", host, retry_count + 1, _RETRY_MAX, delay)
