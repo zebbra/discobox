@@ -13,7 +13,9 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from discobox import (
+    NetboxClient,
     _fill_module_names,
+    _ha_node_info,
     _slot_from_iface,
     expand_iface_name,
     map_iftype,
@@ -166,6 +168,91 @@ def test_slot_from_iface() -> None:
     assert _slot_from_iface("stack", "Po1") is None
     assert _slot_from_iface("stack", "port1") is None
     assert _slot_from_iface("stack", "LAG-ecn") is None
+
+
+# ── _ha_node_info ──────────────────────────────────────────────────────────────
+
+def test_ha_node_info() -> None:
+    # Fortinet pNh convention
+    assert _ha_node_info("zcgate0005p1h") == (1, "zcgate0005", "zcgate0005p0h")
+    assert _ha_node_info("zcgate0005p2h") == (2, "zcgate0005", "zcgate0005p0h")
+    # nodeN and -N conventions
+    assert _ha_node_info("fw-node2") == (2, "fw", "fw-node0")
+    assert _ha_node_info("gw-1") == (1, "gw", "gw-0")
+    # No indicator
+    assert _ha_node_info("switch01") is None
+
+
+# ── upsert_virtual_chassis: rejected member update must not poison the record ──
+
+class _FakeVC:
+    def __init__(self, id: int):
+        self.id = id
+
+
+class _FakeVCEndpoint:
+    def __init__(self, existing: list):
+        self.existing = existing
+
+    def filter(self, name: str):
+        return list(self.existing)
+
+    def create(self, **kwargs):
+        raise AssertionError("create should not be called when VC exists")
+
+
+class _FakeDevice:
+    """Mimics pynetbox Record.update(): assigns attributes, then saves."""
+
+    def __init__(self, name: str, virtual_chassis, vc_position, fail_save: bool = False):
+        self.name = name
+        self.virtual_chassis = virtual_chassis
+        self.vc_position = vc_position
+        self._fail_save = fail_save
+
+    def update(self, patch: dict):
+        for k, v in patch.items():
+            setattr(self, k, v)     # pynetbox assigns before saving
+        if self._fail_save:
+            raise RuntimeError("400 Bad Request: cannot be removed from virtual chassis")
+
+
+def _make_client(vcs: list) -> NetboxClient:
+    client = NetboxClient.__new__(NetboxClient)
+
+    class _NB:
+        class dcim:
+            virtual_chassis = _FakeVCEndpoint(vcs)
+
+    client.nb = _NB()
+    return client
+
+
+def test_upsert_virtual_chassis_restores_record_on_rejected_update() -> None:
+    old_vc = _FakeVC(id=3)      # device currently master of another VC
+    target_vc = _FakeVC(id=5)
+    dev = _FakeDevice("fw-p1h", virtual_chassis=old_vc, vc_position=1, fail_save=True)
+    client = _make_client([target_vc])
+    try:
+        client.upsert_virtual_chassis("fw-p0h", [(dev, 1)])
+        raise AssertionError("expected the rejected update to raise")
+    except RuntimeError:
+        pass
+    # Local record must be back on the original VC, or the caller's next
+    # save() on this device re-sends the rejected change and fails the sync.
+    assert dev.virtual_chassis is old_vc
+    assert dev.vc_position == 1
+
+
+def test_upsert_virtual_chassis_updates_member() -> None:
+    target_vc = _FakeVC(id=5)
+    dev = _FakeDevice("fw-p1h", virtual_chassis=None, vc_position=None)
+    client = _make_client([target_vc])
+    action, vc = client.upsert_virtual_chassis("fw-p0h", [(dev, 1)])
+    assert action == "updated"
+    assert vc is target_vc
+    assert dev.virtual_chassis == 5
+    assert dev.vc_position == 1
 
 
 # ── _fill_module_names ─────────────────────────────────────────────────────────

@@ -786,12 +786,24 @@ class NetboxClient:
 
         for device, position in members:
             patch = {}
+            original = {}
             if self._nb_value(getattr(device, "virtual_chassis", None)) != vc.id:
+                original["virtual_chassis"] = getattr(device, "virtual_chassis", None)
                 patch["virtual_chassis"] = vc.id
             if getattr(device, "vc_position", None) != position:
+                original["vc_position"] = getattr(device, "vc_position", None)
                 patch["vc_position"] = position
             if patch:
-                device.update(patch)
+                try:
+                    device.update(patch)
+                except Exception:
+                    # update() assigns attributes before saving; a rejected save
+                    # (e.g. Netbox refusing to move a VC master) must not leave
+                    # the record dirty, or the next save() on this device would
+                    # re-send the rejected change and fail the whole sync.
+                    for k, v in original.items():
+                        setattr(device, k, v)
+                    raise
                 action = action if action == "created" else "updated"
                 logger.info("  VC member %-40s pos=%d  updated", device.name, position)
             else:
@@ -1064,6 +1076,22 @@ def expand_iface_name(name: str) -> str:
         if name.startswith(abbrev) and not name.startswith(full):
             return full + name[len(abbrev):]
     return name
+
+
+def _ha_node_info(short: str) -> Optional[tuple[int, str, str]]:
+    """Parse an HA node indicator from a short hostname.
+
+    Returns (node_num, vc_base, vip_short) or None when no indicator matches:
+      "zcgate0005p1h" → (1, "zcgate0005", "zcgate0005p0h")
+      "fw-node2"      → (2, "fw", "fw-node0")
+    """
+    m = re.search(r"(p|node|-)([12])(h?)", short, re.IGNORECASE)
+    if not m:
+        return None
+    node_num = int(m.group(2))
+    vc_base = (short[: m.start(1)] + short[m.end(3):]).rstrip("-_") or short
+    vip_short = short[: m.start(2)] + "0" + short[m.end(2):]
+    return node_num, vc_base, vip_short
 
 
 def _fill_module_names(nd_mods: list[dict]) -> None:
@@ -1825,26 +1853,29 @@ def sync_device(
     # Handles pairs where Netdisco hooks each physical node directly with no shared VIP.
     if not vip_device:
         short = nb_device.name.split(".")[0]
-        ha_m = re.search(r"(p|node|-)([12])(h?)", short, re.IGNORECASE)
-        if ha_m:
+        ha_info = _ha_node_info(short)
+        if ha_info:
             partner_dev = nb.find_ha_partner(nb_device.name)
             if partner_dev:
-                node_num = int(ha_m.group(2))
+                node_num, vc_base, vip_short = ha_info
                 partner_num = 2 if node_num == 1 else 1
-                # VC name: strip the node indicator from the short hostname
-                vc_base = short[:ha_m.start(1)] + short[ha_m.end(3):]
-                vc_name = vc_base.rstrip("-_") or short
                 vc_members = [(nb_device, node_num), (partner_dev, partner_num)]
 
                 # Find VIP device (e.g. p0h) by replacing node number with 0
                 found_vip_dev = None
                 domain = nb_device.name[len(short):]
-                vip_short = short[:ha_m.start(2)] + "0" + short[ha_m.end(2):]
                 for candidate in (vip_short + domain, vip_short):
                     vip_results = list(nb.nb.dcim.devices.filter(name__ie=candidate))
                     if vip_results:
                         found_vip_dev = vip_results[0]
                         break
+
+                # VC identity: prefer the VIP's short name so this path and the
+                # VIP-hook path (which names the VC after the VIP device) agree
+                # on the same VC — otherwise each path creates its own VC and
+                # fights over the members. Fall back to the short hostname with
+                # the node indicator stripped when no VIP device exists.
+                vc_name = found_vip_dev.name.split(".")[0] if found_vip_dev else vc_base
 
                 if vip_mode == "threenode" and found_vip_dev:
                     vc_members.append((found_vip_dev, 0))
