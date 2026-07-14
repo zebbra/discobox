@@ -217,25 +217,55 @@ def test_ha_node_info() -> None:
 # ── upsert_virtual_chassis: rejected member update must not poison the record ──
 
 class _FakeVC:
-    def __init__(self, id: int):
+    def __init__(self, id: int, name: str = "vc", master=None):
         self.id = id
+        self.name = name
+        self.master = master
+        self.deleted = False
+        self.updates: list = []
+
+    def update(self, patch: dict):
+        self.updates.append(patch)
+        for k, v in patch.items():
+            setattr(self, k, v)
+
+    def delete(self):
+        self.deleted = True
 
 
 class _FakeVCEndpoint:
-    def __init__(self, existing: list):
-        self.existing = existing
+    def __init__(self, by_name: dict):
+        self.by_name = by_name
 
     def filter(self, name: str):
-        return list(self.existing)
+        return [vc for vc in self.by_name.values() if vc.name == name]
+
+    def get(self, id: int):
+        return next((vc for vc in self.by_name.values() if vc.id == id), None)
 
     def create(self, **kwargs):
         raise AssertionError("create should not be called when VC exists")
 
 
+class _FakeDeviceEndpoint:
+    def __init__(self, devices: list):
+        self.devices = devices
+
+    def filter(self, virtual_chassis_id: int):
+        return [
+            d for d in self.devices
+            if d.virtual_chassis is not None and d.virtual_chassis.id == virtual_chassis_id
+        ]
+
+
 class _FakeDevice:
     """Mimics pynetbox Record.update(): assigns attributes, then saves."""
 
+    _next_id = 100
+
     def __init__(self, name: str, virtual_chassis, vc_position, fail_save: bool = False):
+        _FakeDevice._next_id += 1
+        self.id = _FakeDevice._next_id
         self.name = name
         self.virtual_chassis = virtual_chassis
         self.vc_position = vc_position
@@ -248,27 +278,32 @@ class _FakeDevice:
             raise RuntimeError("400 Bad Request: cannot be removed from virtual chassis")
 
 
-def _make_client(vcs: list) -> NetboxClient:
+def _make_client(vcs: list, devices: list = ()) -> NetboxClient:
+    from types import SimpleNamespace
+
     client = NetboxClient.__new__(NetboxClient)
-
-    class _NB:
-        class dcim:
-            virtual_chassis = _FakeVCEndpoint(vcs)
-
-    client.nb = _NB()
+    client.nb = SimpleNamespace(dcim=SimpleNamespace(
+        virtual_chassis=_FakeVCEndpoint({vc.id: vc for vc in vcs}),
+        devices=_FakeDeviceEndpoint(list(devices)),
+    ))
     return client
 
 
 def test_upsert_virtual_chassis_restores_record_on_rejected_update() -> None:
-    old_vc = _FakeVC(id=3)      # device currently master of another VC
-    target_vc = _FakeVC(id=5)
+    target_vc = _FakeVC(id=5, name="fw-p0h")
+    old_vc = _FakeVC(id=3, name="fw-legit")
     dev = _FakeDevice("fw-p1h", virtual_chassis=old_vc, vc_position=1, fail_save=True)
-    client = _make_client([target_vc])
+    partner = _FakeDevice("fw-p2h", virtual_chassis=old_vc, vc_position=2)
+    old_vc.master = dev
+    client = _make_client([target_vc, old_vc], [dev, partner])
     try:
         client.upsert_virtual_chassis("fw-p0h", [(dev, 1)])
         raise AssertionError("expected the rejected update to raise")
     except RuntimeError:
         pass
+    # The old VC has another member, so it is NOT stale: master untouched.
+    assert old_vc.master is dev
+    assert not old_vc.deleted
     # Local record must be back on the original VC, or the caller's next
     # save() on this device re-sends the rejected change and fails the sync.
     assert dev.virtual_chassis is old_vc
@@ -276,14 +311,30 @@ def test_upsert_virtual_chassis_restores_record_on_rejected_update() -> None:
 
 
 def test_upsert_virtual_chassis_updates_member() -> None:
-    target_vc = _FakeVC(id=5)
+    target_vc = _FakeVC(id=5, name="fw-p0h")
     dev = _FakeDevice("fw-p1h", virtual_chassis=None, vc_position=None)
-    client = _make_client([target_vc])
+    client = _make_client([target_vc], [dev])
     action, vc = client.upsert_virtual_chassis("fw-p0h", [(dev, 1)])
     assert action == "updated"
     assert vc is target_vc
     assert dev.virtual_chassis == 5
     assert dev.vc_position == 1
+
+
+def test_upsert_virtual_chassis_absorbs_stale_single_member_vc() -> None:
+    # Residue from the earlier VC-name mismatch: the partner sits alone in a
+    # junk VC ("zcgate0005") as its master. Moving it must release the master,
+    # move the device, and delete the empty shell.
+    target_vc = _FakeVC(id=5, name="zcgate0005p0h")
+    stale_vc = _FakeVC(id=9, name="zcgate0005")
+    dev = _FakeDevice("zcgate0005p2h", virtual_chassis=stale_vc, vc_position=2)
+    stale_vc.master = dev
+    client = _make_client([target_vc, stale_vc], [dev])
+    action, _ = client.upsert_virtual_chassis("zcgate0005p0h", [(dev, 2)])
+    assert action == "updated"
+    assert dev.virtual_chassis == 5
+    assert stale_vc.updates == [{"master": None}]
+    assert stale_vc.deleted
 
 
 # ── _fill_module_names ─────────────────────────────────────────────────────────

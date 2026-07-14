@@ -797,12 +797,32 @@ class NetboxClient:
         for device, position in members:
             patch = {}
             original = {}
-            if self._nb_value(getattr(device, "virtual_chassis", None)) != vc.id:
+            cur_vc_id = self._nb_value(getattr(device, "virtual_chassis", None))
+            if cur_vc_id != vc.id:
                 original["virtual_chassis"] = getattr(device, "virtual_chassis", None)
                 patch["virtual_chassis"] = vc.id
             if getattr(device, "vc_position", None) != position:
                 original["vc_position"] = getattr(device, "vc_position", None)
                 patch["vc_position"] = position
+            # Netbox refuses to move a device out of a VC it is the master of.
+            # When that old VC has no other members it is a stale artifact (e.g.
+            # left behind by the earlier VC-name mismatch): release the master
+            # so the move succeeds, and delete the empty shell afterwards.
+            stale_vc = None
+            if "virtual_chassis" in patch and cur_vc_id:
+                old_vc = self.nb.dcim.virtual_chassis.get(cur_vc_id)
+                if old_vc and self._nb_value(getattr(old_vc, "master", None)) == device.id:
+                    others = [
+                        d for d in self.nb.dcim.devices.filter(virtual_chassis_id=cur_vc_id)
+                        if d.id != device.id
+                    ]
+                    if not others:
+                        old_vc.update({"master": None})
+                        stale_vc = old_vc
+                        logger.info(
+                            "  VC %r: released %s as master (stale single-member VC)",
+                            old_vc.name, device.name,
+                        )
             if patch:
                 try:
                     device.update(patch)
@@ -814,6 +834,12 @@ class NetboxClient:
                     for k, v in original.items():
                         setattr(device, k, v)
                     raise
+                if stale_vc is not None:
+                    try:
+                        stale_vc.delete()
+                        logger.info("  VC %r: deleted (stale, now empty)", stale_vc.name)
+                    except Exception as exc:
+                        logger.warning("  VC %r: could not delete stale VC: %s", stale_vc.name, exc)
                 action = action if action == "created" else "updated"
                 logger.info("  VC member %-40s pos=%d  updated", device.name, position)
             else:
