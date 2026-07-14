@@ -29,7 +29,7 @@ logger = logging.getLogger("discobox")
 
 # ── Interface type mapping ─────────────────────────────────────────────────────
 
-def map_iftype(nd_type: Optional[str], iface_name: Optional[str]) -> str:
+def map_iftype(nd_type: Optional[str], iface_name: Optional[str], default: Optional[str] = "other") -> Optional[str]:
     """
     Map a Netdisco interface to a Netbox type slug.
 
@@ -37,6 +37,11 @@ def map_iftype(nd_type: Optional[str], iface_name: Optional[str]) -> str:
     physical port as ifType=ethernetCsmacd regardless of speed: the interface
     name (e.g. "TenGigabitEthernet0/1") carries the real type information.
     SNMP ifType is used as a fallback for LAG and virtual interfaces.
+
+    When Netdisco reports no ifType at all (e.g. FortiGate devices with null
+    types on every port) and no name rule matches, `default` is returned —
+    pass default=None to express "no opinion" so the caller can preserve
+    whatever type Netbox already has.
 
     Adapted from github.com/joeladria/netdisco-netbox-diode.
     """
@@ -79,6 +84,8 @@ def map_iftype(nd_type: Optional[str], iface_name: Optional[str]) -> str:
     if "virtual" in nd_type_l:                                      return "virtual"
     if "ethernet" in nd_type_l:                                     return "1000base-t"
 
+    if not nd_type_l:
+        return default
     return "other"
 
 
@@ -419,7 +426,10 @@ class NetboxClient:
 
         if existing is None:
             try:
-                iface = self.nb.dcim.interfaces.create(**data, device=device_id)
+                create_data = dict(data)
+                if not create_data.get("type"):
+                    create_data["type"] = "other"   # Netbox requires a type on create
+                iface = self.nb.dcim.interfaces.create(**create_data, device=device_id)
                 if custom_fields:
                     iface.update({"custom_fields": custom_fields})
                 action = "created"
@@ -1078,6 +1088,23 @@ def expand_iface_name(name: str) -> str:
     return name
 
 
+def _slave_link_field(iface_name: str, nd_type: Optional[str], nb_type: Optional[str]) -> str:
+    """Pick the Netbox field for a slave_of link.
+
+    Virtual children (VLAN subinterfaces stacked on a LAG) attach via `parent`;
+    physical members via `lag`. When Netdisco reports no ifType (e.g. FortiGate
+    with null types on every port), trust the existing Netbox type — otherwise a
+    virtual child would be mis-wired as a LAG member and rejected with 400.
+    """
+    if "." in iface_name:
+        return "parent"
+    if map_iftype(nd_type, iface_name, default=None) == "virtual":
+        return "parent"
+    if nb_type == "virtual":
+        return "parent"
+    return "lag"
+
+
 def _ha_node_info(short: str) -> Optional[tuple[int, str, str]]:
     """Parse an HA node indicator from a short hostname.
 
@@ -1262,7 +1289,9 @@ def port_to_netbox(
 
     data: dict = {
         "name":        full_name,
-        "type":        map_iftype(port.get("type"), full_name),
+        # default=None: unknown type must not overwrite the existing Netbox type
+        # (upsert_interface skips None values when diffing)
+        "type":        map_iftype(port.get("type"), full_name, default=None),
         "enabled":     (port.get("up_admin") or "").lower() == "up",
         "mtu":         port.get("mtu") or None,
         "mac_address": clean_mac(port.get("mac")),
@@ -2496,8 +2525,9 @@ def sync_device(
             else:
                 log.debug("  %-40s unchanged", iface_name)
 
-            # Cabling
-            _iface_type = nb_data.get("type", "")
+            # Cabling — fall back to the Netbox-side type when Netdisco has none,
+            # so virtual/lag interfaces are still excluded and copper detection works
+            _iface_type = nb_data.get("type") or (nb._nb_value(getattr(nb_iface, "type", None)) if nb_iface else None) or ""
             if cable_scope and cable_iface_id and nb_iface and _iface_type not in ("virtual", "lag", "bridge"):
                 seen_cable_iface_ids.add(nb_iface.id)
                 try:
@@ -2591,7 +2621,7 @@ def sync_device(
         parent = flat_ifaces.get(parent_name)
         if not iface or not parent:
             continue
-        field = "parent" if ("." in iface_name or map_iftype(port.get("type"), iface_name) == "virtual") else "lag"
+        field = _slave_link_field(iface_name, port.get("type"), nb._nb_value(getattr(iface, "type", None)))
         current = nb._nb_value(getattr(iface, field, None))
         if current == parent.id:
             continue

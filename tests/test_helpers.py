@@ -16,6 +16,7 @@ from discobox import (
     NetboxClient,
     _fill_module_names,
     _ha_node_info,
+    _slave_link_field,
     _slot_from_iface,
     expand_iface_name,
     map_iftype,
@@ -87,6 +88,36 @@ def test_map_iftype() -> None:
         if got != want:
             failures.append(f"{name!r} ({nd_type}) -> {got!r}, want {want!r}")
     assert not failures, "map_iftype regressions:\n  " + "\n  ".join(failures)
+
+
+def test_map_iftype_null_iftype_has_no_opinion() -> None:
+    # FortiGate devices can report ifType=null on every port. With default=None
+    # the mapping must express "no opinion" so the existing Netbox type is kept.
+    assert map_iftype(None, "if-roo-sbc-164", default=None) is None
+    assert map_iftype(None, "port1", default=None) is None
+    assert map_iftype(None, "LAG-internal", default=None) is None
+    # Name rules still win over a missing ifType
+    assert map_iftype(None, "mgmt", default=None) == "1000base-t"
+    assert map_iftype(None, "Loopback0", default=None) == "virtual"
+    assert map_iftype(None, "GigabitEthernet0/0/1.100", default=None) == "virtual"
+    # A real-but-unknown ifType still maps to "other"
+    assert map_iftype("ppp", "weird0", default=None) == "other"
+    # 2-arg call keeps the historical fallback
+    assert map_iftype(None, "port1") == "other"
+
+
+def test_slave_link_field() -> None:
+    # Dot-notation subinterface → parent, regardless of types
+    assert _slave_link_field("Gi0/0/1.100", "ethernetCsmacd", None) == "parent"
+    # Netdisco says virtual (FortiProxy l2vlan) → parent
+    assert _slave_link_field("if-pro-ecn-1628", "l2vlan", None) == "parent"
+    # Netdisco has no ifType but Netbox already knows it's virtual → parent
+    # (regression: was mis-wired as `lag` and rejected with 400)
+    assert _slave_link_field("if-roo-sbc-164", None, "virtual") == "parent"
+    # Physical LAG members stay lag, with or without ifType
+    assert _slave_link_field("port3", "ethernetCsmacd", "1000base-t") == "lag"
+    assert _slave_link_field("port11", None, "1000base-t") == "lag"
+    assert _slave_link_field("port11", None, None) == "lag"
 
 
 # ── parse_sw_ver / parse_sw_model ──────────────────────────────────────────────
@@ -298,6 +329,25 @@ def test_fill_module_names_keeps_existing() -> None:
     after = {m["index"]: m.get("name") for m in mods}
     for idx, name in before.items():
         assert after[idx] == name
+
+
+# ── port_to_netbox: FortiGate with null ifType on every port ───────────────────
+
+def test_port_to_netbox_fortigate_null_types() -> None:
+    with open(SAMPLES / "fortigate-ha-ports.json") as f:
+        ports = json.load(f)
+    assert all(p.get("type") is None for p in ports), "fixture expected to have all-null types"
+    by_name = {p["port"]: port_to_netbox(p) for p in ports}
+    # VLAN subif on a LAG, physical member, and the LAG itself: no opinion on
+    # type (None) so the existing Netbox type survives the diff.
+    assert by_name["if-roo-sbc-164"]["type"] is None
+    assert by_name["port11"]["type"] is None
+    assert by_name["LAG-internal"]["type"] is None
+    # Name rule still applies without ifType
+    assert by_name["mgmt"]["type"] == "1000base-t"
+    # Everything else still parses
+    assert by_name["if-roo-sbc-164"]["speed"] == 2_000_000
+    assert by_name["if-roo-sbc-164"]["enabled"] is True
 
 
 # ── port_to_netbox (covers map_iftype + parse_speed_kbps + clean_mac) ──────────
