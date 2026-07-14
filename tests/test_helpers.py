@@ -236,15 +236,24 @@ class _FakeVC:
 class _FakeVCEndpoint:
     def __init__(self, by_name: dict):
         self.by_name = by_name
+        self.created: list = []
 
-    def filter(self, name: str):
-        return [vc for vc in self.by_name.values() if vc.name == name]
+    def filter(self, name: str = None, master_id: int = None):
+        vcs = self.by_name.values()
+        if name is not None:
+            return [vc for vc in vcs if vc.name == name]
+        if master_id is not None:
+            return [vc for vc in vcs if vc.master is not None and vc.master.id == master_id]
+        return list(vcs)
 
     def get(self, id: int):
         return next((vc for vc in self.by_name.values() if vc.id == id), None)
 
     def create(self, **kwargs):
-        raise AssertionError("create should not be called when VC exists")
+        vc = _FakeVC(id=1000 + len(self.created), name=kwargs["name"], master=kwargs.get("master"))
+        self.created.append(vc)
+        self.by_name[vc.id] = vc
+        return vc
 
 
 class _FakeDeviceEndpoint:
@@ -319,6 +328,39 @@ def test_upsert_virtual_chassis_updates_member() -> None:
     assert vc is target_vc
     assert dev.virtual_chassis == 5
     assert dev.vc_position == 1
+
+
+def test_upsert_virtual_chassis_adopts_legacy_named_vc() -> None:
+    # Pair lives in a base-named VC ("zwgate0089") from the old naming scheme,
+    # partner is its master; target name doesn't exist. Creating a second VC
+    # with the same master 400s in Netbox — the legacy VC must be adopted and
+    # renamed in place, with no member moves.
+    legacy_vc = _FakeVC(id=7, name="zwgate0089")
+    dev = _FakeDevice("zwgate0089p2h", virtual_chassis=legacy_vc, vc_position=2)
+    partner = _FakeDevice("zwgate0089p1h", virtual_chassis=legacy_vc, vc_position=1)
+    legacy_vc.master = dev
+    client = _make_client([legacy_vc], [dev, partner])
+    action, vc = client.upsert_virtual_chassis(
+        "zwgate0089p0h", [(dev, 2), (partner, 1)],
+    )
+    assert vc is legacy_vc
+    assert legacy_vc.name == "zwgate0089p0h"
+    assert action == "renamed"
+    assert not legacy_vc.deleted
+    # No member churn
+    assert dev.virtual_chassis is legacy_vc
+    assert partner.virtual_chassis is legacy_vc
+    assert client.nb.dcim.virtual_chassis.created == []
+
+
+def test_upsert_virtual_chassis_creates_when_no_adoptable_vc() -> None:
+    dev = _FakeDevice("fw-p1h", virtual_chassis=None, vc_position=None)
+    client = _make_client([], [dev])
+    action, vc = client.upsert_virtual_chassis("fw-p0h", [(dev, 1)])
+    assert action in ("created", "updated")
+    assert vc.name == "fw-p0h"
+    assert client.nb.dcim.virtual_chassis.created == [vc]
+    assert dev.virtual_chassis == vc.id
 
 
 def test_upsert_virtual_chassis_absorbs_stale_single_member_vc() -> None:

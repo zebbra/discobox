@@ -791,8 +791,23 @@ class NetboxClient:
         vc = results[0] if results else None
         action = "unchanged"
         if not vc:
-            vc = self.nb.dcim.virtual_chassis.create(name=name, master=members[0][0].id)
-            action = "created"
+            # A member may already master a VC under a legacy name (Netbox
+            # allows one VC per master device): adopt and rename it instead of
+            # creating a duplicate, so members never have to move.
+            adoptable = next(
+                (r for device, _pos in members
+                 for r in self.nb.dcim.virtual_chassis.filter(master_id=device.id)),
+                None,
+            )
+            if adoptable is not None:
+                vc = adoptable
+                old_name = vc.name
+                vc.update({"name": name})
+                action = "renamed"
+                logger.info("  VC %r renamed to %r (adopted from legacy name)", old_name, name)
+            else:
+                vc = self.nb.dcim.virtual_chassis.create(name=name, master=members[0][0].id)
+                action = "created"
 
         for device, position in members:
             patch = {}
