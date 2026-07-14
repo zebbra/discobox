@@ -43,6 +43,11 @@ def map_iftype(nd_type: Optional[str], iface_name: Optional[str]) -> str:
     lname = (iface_name or "").lower()
     nd_type_l = (nd_type or "").lower()
 
+    # Dot-notation subinterfaces (e.g. "TwentyFiveGigE1/1/8.2802", "Po1.100") are
+    # always virtual: Netbox only allows a `parent` on interfaces of type virtual,
+    # and the name-prefix rules below would otherwise assign the parent's physical type.
+    if re.search(r"\.\d+$", lname):                                 return "virtual"
+
     # LAG / virtual via ifType: these are reliable regardless of name
     if "lag" in nd_type_l:                                          return "lag"
     if nd_type_l in ("softwareloopback", "propvirtual", "l2vlan",

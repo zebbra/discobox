@@ -61,6 +61,18 @@ IFTYPE_CASES: list[tuple[str, str, str]] = [
     ("Loopback0",        "softwareLoopback", "virtual"),
     ("Vlan100",          "l3ipvlan",         "virtual"),
     ("Tunnel0",          "tunnel",           "virtual"),
+
+    # Dot-notation subinterfaces — must be virtual regardless of the parent's
+    # physical name prefix, or Netbox rejects the `parent` assignment.
+    # Regression: "TwentyFiveGigE1/1/8.2802" was classified as 25gbase-x-sfp28.
+    ("TwentyFiveGigE1/1/8.2802",     "ethernetCsmacd", "virtual"),
+    ("GigabitEthernet0/0/1.1132",    "ethernetCsmacd", "virtual"),
+    ("TenGigabitEthernet1/1.100",    "ethernetCsmacd", "virtual"),
+    ("Po1.100",                      "propVirtual",    "virtual"),
+    ("Port-channel1.200",            "ieee8023adLag",  "virtual"),
+    ("eth0.100",                     "l2vlan",         "virtual"),
+    # Dots not followed by trailing digits are NOT subinterfaces.
+    ("ssl.root",                     "tunnel",         "virtual"),   # ifType, not the dot rule
 ]
 
 
