@@ -700,7 +700,7 @@ class NetboxClient:
         position: str,
     ) -> pynetbox.core.response.Record:
         """Return an existing ModuleBay or create one on the device."""
-        name = name[:64]
+        name = (name or "")[:64]
         results = list(self.nb.dcim.module_bays.filter(device_id=device.id, name=name))
         if len(results) > 1:
             logger.warning("  ModuleBay %r: %d duplicates in Netbox, using first", name, len(results))
@@ -1064,6 +1064,50 @@ def expand_iface_name(name: str) -> str:
         if name.startswith(abbrev) and not name.startswith(full):
             return full + name[len(abbrev):]
     return name
+
+
+def _fill_module_names(nd_mods: list[dict]) -> None:
+    """Synthesize missing module names in-place from description + parent chain.
+
+    Newer IOS-XE (e.g. 17.15 on C9300X) reports entPhysicalName as null for every
+    entity and moves the text to entPhysicalDescr. Downstream logic routes by name
+    ("Switch N" extraction, module bay names, SFP→interface mapping), so rebuild
+    names the way older images reported them:
+
+      chassis  → "Switch {pos+1}"            (Netdisco pos is 0-indexed)
+      port     → parent container description minus " Container"
+                 ("Twe1/1/2 Container" → "Twe1/1/2", the SFP's interface)
+      other    → description, prefixed with "Switch {N} " from the owning
+                 chassis when the description doesn't already carry it
+    """
+    by_index = {m["index"]: m for m in nd_mods if m.get("index") is not None}
+
+    def owning_switch(m: dict) -> Optional[int]:
+        cur, hops = m, 0
+        while cur is not None and hops < 20:
+            if cur.get("class") == "chassis":
+                pos = cur.get("pos")
+                return pos + 1 if pos is not None else None
+            cur = by_index.get(cur.get("parent"))
+            hops += 1
+        return None
+
+    for m in nd_mods:
+        if m.get("name"):
+            continue
+        descr = (m.get("description") or "").strip()
+        cls = m.get("class")
+        if cls == "chassis":
+            pos = m.get("pos")
+            m["name"] = f"Switch {pos + 1}" if pos is not None else descr
+        elif cls == "port":
+            parent_descr = ((by_index.get(m.get("parent")) or {}).get("description") or "").strip()
+            m["name"] = parent_descr[: -len(" Container")] if parent_descr.endswith(" Container") else descr
+        elif descr and not re.search(r"\bswitch\s*\d", descr, re.IGNORECASE):
+            sw = owning_switch(m)
+            m["name"] = f"Switch {sw} {descr}" if sw is not None else descr
+        else:
+            m["name"] = descr
 
 
 def _reraise_if_gateway_error(exc: requests.HTTPError) -> None:
@@ -1854,6 +1898,7 @@ def sync_device(
             _reraise_if_gateway_error(exc)
             log.error("Could not fetch modules from Netdisco: %s", exc)
             nd_mods = []
+        _fill_module_names(nd_mods)
 
         chassis = [m for m in nd_mods if m.get("class") == "chassis" and m.get("model")]
         stack_root = next((m for m in nd_mods if m.get("class") == "stack"), None)
@@ -1917,8 +1962,8 @@ def sync_device(
 
         def _upsert_chassis_bay(ch: dict, slot_key: Optional[int] = None) -> None:
             """Create/update a module bay + module for a chassis member."""
-            name = ch.get("name", "")
-            model = ch.get("model", "")
+            name = ch.get("name") or ""
+            model = ch.get("model") or ""
             serial = ch.get("serial") or ""
             position = str(ch.get("pos", ""))
             vendor_name = vendor_from_chassis(ch)
@@ -1951,7 +1996,7 @@ def sync_device(
                 log.error("  DeviceType update error: %s", exc)
             for ch in fex_units:
                 # Extract FEX ID from name: "Fex-101 Nexus2332 Chassis" → 101
-                fex_match = re.match(r"[Ff]ex-(\d+)", ch.get("name", ""))
+                fex_match = re.match(r"[Ff]ex-(\d+)", ch.get("name") or "")
                 slot_key = int(fex_match.group(1)) if fex_match else None
                 try:
                     _upsert_chassis_bay(ch, slot_key)
@@ -2224,15 +2269,16 @@ def sync_device(
         stack_cables = [
             m for m in nd_mods
             if m.get("class") == "other"
+            and m.get("name")
             and m.get("model") and m.get("serial")
         ]
         if stack_cables:
             log.debug("StackCables  entries: %d", len(stack_cables))
             cable_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
             for cable in stack_cables:
-                cable_name = cable.get("name", "")
-                cable_model = cable.get("model", "")
-                cable_serial = cable.get("serial", "")
+                cable_name = cable.get("name") or ""
+                cable_model = cable.get("model") or ""
+                cable_serial = cable.get("serial") or ""
                 # Route to correct VSS member if applicable; for traditional stacks all on nb_device
                 cable_target = nb_device
                 if slot_to_device:
@@ -2264,6 +2310,7 @@ def sync_device(
         blades = [
             m for m in nd_mods
             if m.get("class") == "module"
+            and m.get("name")
             and m.get("model") and m.get("model") != "Unknown PID"
             and m.get("serial")
             and "transceiver" not in (m.get("name") or "").lower()
@@ -2271,9 +2318,9 @@ def sync_device(
         log.debug("Blades    entries: %d", len(blades))
         blade_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
         for blade in blades:
-            blade_name = blade.get("name", "")
-            blade_model = blade.get("model", "")
-            blade_serial = blade.get("serial", "")
+            blade_name = blade.get("name") or ""
+            blade_model = blade.get("model") or ""
+            blade_serial = blade.get("serial") or ""
             # Extract slot/position and route to the correct device.
             # VSS: each member is a separate Netbox device → route via "Switch N".
             # Stack: single Netbox device, so use the switch number AS the position so
@@ -2621,6 +2668,7 @@ def sync_device(
                 _reraise_if_gateway_error(exc)
                 log.error("Could not fetch modules from Netdisco: %s", exc)
                 nd_mods = []
+            _fill_module_names(nd_mods)
 
         sfps = [
             m for m in nd_mods
@@ -2640,9 +2688,9 @@ def sync_device(
             sfp_ifaces_by_device = {1: nb.fetch_interfaces(nb_device.id)}
 
         for sfp in sfps:
-            name = sfp.get("name", "")
-            model = sfp.get("model", "")
-            serial = sfp.get("serial", "")
+            name = sfp.get("name") or ""
+            model = sfp.get("model") or ""
+            serial = sfp.get("serial") or ""
             expanded = expand_iface_name(name)
             # Determine which VSS member owns this interface (first digit run before first '/').
             # e.g. GigabitEthernet2/0/1 → switch 2.  Falls back to pos 1 for standalone/stack.

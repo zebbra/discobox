@@ -13,7 +13,9 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from discobox import (
+    _fill_module_names,
     _slot_from_iface,
+    expand_iface_name,
     map_iftype,
     parse_speed_kbps,
     parse_sw_model,
@@ -164,6 +166,51 @@ def test_slot_from_iface() -> None:
     assert _slot_from_iface("stack", "Po1") is None
     assert _slot_from_iface("stack", "port1") is None
     assert _slot_from_iface("stack", "LAG-ecn") is None
+
+
+# ── _fill_module_names ─────────────────────────────────────────────────────────
+
+def test_fill_module_names_cat9300x() -> None:
+    # IOS-XE 17.15 on C9300X reports entPhysicalName as null for EVERY entity;
+    # names must be synthesized from description + parent chain.
+    with open(SAMPLES / "cat9300x-modules.json") as f:
+        mods = json.load(f)
+    assert all(m.get("name") is None for m in mods), "fixture expected to have all-null names"
+
+    _fill_module_names(mods)
+    by_index = {m["index"]: m for m in mods}
+
+    # Chassis member: pos 0 → "Switch 1" (matches pre-17.15 naming)
+    assert by_index[1000]["name"] == "Switch 1"
+    # Stack root: plain description, no Switch prefix (parent chain ends at 0)
+    assert by_index[1]["name"] == "c93xx Stack"
+    # Uplink module blade: description prefixed with owning switch so the
+    # "Switch N" position/routing extraction keeps working
+    assert by_index[1086]["name"] == "Switch 1 8x25G Uplink Module"
+    # PSU / fan: description already carries "Switch 1" → no double prefix
+    assert by_index[1015]["name"] == "Switch 1 - Power Supply A"
+    assert by_index[1018]["name"] == "Switch 1 - C9300X-24HX - FAN 2"
+    # SFPs (class=port): name = parent SFP container description minus " Container",
+    # which is the abbreviated interface name the SFP sync maps to Netbox
+    assert by_index[1104]["name"] == "Twe1/1/1"
+    assert by_index[1110]["name"] == "Twe1/1/2"
+    assert by_index[1116]["name"] == "Twe1/1/3"
+    assert by_index[1122]["name"] == "Twe1/1/8"
+    assert expand_iface_name(by_index[1110]["name"]) == "TwentyFiveGigE1/1/2"
+    # Nothing is left nameless as None (empty string at worst)
+    assert all(m["name"] is not None for m in mods)
+
+
+def test_fill_module_names_keeps_existing() -> None:
+    # Pre-17.15 dumps have real names — must pass through untouched.
+    with open(SAMPLES / "cat9300-modules.json") as f:
+        mods = json.load(f)
+    before = {m["index"]: m.get("name") for m in mods if m.get("name")}
+    assert before, "fixture expected to have named entries"
+    _fill_module_names(mods)
+    after = {m["index"]: m.get("name") for m in mods}
+    for idx, name in before.items():
+        assert after[idx] == name
 
 
 # ── port_to_netbox (covers map_iftype + parse_speed_kbps + clean_mac) ──────────
