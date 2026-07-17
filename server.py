@@ -231,11 +231,15 @@ reconcile_not_in_netdisco = Gauge(
 reconcile_skipped_offline = Gauge(
     "discobox_reconcile_skipped_offline",
     "Devices not enqueued by the last reconcile because liveness reported them down",
+    multiprocess_mode="livemax",
+    **_reg,
 )
 
 liveness_query_up = Gauge(
     "discobox_liveness_query_up",
     "1 if the liveness query during the last reconcile succeeded, 0 on error",
+    multiprocess_mode="livemax",
+    **_reg,
 )
 
 reconcile_not_in_netbox = Gauge(
