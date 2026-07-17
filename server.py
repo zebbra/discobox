@@ -8,6 +8,7 @@ same host are dropped while a sync is already in progress.
 
 Endpoints:
   POST /sync             Trigger a device sync
+  POST /sync/all         Queue a sync for every device known to Netdisco
   POST /sync/pause       Hold queued syncs from starting
   POST /sync/resume      Release the pause gate
   GET  /metrics          Prometheus metrics
@@ -1034,6 +1035,92 @@ async def sync(
     return SyncResponse(status="queued", host=resolved_host)
 
 
+def _enqueue_all(hosts: list, submit, limit: Optional[int] = None, force: bool = False) -> dict[str, int]:
+    """Queue syncs for many hosts through the standard guards.
+
+    submit(host) is called for each host that passes the cooldown, queue-cap
+    and in-flight checks — the same gates the /sync webhook applies.
+    Returns counters for the response body.
+    """
+    counts = {"queued": 0, "cooldown": 0, "queue_full": 0, "in_progress": 0, "invalid": 0}
+    for host in hosts:
+        if limit is not None and counts["queued"] >= limit:
+            break
+        try:
+            host = validate_ip(host)
+        except ValueError:
+            counts["invalid"] += 1
+            continue
+        if not force and _recently_synced(host):
+            counts["cooldown"] += 1
+            syncs_skipped_total.inc()
+            continue
+        with _in_flight_lock:
+            if len(_in_flight) >= _MAX_QUEUE:
+                counts["queue_full"] += 1
+                syncs_skipped_total.inc()
+                continue
+            if not _claim_host(host):
+                counts["in_progress"] += 1
+                syncs_skipped_total.inc()
+                continue
+            _in_flight.add(host)
+        sync_in_progress.inc()
+        submit(host)
+        counts["queued"] += 1
+    return counts
+
+
+@app.api_route(
+    "/sync/all",
+    methods=["GET", "POST"],
+    status_code=202,
+    dependencies=[Depends(require_auth)],
+    summary="Queue a sync for every device known to Netdisco",
+)
+async def sync_all(
+    limit: Annotated[Optional[int], Query(description="Max devices to enqueue (for batching)")] = None,
+    force: Annotated[bool, Query(description="Ignore the sync cooldown window")] = False,
+    sync_mac: Annotated[bool, Query(description="Sync MAC addresses")] = _DEFAULT_MAC,
+    sync_ip: Annotated[bool, Query(description="Sync IP addresses")] = _DEFAULT_IP,
+    sync_modules: Annotated[bool, Query(description="Sync module bays / modules")] = _DEFAULT_MODULES,
+    sync_sfp: Annotated[bool, Query(description="Sync SFP inventory items")] = _DEFAULT_SFP,
+    sync_poe: Annotated[bool, Query(description="Sync PoE mode")] = _DEFAULT_POE,
+    housekeeping: Annotated[bool, Query(description="Remove stale device bays and empty dummy interfaces")] = _DEFAULT_HOUSEKEEPING,
+    lldp_clear_stale: Annotated[bool, Query(description="Clear LLDP neighbor fields when no neighbor is present")] = _DEFAULT_LLDP_CLEAR_STALE,
+) -> dict:
+    """
+    Fetch the full device list from Netdisco and queue a sync for each,
+    applying the same guards as the /sync webhook (cooldown, queue cap,
+    in-flight dedup). Returns immediately with per-guard counters.
+
+    Syncs drain at DISCOBOX_MAX_CONCURRENT_SYNCS, so a full run over a large
+    inventory takes a while — use `limit` to batch, `force` to bypass the
+    cooldown for devices synced recently.
+    """
+    loop = asyncio.get_running_loop()
+    nd = _make_netdisco_client()
+    try:
+        devices = await loop.run_in_executor(None, nd.get_all_devices)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"could not fetch Netdisco device list: {exc}")
+    hosts = [d["ip"] for d in devices if d.get("ip")]
+
+    def submit(host: str) -> None:
+        loop.run_in_executor(None, partial(
+            _run_sync, host, sync_mac, sync_ip, sync_modules, sync_sfp, sync_poe,
+            housekeeping, lldp_clear_stale,
+            _CF_NEIGHBOR_TEXT, _CF_NEIGHBOR_PORT, _CF_NEIGHBOR_DEVICE, _CF_NEIGHBOR_IFACE,
+            _CABLE_SCOPE, _CABLE_SOURCE_CF, _CABLE_SOURCE_VALUE,
+            _IFACE_SOURCE_CF, _IFACE_SOURCE_VALUE,
+            _CF_OS_VERSION, _CF_OS_NAME, _CF_OS_RELEASE,
+        ))
+
+    counts = _enqueue_all(hosts, submit, limit=limit, force=force)
+    logger.info("sync/all: %s (netdisco_total=%d)", counts, len(hosts))
+    return {"status": "queued", "netdisco_total": len(hosts), **counts}
+
+
 @app.get(_METRICS_PATH, include_in_schema=False)
 async def metrics() -> Response:
     if _MULTIPROC_DIR:
@@ -1147,6 +1234,7 @@ async def index() -> str:
 <table class="endpoints">
   <tr><th>Method</th><th>Path</th><th>Description</th></tr>
   <tr><td>POST</td><td><a href=/docs#/default/sync_sync_post>/sync</a></td><td>Netdisco webhook: trigger device sync</td></tr>
+  <tr><td>POST</td><td>/sync/all</td><td>Queue a sync for every device known to Netdisco</td></tr>
   <tr><td>POST</td><td>/sync/pause</td><td>Pause queued syncs</td></tr>
   <tr><td>POST</td><td>/sync/resume</td><td>Resume queued syncs</td></tr>
   <tr><td>POST</td><td>/reconcile</td><td>Trigger reconcile run manually</td></tr>

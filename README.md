@@ -279,6 +279,7 @@ CDP/LLDP neighbor data from Netdisco, written on every interface sync. Text fiel
 |---|---|---|---|
 | `/` | GET | no | Status page — endpoints, in-flight syncs, unknown devices |
 | `/sync?host=<ip>` | GET, POST | yes | Trigger device sync |
+| `/sync/all` | GET, POST | yes | Queue a sync for every device known to Netdisco; optional `?limit=N&force=true` (force bypasses the cooldown window) |
 | `/sync/pause` | GET, POST | yes | Pause queued syncs (also skips reconcile) |
 | `/sync/resume` | GET, POST | yes | Resume queued syncs |
 | `/reconcile` | GET, POST | yes | Trigger reconcile run immediately; optional `?max_enqueue=N&offset=N` |
