@@ -209,6 +209,19 @@ DISCOBOX_RECONCILE_MAX_ENQUEUE=200 # max devices enqueued per run; unset = no li
 DISCOBOX_RECONCILE_MAX_QUEUED=500  # abort run if Netdisco queue has more than N jobs queued (default: 500)
 DISCOBOX_RECONCILE_MAX_FAILED=500  # abort run if Netdisco reports more than N failures (default: 500)
 
+# Liveness gate (optional) — before enqueueing, query a Prometheus-compatible API
+# (VictoriaMetrics vmselect) and skip devices whose monitoring says they are down.
+# Dead devices would only produce failed Netdisco jobs and burn the MAX_FAILED budget.
+# Fail-open: devices absent from the query result (not yet monitored) are still
+# enqueued, and a failed/unreachable query disables the gate for that run.
+DISCOBOX_LIVENESS_URL=              # query API base incl. tenant prefix, e.g.
+                                    # http://vmselect:8481/select/0/prometheus; unset = disabled
+DISCOBOX_LIVENESS_QUERY='max_over_time(up{job="snmp"}[6h])'  # >0 alive, 0 down, absent unknown
+DISCOBOX_LIVENESS_LABEL=netbox_primary_ip  # series label identifying the device
+DISCOBOX_LIVENESS_KEY=ip            # device attribute compared to the label: ip | name
+DISCOBOX_LIVENESS_TIMEOUT=15        # query timeout in seconds, default: 15
+DISCOBOX_LIVENESS_TLS_VERIFY=true   # set to false for self-signed certs
+
 # Overload protection — circuit breaker and per-device retry (see below)
 DISCOBOX_CB_WINDOW=120      # look-back window in seconds for counting timeouts, default: 120
 DISCOBOX_CB_THRESHOLD=3     # number of timeouts within window to trip the breaker, default: 3

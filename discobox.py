@@ -1632,6 +1632,49 @@ def _create_device_from_nd(
     return True
 
 
+def fetch_liveness(
+    url: str,
+    query: str,
+    label: str = "netbox_primary_ip",
+    timeout: int = 15,
+    verify_tls: bool = True,
+) -> dict[str, bool]:
+    """
+    Run an instant PromQL query against a Prometheus-compatible API
+    (e.g. VictoriaMetrics vmselect, URL including any tenant prefix such
+    as /select/0/prometheus) and map each series' `label` value to a
+    liveness verdict: True when the sample value is > 0.
+
+    A device with multiple series counts as up if any of them is > 0.
+    Label values carrying a CIDR suffix are normalized to the bare IP.
+
+    Raises on HTTP or payload errors — the caller decides fail-open behavior.
+    """
+    resp = requests.get(
+        f"{url.rstrip('/')}/api/v1/query",
+        params={"query": query},
+        timeout=timeout,
+        verify=verify_tls,
+        headers={"Accept": "application/json", "User-Agent": "discobox"},
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    if payload.get("status") != "success":
+        raise RuntimeError(f"liveness query failed: {payload.get('error') or 'unknown error'}")
+
+    liveness: dict[str, bool] = {}
+    for series in payload.get("data", {}).get("result", []):
+        key = str(series.get("metric", {}).get(label) or "").split("/")[0]
+        if not key:
+            continue
+        try:
+            alive = float(series["value"][1]) > 0
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+        liveness[key] = liveness.get(key, False) or alive
+    return liveness
+
+
 def reconcile_devices(
     nd: "NetdiscoClient",
     nb: "NetboxClient",
@@ -1647,6 +1690,8 @@ def reconcile_devices(
     auto_create_location: bool = False,
     iface_source_cf: Optional[str] = None,
     iface_source_value: str = "netdisco",
+    liveness: Optional[dict] = None,   # from fetch_liveness(); None = no filtering
+    liveness_key: str = "ip",          # device attribute matched against liveness keys: ip | name
 ) -> dict:
     """
     Compare Netbox active devices against Netdisco and enqueue discovery
@@ -1662,8 +1707,15 @@ def reconcile_devices(
     submitted) while still running the full not_in_netdisco/not_in_netbox
     gap scan — use this to monitor drift without triggering discovery.
 
-    Returns counts: enqueued / skipped (no primary IP) / already_known /
-                    netbox_total / netdisco_total / aborted (bool).
+    When `liveness` is given, each missing device gets a status (up/down/
+    unknown) in the gap list and devices reported down are not enqueued —
+    a dead device would only produce a failed Netdisco discovery job and
+    burn max_failed budget. Devices absent from the liveness data count as
+    "unknown" and are still enqueued (fail-open: not-yet-monitored gear
+    must remain discoverable).
+
+    Returns counts: enqueued / skipped (no primary IP) / skipped_offline /
+                    already_known / netbox_total / netdisco_total / aborted (bool).
     """
     log = logging.getLogger("discobox.reconcile")
     _aborted = {"aborted": True, "enqueued": 0, "skipped": 0, "already_known": 0, "netbox_total": 0, "netdisco_total": 0}
@@ -1693,7 +1745,7 @@ def reconcile_devices(
 
     role_filter = {"role": roles} if roles else {}
     nb_total = nb.nb.dcim.devices.count(status="active", has_primary_ip=True, **role_filter)
-    counts = {"enqueued": 0, "skipped": 0, "already_known": 0, "netdisco_total": len(nd_ips), "netbox_total": nb_total}
+    counts = {"enqueued": 0, "skipped": 0, "skipped_offline": 0, "already_known": 0, "netdisco_total": len(nd_ips), "netbox_total": nb_total}
     if roles:
         log.info("Reconcile role filter: %s", roles)
 
@@ -1710,7 +1762,16 @@ def reconcile_devices(
             counts["already_known"] += 1
             continue
 
-        not_in_netdisco.append({"ip": ip, "name": device.name})
+        entry = {"ip": ip, "name": device.name}
+        if liveness is not None:
+            alive = liveness.get(ip if liveness_key == "ip" else str(device.name or ""))
+            entry["status"] = "unknown" if alive is None else ("up" if alive else "down")
+        not_in_netdisco.append(entry)
+
+        if entry.get("status") == "down":
+            counts["skipped_offline"] += 1
+            log.debug("Skipping %s (%s): liveness reports down", ip, device.name)
+            continue
 
         cf = getattr(device, "custom_fields", {}) or {}
         device_auth_tag_hint = cf.get("snmp_auth_profile") or None

@@ -37,6 +37,13 @@ reconcile:
   max_queued: null          # abort reconcile if Netdisco queue exceeds this
   max_failed: null
   max_enqueue: null         # cap devices enqueued per reconcile run
+  liveness:                 # skip enqueueing devices a metrics store reports as down
+    url: null               # Prometheus-compatible query API incl. tenant prefix, e.g.
+                            # http://vmselect:8481/select/0/prometheus — null disables
+    query: 'max_over_time(up{job="snmp"}[6h])'   # > 0 = alive, 0 = down, absent = unknown (still enqueued)
+    label: netbox_primary_ip  # series label identifying the device
+    key: ip                 # device attribute compared to the label: ip | name
+    timeout: 15             # query timeout, seconds
 
 auto_create:
   role: null                # NetBox device-role slug; null disables auto-create

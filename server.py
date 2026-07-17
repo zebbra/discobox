@@ -38,7 +38,7 @@ from prometheus_client import Counter, Gauge, Histogram, CollectorRegistry, gene
 from prometheus_client.multiprocess import MultiProcessCollector
 from pydantic import BaseModel
 
-from discobox import NetboxClient, NetdiscoClient, reconcile_devices, sync_device, validate_ip
+from discobox import NetboxClient, NetdiscoClient, fetch_liveness, reconcile_devices, sync_device, validate_ip
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
@@ -228,6 +228,16 @@ reconcile_not_in_netdisco = Gauge(
     multiprocess_mode="livemax",
     **_reg,
 )
+reconcile_skipped_offline = Gauge(
+    "discobox_reconcile_skipped_offline",
+    "Devices not enqueued by the last reconcile because liveness reported them down",
+)
+
+liveness_query_up = Gauge(
+    "discobox_liveness_query_up",
+    "1 if the liveness query during the last reconcile succeeded, 0 on error",
+)
+
 reconcile_not_in_netbox = Gauge(
     "discobox_reconcile_not_in_netbox",
     "Netdisco devices not found in Netbox (last reconcile)",
@@ -373,6 +383,22 @@ _RECONCILE_MAX_ENQUEUE:   Optional[int] = _c (_CFG, "reconcile", "max_enqueue", 
 _RECONCILE_ROLES:         list[str]     = _clist(_CFG, "reconcile", "roles") or ["router", "switch", "firewall"]
 _RECONCILE_REQUIRE_AUTH_TAG: bool       = _cbool(_CFG, "reconcile", "require_auth_tag", default=False)
 
+# Liveness gate: before enqueueing discovery, ask a Prometheus-compatible API
+# (VictoriaMetrics vmselect) which devices actually respond, and skip the dead
+# ones. Disabled unless a URL is configured. Query failures fail open.
+_LIVENESS_URL:   Optional[str] = os.getenv("DISCOBOX_LIVENESS_URL") or _cstr(_CFG, "reconcile", "liveness", "url")
+_LIVENESS_QUERY: str = os.getenv("DISCOBOX_LIVENESS_QUERY") or _c(
+    _CFG, "reconcile", "liveness", "query", default='max_over_time(up{job="snmp"}[6h])'
+)
+_LIVENESS_LABEL: str = os.getenv("DISCOBOX_LIVENESS_LABEL") or _c(
+    _CFG, "reconcile", "liveness", "label", default="netbox_primary_ip"
+)
+_LIVENESS_KEY: str = (os.getenv("DISCOBOX_LIVENESS_KEY") or _c(
+    _CFG, "reconcile", "liveness", "key", default="ip"
+)).lower()  # 'ip' (primary IP) or 'name' (device name/FQDN)
+_LIVENESS_TIMEOUT: int = int(os.getenv("DISCOBOX_LIVENESS_TIMEOUT") or _c(_CFG, "reconcile", "liveness", "timeout", default=15))
+_LIVENESS_TLS_VERIFY: bool = os.getenv("DISCOBOX_LIVENESS_TLS_VERIFY", "true").lower() != "false"
+
 _AUTO_CREATE_ROLE:     Optional[str] = _cstr (_CFG, "auto_create", "role",     default=None)
 _AUTO_CREATE_SITE:     Optional[str] = _cstr (_CFG, "auto_create", "site",     default=None)
 _AUTO_CREATE_STATUS:   str           = _c    (_CFG, "auto_create", "status",   default="active")
@@ -403,6 +429,25 @@ def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = No
         verify_tls=os.getenv("NETBOX_TLS_VERIFY", "true").lower() != "false",
     )
     effective_max = max_enqueue if max_enqueue is not None else _RECONCILE_MAX_ENQUEUE
+
+    liveness = None
+    if _LIVENESS_URL:
+        try:
+            liveness = fetch_liveness(
+                _LIVENESS_URL, _LIVENESS_QUERY,
+                label=_LIVENESS_LABEL,
+                timeout=_LIVENESS_TIMEOUT,
+                verify_tls=_LIVENESS_TLS_VERIFY,
+            )
+            liveness_query_up.set(1)
+            _save_liveness_status({"ok": True, "devices": len(liveness), "error": None, "checked": time.time()})
+            logger.info("Liveness: %d devices matched by query", len(liveness))
+        except Exception as exc:
+            liveness = None  # fail open: reconcile as if the gate were disabled
+            liveness_query_up.set(0)
+            _save_liveness_status({"ok": False, "devices": 0, "error": str(exc), "checked": time.time()})
+            logger.error("Liveness query failed (failing open, nothing skipped): %s", exc)
+
     counts = reconcile_devices(
         nd, nb,
         max_queued=_RECONCILE_MAX_QUEUED,
@@ -417,6 +462,8 @@ def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = No
         auto_create_location=_AUTO_CREATE_LOCATION,
         iface_source_cf=_IFACE_SOURCE_CF,
         iface_source_value=_IFACE_SOURCE_VALUE,
+        liveness=liveness,
+        liveness_key=_LIVENESS_KEY,
     )
     if counts.get("aborted"):
         reconcile_aborted_total.inc()
@@ -426,6 +473,7 @@ def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = No
     reconcile_enqueued_total.inc(counts.get("enqueued", 0))
     reconcile_not_in_netdisco.set(counts.get("not_in_netdisco", 0))
     reconcile_not_in_netbox.set(counts.get("not_in_netbox", 0))
+    reconcile_skipped_offline.set(counts.get("skipped_offline", 0))
     with _reconcile_gaps_lock:
         _save_gap(_NOT_IN_NETDISCO_FILE, counts.get("not_in_netdisco_list", []))
         _save_gap(_NOT_IN_NETBOX_FILE, counts.get("not_in_netbox_list", []))
@@ -642,6 +690,22 @@ def _load_gap(path: str) -> list[dict]:
 def _save_gap(path: str, devices: list[dict]) -> None:
     with open(path, "w") as f:
         json.dump(devices, f)
+
+# Liveness query health, written on each reconcile run for the status page.
+_LIVENESS_FILE: str = os.path.join(
+    os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp"), "discobox.liveness.json"
+)
+
+def _load_liveness_status() -> dict:
+    try:
+        with open(_LIVENESS_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def _save_liveness_status(status: dict) -> None:
+    with open(_LIVENESS_FILE, "w") as f:
+        json.dump(status, f)
 
 # Limit concurrent Netbox API load: all workers share this semaphore via the
 # threading module (workers are forked from the same parent process).
@@ -1022,9 +1086,31 @@ async def index() -> str:
         not_in_netdisco_list = _load_gap(_NOT_IN_NETDISCO_FILE)
         not_in_netbox_list = _load_gap(_NOT_IN_NETBOX_FILE)
 
+    if not _LIVENESS_URL:
+        liveness_str = '<span style="color:#888">disabled</span>'
+    else:
+        ls = _load_liveness_status()
+        if not ls:
+            liveness_str = '<span style="color:#888">no data yet</span>'
+        elif ls.get("ok"):
+            checked = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(ls.get("checked", 0)))
+            liveness_str = f'<span style="color:#2ecc71">OK</span> ({ls.get("devices", 0)} devices, {checked})'
+        else:
+            liveness_str = f'<span style="color:#e74c3c">ERROR</span> {ls.get("error", "")}'
+
+    _STATUS_COLORS = {"up": "#2ecc71", "down": "#e74c3c", "unknown": "#888"}
+
     def _gap_table(devices: list[dict]) -> str:
-        rows = "".join(f"<tr><td>{d['ip']}</td><td>{d['name']}</td></tr>" for d in devices)
-        return f"<table><tr><th>IP</th><th>Name</th></tr>{rows}</table>"
+        has_status = any("status" in d for d in devices)
+        header = "<tr><th>IP</th><th>Name</th>" + ("<th>Liveness</th>" if has_status else "") + "</tr>"
+        rows = ""
+        for d in devices:
+            cell = ""
+            if has_status:
+                s = d.get("status", "unknown")
+                cell = f'<td style="color:{_STATUS_COLORS.get(s, "#888")}">{s}</td>'
+            rows += f"<tr><td>{d['ip']}</td><td>{d['name']}</td>{cell}</tr>"
+        return f"<table>{header}{rows}</table>"
 
     not_in_netdisco_section = (
         f"<h2>In Netbox, not in Netdisco ({len(not_in_netdisco_list)})</h2>{_gap_table(not_in_netdisco_list)}"
@@ -1050,7 +1136,8 @@ async def index() -> str:
 <p>Status: <span class="badge">{status_label}</span>
 &nbsp; In-flight: <b>{len(in_flight)}</b>
 &nbsp; Unknown devices: <b>{unknown_count}</b>
-&nbsp; Last reconcile: <b>{last_reconcile_str}</b></p>
+&nbsp; Last reconcile: <b>{last_reconcile_str}</b>
+&nbsp; Liveness (vmselect): <b>{liveness_str}</b></p>
 
 <h2>Endpoints</h2>
 <table class="endpoints">
