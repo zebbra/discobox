@@ -2431,6 +2431,19 @@ def sync_device(
                         if owner and owner != iface_source_value:
                             log.debug("  %-40s skipping orphan delete: owned by %r", name, owner)
                             continue
+                    # Never delete an interface that still holds IPs (e.g. a manually
+                    # created mgmt interface): Netbox cascades the delete to the IPs
+                    # and the device silently loses its management address.
+                    ips = list(nb.nb.ipam.ip_addresses.filter(
+                        assigned_object_type="dcim.interface",
+                        assigned_object_id=iface.id,
+                    ))
+                    if ips:
+                        log.warning(
+                            "  %-40s not in Netdisco but has %d IP(s) assigned: keeping",
+                            name, len(ips),
+                        )
+                        continue
                     try:
                         iface.delete()
                         orphaned_deleted += 1
@@ -2573,6 +2586,19 @@ def sync_device(
                         if owner and owner != iface_source_value:
                             log.debug("  %-40s skipping orphan delete: owned by %r", name, owner)
                             continue
+                    # Never delete an interface that still holds IPs (e.g. a manually
+                    # created mgmt interface): Netbox cascades the delete to the IPs
+                    # and the device silently loses its management address.
+                    ips = list(nb.nb.ipam.ip_addresses.filter(
+                        assigned_object_type="dcim.interface",
+                        assigned_object_id=iface.id,
+                    ))
+                    if ips:
+                        log.warning(
+                            "  %-40s not in Netdisco but has %d IP(s) assigned: keeping",
+                            name, len(ips),
+                        )
+                        continue
                     try:
                         iface.delete()
                         orphaned_deleted += 1
