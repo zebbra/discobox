@@ -604,6 +604,21 @@ def _release_host(host: str) -> None:
         pass
 
 
+def _inflight_hosts() -> list[str]:
+    """Cross-worker in-flight list from the claim files. The per-process
+    _in_flight set only sees hosts queued via the worker serving the request,
+    so status displays must read the files instead."""
+    prefix = "discobox.inflight."
+    try:
+        return sorted(
+            f.name[len(prefix):]
+            for f in os.scandir(_INFLIGHT_DIR)
+            if f.name.startswith(prefix)
+        )
+    except OSError:
+        return []
+
+
 # Reconcile leader election: with DISCOBOX_WORKERS>1, lifespan() runs once per worker
 # process, so only one worker may run _reconcile_loop() or every run's max_enqueue/gap
 # scan gets multiplied by the worker count. The lock stores the leader's PID so a crashed
@@ -1161,7 +1176,7 @@ async def index() -> str:
     paused = _is_paused()
     with _unknown_devices_lock:
         unknown_count = len(_load_unknown_devices())
-    in_flight = list(_in_flight)
+    in_flight = _inflight_hosts()
     last_reconcile = reconcile_last_run_timestamp._value.get() if hasattr(reconcile_last_run_timestamp, "_value") else 0
     last_reconcile_str = (
         time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(last_reconcile))
@@ -1259,7 +1274,7 @@ async def index() -> str:
 
 @app.get("/health", summary="Liveness check")
 async def health() -> dict:
-    return {"status": "ok", "paused": _is_paused(), "in_flight": list(_in_flight)}
+    return {"status": "ok", "paused": _is_paused(), "in_flight": _inflight_hosts()}
 
 
 @app.api_route("/reconcile", methods=["GET", "POST"], dependencies=[Depends(require_auth)], summary="Trigger reconcile run manually")
