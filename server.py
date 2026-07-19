@@ -1092,6 +1092,14 @@ def _enqueue_all(hosts: list, submit, limit: Optional[int] = None, force: bool =
     return counts
 
 
+# Query params consumed by /sync/all itself; anything else is forwarded to the
+# Netbox device filter (e.g. last_updated__lt=..., name__ic=..., site=..., role=...).
+_SYNC_ALL_PARAMS = {
+    "limit", "force", "sync_mac", "sync_ip", "sync_modules", "sync_sfp",
+    "sync_poe", "housekeeping", "lldp_clear_stale",
+}
+
+
 @app.api_route(
     "/sync/all",
     methods=["GET", "POST"],
@@ -1100,6 +1108,7 @@ def _enqueue_all(hosts: list, submit, limit: Optional[int] = None, force: bool =
     summary="Queue a sync for every device known to Netdisco",
 )
 async def sync_all(
+    request: Request,
     limit: Annotated[Optional[int], Query(description="Max devices to enqueue (for batching)")] = None,
     force: Annotated[bool, Query(description="Ignore the sync cooldown window")] = False,
     sync_mac: Annotated[bool, Query(description="Sync MAC addresses")] = _DEFAULT_MAC,
@@ -1111,21 +1120,60 @@ async def sync_all(
     lldp_clear_stale: Annotated[bool, Query(description="Clear LLDP neighbor fields and delete stale discobox-owned cables when no neighbor is present")] = _DEFAULT_LLDP_CLEAR_STALE,
 ) -> dict:
     """
-    Fetch the full device list from Netdisco and queue a sync for each,
-    applying the same guards as the /sync webhook (cooldown, queue cap,
-    in-flight dedup). Returns immediately with per-guard counters.
+    Queue a sync for many devices, applying the same guards as the /sync
+    webhook (cooldown, queue cap, in-flight dedup). Returns immediately
+    with per-guard counters.
+
+    By default the device list comes from Netdisco. Any additional query
+    parameter is forwarded to the Netbox device filter instead — e.g.
+    `?last_updated__lt=2026-10-01`, `?name__ic=foo`, `?site=zrh&role=switch`
+    — and the selection is then limited to devices Netdisco knows (others
+    are counted as not_in_netdisco; they cannot sync anyway).
 
     Syncs drain at DISCOBOX_MAX_CONCURRENT_SYNCS, so a full run over a large
     inventory takes a while — use `limit` to batch, `force` to bypass the
     cooldown for devices synced recently.
     """
+    nb_filter: dict[str, Any] = {}
+    for k, v in request.query_params.multi_items():
+        if k in _SYNC_ALL_PARAMS:
+            continue
+        if k in nb_filter:
+            if not isinstance(nb_filter[k], list):
+                nb_filter[k] = [nb_filter[k]]
+            nb_filter[k].append(v)
+        else:
+            nb_filter[k] = v
+
     loop = asyncio.get_running_loop()
     nd = _make_netdisco_client()
     try:
         devices = await loop.run_in_executor(None, nd.get_all_devices)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"could not fetch Netdisco device list: {exc}")
-    hosts = [d["ip"] for d in devices if d.get("ip")]
+    nd_ips = {d["ip"] for d in devices if d.get("ip")}
+
+    not_in_netdisco = 0
+    if nb_filter:
+        def _netbox_hosts() -> list[str]:
+            nb = NetboxClient(
+                url=os.environ["NETBOX_URL"],
+                token=os.environ["NETBOX_TOKEN"],
+                verify_tls=os.getenv("NETBOX_TLS_VERIFY", "true").lower() != "false",
+            )
+            return [
+                str(d.primary_ip4).split("/")[0]
+                for d in nb.nb.dcim.devices.filter(**{"has_primary_ip": True, **nb_filter})
+                if d.primary_ip4
+            ]
+        try:
+            selected = await loop.run_in_executor(None, _netbox_hosts)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Netbox device filter failed: {exc}")
+        hosts = [h for h in selected if h in nd_ips]
+        not_in_netdisco = len(selected) - len(hosts)
+    else:
+        hosts = sorted(nd_ips)
 
     def submit(host: str) -> None:
         loop.run_in_executor(None, partial(
@@ -1138,8 +1186,12 @@ async def sync_all(
         ))
 
     counts = _enqueue_all(hosts, submit, limit=limit, force=force)
-    logger.info("sync/all: %s (netdisco_total=%d)", counts, len(hosts))
-    return {"status": "queued", "netdisco_total": len(hosts), **counts}
+    logger.info("sync/all: %s (selected=%d filter=%r)", counts, len(hosts), nb_filter or "netdisco")
+    result = {"status": "queued", "selected": len(hosts), "netdisco_total": len(nd_ips), **counts}
+    if nb_filter:
+        result["netbox_filter"] = nb_filter
+        result["not_in_netdisco"] = not_in_netdisco
+    return result
 
 
 @app.get(_METRICS_PATH, include_in_schema=False)
