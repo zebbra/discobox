@@ -94,6 +94,21 @@ def test_foreign_owned_duplicate_kept() -> None:
     assert got is exact and not foreign.deleted
 
 
+# ── _iface_lookup ──────────────────────────────────────────────────────────────
+
+def test_iface_lookup_exact_and_case_fallback() -> None:
+    from discobox import _iface_lookup
+    lo = FakeIface(1, "loopback3899")
+    up = FakeIface(2, "Loopback3899")
+    both = {"loopback3899": lo, "Loopback3899": up}
+    # exact match preferred when present
+    assert _iface_lookup(both, "Loopback3899") is up
+    # case-insensitive fallback (Netdisco device_ips vs ports case mismatch)
+    assert _iface_lookup({"loopback3899": lo}, "Loopback3899") is lo
+    assert _iface_lookup({"Loopback3899": up}, "loopback3899") is up
+    assert _iface_lookup({"loopback3899": lo}, "GigabitEthernet1/0/1") is None
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))

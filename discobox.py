@@ -1696,6 +1696,21 @@ def fetch_liveness(
     return liveness
 
 
+def _iface_lookup(existing: dict, name: str):
+    """
+    Get an interface by name with a case-insensitive fallback: Netdisco's
+    ports, device_ips and powered_ports tables can disagree on the case of
+    the same port name (e.g. 'loopback3899' vs 'Loopback3899').
+    """
+    if name in existing:
+        return existing[name]
+    lower = str(name).lower()
+    for k, v in existing.items():
+        if k.lower() == lower:
+            return v
+    return None
+
+
 def _match_existing_iface(
     nb: "NetboxClient",
     existing: dict,
@@ -2866,7 +2881,7 @@ def sync_device(
         if not parent_name:
             continue
         iface_name = port.get("port") or port.get("descr") or ""
-        iface = flat_ifaces.get(iface_name)
+        iface = _iface_lookup(flat_ifaces, iface_name)
         parent = flat_ifaces.get(parent_name)
         if not iface or not parent:
             continue
@@ -2946,7 +2961,7 @@ def sync_device(
                 address = f"{address}/{prefix}"
             except ValueError:
                 pass
-        iface = existing_ifaces.get(port_name)
+        iface = _iface_lookup(existing_ifaces, port_name)
         if not iface:
             log.warning("  IP %-20s skipped: interface %r not found in Netbox", address, port_name)
             ip_counts["skipped"] += 1
@@ -3074,7 +3089,7 @@ def sync_device(
             existing_ifaces = nb.fetch_interfaces(nb_device.id)
             poe_iface_names = {p["port"] for p in powered_ports if p.get("port")}
             for port_name in poe_iface_names:
-                iface = existing_ifaces.get(port_name)
+                iface = _iface_lookup(existing_ifaces, port_name)
                 if not iface:
                     poe_counts["skipped"] += 1
                     continue
