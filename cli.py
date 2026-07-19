@@ -24,7 +24,7 @@ def main() -> None:
         help="Management IP of the device to sync.",
     )
     parser.add_argument("--no-mac",      action="store_true", help="Skip MAC address sync.")
-    parser.add_argument("--no-ip",       action="store_true", help="Skip IP address sync.")
+    parser.add_argument("--no-ip",       action="store_true", help="Skip IP address sync (the management IP is always synced).")
     parser.add_argument("--no-modules",  action="store_true", help="Skip module bay/module sync.")
     parser.add_argument("--no-sfp",      action="store_true", help="Skip SFP inventory item sync.")
     parser.add_argument("--no-poe",      action="store_true", help="Skip PoE mode sync.")

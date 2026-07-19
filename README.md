@@ -62,7 +62,7 @@ python cli.py --host 10.0.0.1
 ```
 --host <IP>        Management IP of the device to sync (required)
 --no-mac           Skip MAC address sync
---no-ip            Skip IP address sync
+--no-ip            Skip IP address sync (the management IP is always synced)
 --no-modules       Skip module bay / module sync
 --no-sfp           Skip SFP inventory item sync
 --no-poe           Skip PoE mode sync

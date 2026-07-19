@@ -2805,64 +2805,92 @@ def sync_device(
 
     # ── IPs ───────────────────────────────────────────────────────────────────────
 
-    if sync_ip:
-        # Re-fetch interfaces so newly created ones have IDs.
-        # For VSS, merge all member devices' interfaces so IPs can be assigned across both switches.
-        if slot_to_device:
-            existing_ifaces = {}
-            for pos, dev in slot_to_device.items():
-                existing_ifaces.update(nb.fetch_interfaces(dev.id))
-        else:
-            existing_ifaces = nb.fetch_interfaces(nb_device.id)
-        try:
-            nd_ips = nd.get_device_ips(ip)
-        except requests.HTTPError as exc:
-            _reraise_if_gateway_error(exc)
-            log.error("Could not fetch device IPs from Netdisco: %s", exc)
-            nd_ips = []
+    # The management IP (the address we poll the device by) is always synced:
+    # it anchors reachability, drives the dummy-interface move ("main" → real
+    # port), and repairs a missing primary_ip4. sync_ip=False (no_ip) only
+    # skips the remaining interface addresses.
+    # Re-fetch interfaces so newly created ones have IDs.
+    # For VSS, merge all member devices' interfaces so IPs can be assigned across both switches.
+    if slot_to_device:
+        existing_ifaces = {}
+        for pos, dev in slot_to_device.items():
+            existing_ifaces.update(nb.fetch_interfaces(dev.id))
+    else:
+        existing_ifaces = nb.fetch_interfaces(nb_device.id)
+    try:
+        nd_ips = nd.get_device_ips(ip)
+    except requests.HTTPError as exc:
+        _reraise_if_gateway_error(exc)
+        log.error("Could not fetch device IPs from Netdisco: %s", exc)
+        nd_ips = []
 
-        for entry in nd_ips:
-            address = entry.get("alias") or entry.get("ip")
-            subnet = entry.get("subnet")
-            port_name = entry.get("port")
-            if not address or not port_name:
-                continue
-            # Build CIDR if needed
-            if "/" not in str(address) and subnet:
-                try:
-                    prefix = ipaddress.ip_network(subnet, strict=False).prefixlen
-                    address = f"{address}/{prefix}"
-                except ValueError:
-                    pass
-            iface = existing_ifaces.get(port_name)
-            if not iface:
-                log.warning("  IP %-20s skipped: interface %r not found in Netbox", address, port_name)
-                ip_counts["skipped"] += 1
-                continue
+    if not sync_ip:
+        nd_ips = [
+            e for e in nd_ips
+            if str(e.get("alias") or e.get("ip") or "").split("/")[0] == ip
+        ]
+
+    for entry in nd_ips:
+        address = entry.get("alias") or entry.get("ip")
+        subnet = entry.get("subnet")
+        port_name = entry.get("port")
+        if not address or not port_name:
+            continue
+        # Build CIDR if needed
+        if "/" not in str(address) and subnet:
             try:
-                action = nb.upsert_ip(address, iface)
-                ip_counts[action] += 1
-                if action in ("created", "fixed", "moved"):
-                    log.debug("  IP %-20s → %s on %s", address, action, port_name)
-                elif action == "unchanged":
-                    log.debug("  IP %-20s → unchanged on %s", address, port_name)
-            except Exception as exc:
-                if "primary IP" in str(exc):
-                    ip_counts["skipped"] += 1
-                    log.warning(
-                        "  IP %-20s on %-30s skipped: designated primary IP of another device"
-                        " (enable housekeeping to remove the VIP device first)",
-                        address, port_name,
-                    )
-                else:
-                    ip_counts["error"] += 1
-                    log.error("  IP %-20s on %-30s error: %s", address, port_name, exc)
+                prefix = ipaddress.ip_network(subnet, strict=False).prefixlen
+                address = f"{address}/{prefix}"
+            except ValueError:
+                pass
+        iface = existing_ifaces.get(port_name)
+        if not iface:
+            log.warning("  IP %-20s skipped: interface %r not found in Netbox", address, port_name)
+            ip_counts["skipped"] += 1
+            continue
+        try:
+            action = nb.upsert_ip(address, iface)
+            ip_counts[action] += 1
+            if action in ("created", "fixed", "moved"):
+                log.debug("  IP %-20s → %s on %s", address, action, port_name)
+            elif action == "unchanged":
+                log.debug("  IP %-20s → unchanged on %s", address, port_name)
+        except Exception as exc:
+            if "primary IP" in str(exc):
+                ip_counts["skipped"] += 1
+                log.warning(
+                    "  IP %-20s on %-30s skipped: designated primary IP of another device"
+                    " (enable housekeeping to remove the VIP device first)",
+                    address, port_name,
+                )
+            else:
+                ip_counts["error"] += 1
+                log.error("  IP %-20s on %-30s error: %s", address, port_name, exc)
 
-        log.debug(
-            "IPs: created=%d fixed=%d moved=%d unchanged=%d skipped=%d errors=%d",
-            ip_counts["created"], ip_counts["fixed"], ip_counts["moved"],
-            ip_counts["unchanged"], ip_counts["skipped"], ip_counts["error"],
-        )
+    log.debug(
+        "IPs: created=%d fixed=%d moved=%d unchanged=%d skipped=%d errors=%d",
+        ip_counts["created"], ip_counts["fixed"], ip_counts["moved"],
+        ip_counts["unchanged"], ip_counts["skipped"], ip_counts["error"],
+    )
+
+    # Repair a missing primary IP: if the device has none (e.g. an interface
+    # holding it was deleted in the past), claim the management IP just synced —
+    # it must be assigned to one of this device's interfaces for Netbox to accept.
+    if not getattr(nb_device, "primary_ip4", None):
+        try:
+            for ip_obj in nb.nb.ipam.ip_addresses.filter(address=ip):
+                if str(ip_obj).split("/")[0] != ip:
+                    continue
+                if getattr(ip_obj, "assigned_object_type", None) != "dcim.interface":
+                    continue
+                dev_id = getattr(getattr(ip_obj.assigned_object, "device", None), "id", None)
+                if dev_id != nb_device.id:
+                    continue
+                nb_device.update({"primary_ip4": ip_obj.id})
+                log.info("  Primary IP restored: %s on %r", ip_obj.address, nb_device.name)
+                break
+        except Exception as exc:
+            log.warning("  Could not restore primary IP %s: %s", ip, exc)
 
     # ── SFPs ──────────────────────────────────────────────────────────────────────
 
@@ -2980,7 +3008,7 @@ def sync_device(
     )
     parts = list(filter(None, [
         _fmt("ifaces", counts),
-        _fmt("ips", ip_counts) if sync_ip else None,
+        _fmt("ips", ip_counts),
         _fmt("mods", mod_counts) if sync_modules else None,
         _fmt("sfps", sfp_counts) if sync_sfp else None,
     ]))
@@ -2990,7 +3018,7 @@ def sync_device(
         "ok": counts["error"] == 0,
         "hostname": nb_device.name,
         "interfaces": counts,
-        "ips": ip_counts if sync_ip else {},
+        "ips": ip_counts,
         "modules": mod_counts if sync_modules else {},
         "sfps": sfp_counts if sync_sfp else {},
         "ha_vip": vip_device is not None,

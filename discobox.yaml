@@ -11,7 +11,7 @@ sync:
   housekeeping: false
   pause_on_error: false
   # no_mac: false
-  # no_ip: false
+  # no_ip: false            # skips interface IPs; the management IP is always synced
   # no_modules: false
   # no_sfp: false
   # no_poe: false
