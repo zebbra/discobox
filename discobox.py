@@ -768,15 +768,79 @@ class NetboxClient:
             existing.update(patch)
             return "updated", existing
 
-        module = self.nb.dcim.modules.create(
+        # Note: the REST API has no replicate/adopt control (UI-form only, still
+        # absent in Netbox 4.4) — creating a Module ALWAYS instantiates the
+        # ModuleType's component templates, and any existing same-name interface
+        # aborts the whole create with an IntegrityError 500.
+        payload = dict(
             device=device.id,
             module_bay=bay.id,
             module_type=module_type.id,
             serial=serial,
             status="active",
-            replication_mode="adopt",
         )
+        try:
+            module = self.nb.dcim.modules.create(**payload)
+        except pynetbox.RequestError as exc:
+            if "already exists" not in str(exc):
+                raise
+            if not self._clear_module_template_collisions(device, bay, module_type):
+                raise
+            module = self.nb.dcim.modules.create(**payload)
         return "created", module
+
+    def _clear_module_template_collisions(
+        self,
+        device: pynetbox.core.response.Record,
+        bay: pynetbox.core.response.Record,
+        module_type: pynetbox.core.response.Record,
+    ) -> int:
+        """
+        Emulate the UI's "adopt components" the only way the REST API allows:
+        delete existing device interfaces that collide with the ModuleType's
+        interface templates so a retried module create can replicate them.
+        Only IP-less interfaces are deleted — their MAC, cable and neighbor
+        fields are re-created by the interface sync later in the same run.
+        Returns the number of interfaces cleared.
+        """
+        try:
+            templates = list(self.nb.dcim.interface_templates.filter(module_type_id=module_type.id))
+        except Exception as exc:
+            logger.warning("  Module %r: could not fetch interface templates: %s", bay.name, exc)
+            return 0
+        if not templates:
+            return 0
+        position = str(getattr(bay, "position", "") or "")
+        existing = {
+            i.name: i
+            for i in self.nb.dcim.interfaces.filter(device_id=device.id)
+            if i.name
+        }
+        cleared = 0
+        for tpl in templates:
+            name = (tpl.name or "").replace("{module}", position)
+            iface = existing.get(name)
+            if iface is None:
+                continue
+            ips = list(self.nb.ipam.ip_addresses.filter(
+                assigned_object_type="dcim.interface", assigned_object_id=iface.id,
+            ))
+            if ips:
+                logger.warning(
+                    "  Module %r: colliding interface %r holds %d IP(s): cannot adopt, keeping",
+                    bay.name, name, len(ips),
+                )
+                continue
+            try:
+                iface.delete()
+                cleared += 1
+                logger.info(
+                    "  Module %r: deleted colliding interface %r (re-created from template)",
+                    bay.name, name,
+                )
+            except Exception as exc:
+                logger.warning("  Module %r: could not delete colliding interface %r: %s", bay.name, name, exc)
+        return cleared
 
     def find_device_by_serial(self, serial: str) -> Optional[pynetbox.core.response.Record]:
         results = list(self.nb.dcim.devices.filter(serial=serial))
