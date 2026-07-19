@@ -613,6 +613,27 @@ class NetboxClient:
                 )
                 return "moved"
 
+            # Same device, wrong interface: follow Netdisco's port assignment.
+            # (The vip-role branch below is for IPs shared across HA members —
+            # it must not fire for a misplaced IP on this very device.)
+            assigned_dev_id = (
+                getattr(getattr(nb_ip.assigned_object, "device", None), "id", None)
+                if nb_ip.assigned_object_type == "dcim.interface" and nb_ip.assigned_object
+                else None
+            )
+            target_dev_id = getattr(getattr(iface, "device", None), "id", None)
+            if assigned_dev_id and target_dev_id and assigned_dev_id == target_dev_id:
+                nb_ip.update({
+                    "address": address,
+                    "assigned_object_type": "dcim.interface",
+                    "assigned_object_id": iface.id,
+                })
+                logger.info(
+                    "  IP %-20s moved within device: %r → %r",
+                    address, assigned_name, iface.name,
+                )
+                return "moved"
+
             # IP is shared across HA members: ensure it carries the vip role
             if getattr(nb_ip, "role", None) != "vip":
                 nb_ip.update({"role": "vip"})
@@ -1675,6 +1696,70 @@ def fetch_liveness(
     return liveness
 
 
+def _match_existing_iface(
+    nb: "NetboxClient",
+    existing: dict,
+    name: str,
+    source_cf: Optional[str] = None,
+    source_value: str = "netdisco",
+):
+    """
+    Pick the existing Netbox interface for a Netdisco port name.
+
+    Exact match wins; a case-variant (manually created 'loopback3899' vs
+    Netdisco's 'Loopback3899') is adopted — the upsert diff then renames it
+    to the canonical spelling and claims it via the source CF. When both an
+    exact and a case-variant exist (duplicate created before case-insensitive
+    matching), the one holding IPs is kept and empty non-foreign duplicates
+    are deleted.
+
+    Returns the record to update, or None to create fresh. `existing` is
+    re-keyed under the canonical name when a match is found.
+    """
+    log = logging.getLogger("discobox.sync")
+    exact = existing.get(name)
+    variant_keys = [k for k in existing if k.lower() == name.lower() and k != name]
+    if not variant_keys:
+        return exact
+    candidates = ([exact] if exact is not None else []) + [existing[k] for k in variant_keys]
+
+    def _has_ips(iface) -> bool:
+        return bool(list(nb.nb.ipam.ip_addresses.filter(
+            assigned_object_type="dcim.interface", assigned_object_id=iface.id,
+        )))
+
+    with_ips = [c for c in candidates if _has_ips(c)]
+    if len(with_ips) > 1:
+        keeper = exact if exact is not None else candidates[0]
+        log.warning(
+            "  %-40s %d case-duplicates hold IPs: keeping %r, merging nothing",
+            name, len(with_ips), keeper.name,
+        )
+        return keeper
+    keeper = with_ips[0] if with_ips else (exact if exact is not None else candidates[0])
+
+    for c in candidates:
+        if c.id == keeper.id:
+            continue
+        if source_cf:
+            owner = (dict(getattr(c, "custom_fields", {}) or {}).get(source_cf) or "")
+            if owner and owner != source_value:
+                log.debug("  %-40s keeping case-duplicate %r: owned by %r", name, c.name, owner)
+                continue
+        try:
+            c.delete()
+            existing.pop(c.name, None)
+            log.info("  %-40s merged: deleted empty case-duplicate %r", name, c.name)
+        except Exception as exc:
+            log.warning("  %-40s could not delete case-duplicate %r: %s", name, c.name, exc)
+
+    for k in variant_keys:
+        if k in existing and existing[k].id == keeper.id:
+            existing.pop(k)
+    existing[name] = keeper
+    return keeper
+
+
 def _discovery_incomplete(nd_ports: list) -> bool:
     """
     True when every port name is a bare number — Netdisco fills in ifIndex
@@ -2423,8 +2508,9 @@ def sync_device(
         all_existing.update(existing_ifaces)
         orphaned_deleted = 0
         orphaned_errors = 0
+        nd_names_lower = {str(n).lower() for n in nd_names if n}
         for name, iface in list(all_existing.items()):
-            if name not in nd_names and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
+            if name.lower() not in nd_names_lower and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
                 if housekeeping:
                     if iface_source_cf:
                         owner = (dict(getattr(iface, "custom_fields", {}) or {}).get(iface_source_cf) or "")
@@ -2578,8 +2664,9 @@ def sync_device(
         all_existing.update(existing_ifaces)
         orphaned_deleted = 0
         orphaned_errors = 0
+        nd_names_lower = {str(n).lower() for n in nd_names if n}
         for name, iface in list(all_existing.items()):
-            if name not in nd_names and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
+            if name.lower() not in nd_names_lower and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
                 if housekeeping:
                     if iface_source_cf:
                         owner = (dict(getattr(iface, "custom_fields", {}) or {}).get(iface_source_cf) or "")
@@ -2662,7 +2749,11 @@ def sync_device(
                 target_id = nb_device.id
                 target_existing = existing_ifaces
             action, nb_iface = nb.upsert_interface(
-                target_id, nb_data, target_existing.get(iface_name),
+                target_id, nb_data,
+                _match_existing_iface(
+                    nb, target_existing, iface_name,
+                    source_cf=iface_source_cf, source_value=iface_source_value,
+                ),
                 source_cf=iface_source_cf, source_value=iface_source_value,
             )
             counts[action] += 1
