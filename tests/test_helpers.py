@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from discobox import (
     NetboxClient,
+    _discovery_incomplete,
     _fill_module_names,
     _ha_node_info,
     _slave_link_field,
@@ -553,6 +554,22 @@ def test_port_to_netbox_over_fortiproxy_sample() -> None:
         # Every fortiproxy `port[1-9]` entry must be physical, not lag.
         if out["name"].startswith("port") and out["name"][4:].isdigit():
             assert out["type"] != "lag", f"{out['name']} regressed to lag"
+
+
+def test_discovery_incomplete() -> None:
+    """All-numeric port names = ifIndex placeholders from an unfinished
+    Netdisco discovery → sync must be skipped. Anything else syncs."""
+    numeric = [{"port": "1"}, {"port": "2"}, {"port": "10105"}]
+    assert _discovery_incomplete(numeric) is True
+    # descr fallback when port is missing
+    assert _discovery_incomplete([{"descr": "3"}, {"port": "4"}]) is True
+    # mixed: one real name is enough to proceed
+    assert _discovery_incomplete([{"port": "1"}, {"port": "GigabitEthernet1/0/1"}]) is False
+    assert _discovery_incomplete([{"port": "port1"}, {"port": "port2"}]) is False
+    # dot/slash notation is not a bare number
+    assert _discovery_incomplete([{"port": "1/1"}, {"port": "1.100"}]) is False
+    # no ports at all is a different situation — do not skip
+    assert _discovery_incomplete([]) is False
 
 
 def test_vendor_from_chassis_over_fortinet_samples() -> None:

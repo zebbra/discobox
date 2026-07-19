@@ -1675,6 +1675,16 @@ def fetch_liveness(
     return liveness
 
 
+def _discovery_incomplete(nd_ports: list) -> bool:
+    """
+    True when every port name is a bare number — Netdisco fills in ifIndex
+    as the port name until discovery has fetched the real ifDescr, so an
+    all-numeric port list means the device's discovery hasn't finished yet.
+    """
+    names = [str(p.get("port") or p.get("descr") or "") for p in nd_ports]
+    return bool(names) and all(n.isdigit() for n in names)
+
+
 def reconcile_devices(
     nd: "NetdiscoClient",
     nb: "NetboxClient",
@@ -1903,6 +1913,14 @@ def sync_device(
     nd_serial = nd_device.get("serial") or ""
     log.info("sync start %s", nd_hostname or ip)
     log.debug("Netdisco  hostname=%r  ports=%d", nd_hostname, len(nd_ports))
+
+    if _discovery_incomplete(nd_ports):
+        log.warning(
+            "All %d interface names are bare numbers (ifIndex placeholders): "
+            "discovery looks incomplete, skipping sync", len(nd_ports),
+        )
+        return {"ok": False, "reason": "discovery_incomplete", "hostname": nd_hostname,
+                "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
 
     nb_device = nb.find_device_by_ip(ip, hostname=nd_hostname, serial=nd_serial)
     if not nb_device:

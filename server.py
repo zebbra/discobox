@@ -875,6 +875,11 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             cf_os_release=cf_os_release,
         )
         status = "success" if result.get("ok") else "error"
+        if result.get("reason") == "discovery_incomplete":
+            # Transient: Netdisco still shows ifIndex placeholders as port names.
+            # Not an error (no failed flag, no auto-pause) and no cooldown mark,
+            # so the hook after the completed discovery syncs normally.
+            status = "skipped"
         if result.get("reason") == "device_not_found":
             unknown_devices_total.inc()
             with _unknown_devices_lock:
@@ -913,7 +918,8 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
         # failing device goes stale and timestamp-based alerts fire correctly.
         # device_sync_failed is always updated so failure is immediately visible.
         instance = result.get("hostname") or host
-        device_sync_failed.labels(instance=instance).set(0 if status == "success" else 1)
+        if status != "skipped":
+            device_sync_failed.labels(instance=instance).set(0 if status == "success" else 1)
         if status == "error" and _PAUSE_ON_ERROR and not _is_paused():
             _set_paused(True)
             sync_paused.set(1)
