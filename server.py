@@ -962,7 +962,7 @@ async def sync(
     sync_sfp: Annotated[bool, Query(description="Sync SFP inventory items")] = _DEFAULT_SFP,
     sync_poe: Annotated[bool, Query(description="Sync PoE mode")] = _DEFAULT_POE,
     housekeeping: Annotated[bool, Query(description="Remove stale device bays and empty dummy interfaces")] = _DEFAULT_HOUSEKEEPING,
-    lldp_clear_stale: Annotated[bool, Query(description="Clear LLDP neighbor fields when no neighbor is present")] = _DEFAULT_LLDP_CLEAR_STALE,
+    lldp_clear_stale: Annotated[bool, Query(description="Clear LLDP neighbor fields and delete stale discobox-owned cables when no neighbor is present")] = _DEFAULT_LLDP_CLEAR_STALE,
     debug: Annotated[bool, Query(description="Run synchronously and return debug logs as plain text")] = False,
     body: Optional[SyncRequest] = None,
 ) -> SyncResponse:
@@ -1093,7 +1093,7 @@ async def sync_all(
     sync_sfp: Annotated[bool, Query(description="Sync SFP inventory items")] = _DEFAULT_SFP,
     sync_poe: Annotated[bool, Query(description="Sync PoE mode")] = _DEFAULT_POE,
     housekeeping: Annotated[bool, Query(description="Remove stale device bays and empty dummy interfaces")] = _DEFAULT_HOUSEKEEPING,
-    lldp_clear_stale: Annotated[bool, Query(description="Clear LLDP neighbor fields when no neighbor is present")] = _DEFAULT_LLDP_CLEAR_STALE,
+    lldp_clear_stale: Annotated[bool, Query(description="Clear LLDP neighbor fields and delete stale discobox-owned cables when no neighbor is present")] = _DEFAULT_LLDP_CLEAR_STALE,
 ) -> dict:
     """
     Fetch the full device list from Netdisco and queue a sync for each,

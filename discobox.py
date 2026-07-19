@@ -2692,6 +2692,14 @@ def sync_device(
                     cable_counts["error"] += 1
                     log.warning("  %-40s cable error (not counted in errors): %s ↔ %s/%s: %s",
                                 iface_name, iface_name, port.get("remote_ip", "?"), port.get("remote_port", "?"), exc)
+            elif cable_scope and nb_iface and (
+                port.get("remote_ip") or port.get("remote_id") or port.get("remote_port")
+            ):
+                # The port reports a neighbor but it could not be resolved or
+                # cabled this run (no mgmt IP announced, resolution failure,
+                # cross-site link): failing to re-prove the neighbor is not
+                # proof it is gone — never treat the existing cable as stale.
+                seen_cable_iface_ids.add(nb_iface.id)
 
         except Exception as exc:
             counts["error"] += 1
@@ -2701,8 +2709,12 @@ def sync_device(
         log.debug("Neighbors  : found: %d  linked: %d  unresolved: %d",
                   neighbors, neighbors_linked, neighbors - neighbors_linked)
 
-    # Delete stale cables: owned cables on interfaces that no longer have a neighbor
-    if cable_scope and cable_source_cf:
+    # Delete stale cables: owned cables on interfaces whose port reports no
+    # neighbor at all. Gated on lldp_clear_stale like the neighbor custom
+    # fields: without it, absent LLDP data never destroys existing state —
+    # crucial for asymmetric LLDP visibility, where the far side's sync would
+    # otherwise delete the cable the near side just created.
+    if cable_scope and cable_source_cf and lldp_clear_stale:
         all_ifaces = dict(existing_ifaces)
         for d in vss_ifaces.values():
             all_ifaces.update(d)

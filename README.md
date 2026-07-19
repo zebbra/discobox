@@ -191,7 +191,7 @@ DISCOBOX_NO_MODULES=true    # disable module bay sync globally
 DISCOBOX_NO_SFP=true        # disable SFP inventory sync globally
 DISCOBOX_NO_POE=true        # disable PoE sync globally
 DISCOBOX_HOUSEKEEPING=true       # enable housekeeping globally
-DISCOBOX_LLDP_CLEAR_STALE=true  # clear lldp_neighbor fields when a port loses its neighbor
+DISCOBOX_LLDP_CLEAR_STALE=true  # clear neighbor fields + delete stale discobox-owned cables when a port loses its neighbor
 
 # HA / VIP device handling — controls what happens to the VIP placeholder device (e.g. p0h)
 # threenode (default) — add VIP device as VC member at pos 0; management VIP IP stays on it (role=vip)

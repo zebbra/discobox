@@ -7,7 +7,7 @@
 
 sync:
   vip_mode: threenode       # threenode | soft | hard | off
-  lldp_clear_stale: false
+  lldp_clear_stale: false     # also gates stale discobox-owned cable deletion
   housekeeping: false
   pause_on_error: false
   # no_mac: false
