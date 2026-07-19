@@ -108,7 +108,7 @@ syncs_total = Counter(
 sync_duration = Histogram(
     "discobox_sync_duration_seconds",
     "Time spent syncing a device",
-    buckets=[5, 10, 30, 60, 120, 300],
+    buckets=[5, 10, 30, 60, 120, 300, 600, 1200],
     **_reg,
 )
 sync_in_progress = Gauge(
