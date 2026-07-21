@@ -422,16 +422,54 @@ def _make_netdisco_client() -> NetdiscoClient:
     )
 
 
+# Same rationale as _get_netbox_client(): reuse one requests.Session instead
+# of opening a fresh TCP+TLS connection per sync. _get()/_post() already
+# handle session expiry (401 -> _reauth()), so a long-lived shared instance
+# is safe even for username/password auth.
+_netdisco_client: Optional[NetdiscoClient] = None
+_netdisco_client_lock = threading.Lock()
+
+
+def _get_netdisco_client() -> NetdiscoClient:
+    global _netdisco_client
+    if _netdisco_client is None:
+        with _netdisco_client_lock:
+            if _netdisco_client is None:
+                _netdisco_client = _make_netdisco_client()
+    return _netdisco_client
+
+
+# Shared across every sync/reconcile call: constructing a fresh NetboxClient
+# per request opened a brand-new requests.Session (and thus a brand-new
+# TCP+TLS connection) every single time instead of reusing a warm connection
+# pool — real, avoidable load on Netbox at 8-concurrent-syncs scale. Token
+# auth has no session/login state to go stale, so sharing one instance for
+# the process lifetime is safe (requests.Session + urllib3's connection pool
+# are safe for concurrent use across threads).
+_netbox_client: Optional[NetboxClient] = None
+_netbox_client_lock = threading.Lock()
+
+
+def _get_netbox_client() -> NetboxClient:
+    global _netbox_client
+    if _netbox_client is None:
+        with _netbox_client_lock:
+            if _netbox_client is None:
+                _netbox_client = NetboxClient(
+                    url=os.environ["NETBOX_URL"],
+                    token=os.environ["NETBOX_TOKEN"],
+                    verify_tls=os.getenv("NETBOX_TLS_VERIFY", "true").lower() != "false",
+                    changelog_message="discobox",
+                )
+    return _netbox_client
+
+
 def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = None) -> None:
     if _is_paused():
         logger.info("Reconcile skipped: sync is paused")
         return
-    nd = _make_netdisco_client()
-    nb = NetboxClient(
-        url=os.environ["NETBOX_URL"],
-        token=os.environ["NETBOX_TOKEN"],
-        verify_tls=os.getenv("NETBOX_TLS_VERIFY", "true").lower() != "false",
-    )
+    nd = _get_netdisco_client()
+    nb = _get_netbox_client()
     effective_max = max_enqueue if max_enqueue is not None else _RECONCILE_MAX_ENQUEUE
 
     liveness = None
@@ -857,13 +895,8 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
     status = "error"
     result: dict = {}
     try:
-        nd = _make_netdisco_client()
-        nb = NetboxClient(
-            url=os.environ["NETBOX_URL"],
-            token=os.environ["NETBOX_TOKEN"],
-            verify_tls=os.getenv("NETBOX_TLS_VERIFY", "true").lower() != "false",
-            changelog_message="DiscoBox Hook",
-        )
+        nd = _get_netdisco_client()
+        nb = _get_netbox_client()
         result = sync_device(
             nd=nd,
             nb=nb,
@@ -1148,7 +1181,7 @@ async def sync_all(
             nb_filter[k] = v
 
     loop = asyncio.get_running_loop()
-    nd = _make_netdisco_client()
+    nd = _get_netdisco_client()
     try:
         devices = await loop.run_in_executor(None, nd.get_all_devices)
     except Exception as exc:
@@ -1158,11 +1191,7 @@ async def sync_all(
     not_in_netdisco = 0
     if nb_filter:
         def _netbox_hosts() -> list[str]:
-            nb = NetboxClient(
-                url=os.environ["NETBOX_URL"],
-                token=os.environ["NETBOX_TOKEN"],
-                verify_tls=os.getenv("NETBOX_TLS_VERIFY", "true").lower() != "false",
-            )
+            nb = _get_netbox_client()
             return [
                 str(d.primary_ip4).split("/")[0]
                 for d in nb.nb.dcim.devices.filter(**{"has_primary_ip": True, **nb_filter})
