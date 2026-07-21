@@ -21,12 +21,11 @@ flowchart LR
     DB["discobox"]
     NB["Netbox"]
 
-    DEV -- "SNMP discovery" --> ND
-    ND -- "POST /sync\n(after each discovery job)" --> DB
-    DB -- "GET device data\n(ports, IPs, modules ...)" --> ND
+    DEV -- SNMP --> ND
+    ND -- "webhook after discovery" --> DB
+    DB -- "fetch device data" --> ND
     DB -- "write inventory" --> NB
-    ND -- "enqueue discover\n(reconcile loop)" --> ND
-    DB -. "compare active devices\n(reconcile loop)" .-> NB
+    DB -. "reconcile: enqueue missing devices" .-> ND
 ```
 
 ---

@@ -116,11 +116,13 @@ class FakeDevice:
 class FakeDeviceEndpoint:
     def __init__(self, devices):
         self._devices = devices
+        self.filter_calls: list[dict] = []
 
     def count(self, **kwargs):
         return len(self._devices)
 
     def filter(self, **kwargs):
+        self.filter_calls.append(kwargs)
         return list(self._devices)
 
 
@@ -160,6 +162,18 @@ def test_reconcile_skips_down_enqueues_up_and_unknown() -> None:
     assert statuses == {"10.0.0.1": "up", "10.0.0.2": "down", "10.0.0.3": "unknown"}
     # down devices stay visible in the gap list/count
     assert counts["not_in_netdisco"] == 3
+
+
+def test_reconcile_default_status_filter_is_active_only() -> None:
+    nb = FakeNB(DEVICES)
+    reconcile_devices(FakeND(), nb, max_queued=None, max_failed=None)
+    assert nb.nb.dcim.devices.filter_calls[0]["status"] == ["active"]
+
+
+def test_reconcile_statuses_param_passed_through() -> None:
+    nb = FakeNB(DEVICES)
+    reconcile_devices(FakeND(), nb, max_queued=None, max_failed=None, statuses=["active", "maintenance"])
+    assert nb.nb.dcim.devices.filter_calls[0]["status"] == ["active", "maintenance"]
 
 
 def test_reconcile_liveness_disabled_enqueues_all() -> None:

@@ -386,6 +386,7 @@ _RECONCILE_MAX_QUEUED:    Optional[int] = _c (_CFG, "reconcile", "max_queued",  
 _RECONCILE_MAX_FAILED:    Optional[int] = _c (_CFG, "reconcile", "max_failed",     default=None)
 _RECONCILE_MAX_ENQUEUE:   Optional[int] = _c (_CFG, "reconcile", "max_enqueue",    default=None)
 _RECONCILE_ROLES:         list[str]     = _clist(_CFG, "reconcile", "roles") or ["router", "switch", "firewall"]
+_RECONCILE_STATUSES:      list[str]     = _clist(_CFG, "reconcile", "statuses") or ["active"]
 _RECONCILE_REQUIRE_AUTH_TAG: bool       = _cbool(_CFG, "reconcile", "require_auth_tag", default=False)
 
 # Liveness gate: before enqueueing discovery, ask a Prometheus-compatible API
@@ -460,6 +461,7 @@ def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = No
         max_enqueue=effective_max,
         offset=offset,
         roles=_RECONCILE_ROLES,
+        statuses=_RECONCILE_STATUSES,
         require_auth_tag=_RECONCILE_REQUIRE_AUTH_TAG,
         auto_create_role=_AUTO_CREATE_ROLE,
         auto_create_site=_AUTO_CREATE_SITE,

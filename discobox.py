@@ -1857,6 +1857,7 @@ def reconcile_devices(
     max_enqueue: Optional[int] = None,
     offset: Optional[int] = None,
     roles: Optional[list] = None,  # empty/None = all roles
+    statuses: Optional[list] = None,  # empty/None = ["active"]
     require_auth_tag: bool = False,
     auto_create_role: Optional[str] = None,
     auto_create_site: Optional[str] = None,
@@ -1918,14 +1919,17 @@ def reconcile_devices(
     log.info("Netdisco knows %d devices", len(nd_ips))
 
     role_filter = {"role": roles} if roles else {}
-    nb_total = nb.nb.dcim.devices.count(status="active", has_primary_ip=True, **role_filter)
+    status_filter = statuses or ["active"]
+    nb_total = nb.nb.dcim.devices.count(status=status_filter, has_primary_ip=True, **role_filter)
     counts = {"enqueued": 0, "skipped": 0, "skipped_offline": 0, "already_known": 0, "netdisco_total": len(nd_ips), "netbox_total": nb_total}
     if roles:
         log.info("Reconcile role filter: %s", roles)
+    if statuses:
+        log.info("Reconcile status filter: %s", statuses)
 
     not_in_netdisco: list[dict] = []
     enqueue_cap_logged = False
-    for device in nb.nb.dcim.devices.filter(status="active", has_primary_ip=True, **role_filter):
+    for device in nb.nb.dcim.devices.filter(status=status_filter, has_primary_ip=True, **role_filter):
         primary = device.primary_ip4
         if not primary:
             counts["skipped"] += 1

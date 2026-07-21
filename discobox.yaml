@@ -37,6 +37,12 @@ reconcile:
   max_queued: null          # abort reconcile if Netdisco queue exceeds this
   max_failed: null
   max_enqueue: null         # cap devices enqueued per reconcile run
+  # roles: [router, switch, firewall]   # NetBox device-role slugs; default shown, empty/omitted = all roles
+  # statuses: [active]                 # NetBox device statuses to reconcile; default shown.
+                                        # Devices under maintenance still respond to SNMP in most
+                                        # setups (see the network-netbox-ping alert rules, which
+                                        # treat active|maintenance as reachable) — add "maintenance"
+                                        # here to reconcile those too.
   liveness:                 # skip enqueueing devices a metrics store reports as down
     url: null               # Prometheus-compatible query API incl. tenant prefix, e.g.
                             # http://vmselect:8481/select/0/prometheus — null disables
