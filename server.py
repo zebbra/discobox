@@ -17,27 +17,24 @@ Endpoints:
 """
 
 import asyncio
-from collections import deque
-from functools import partial
 import json
 import logging
 import os
 import threading
 import time
+from collections import deque
 from contextlib import asynccontextmanager
-from pathlib import Path
+from functools import partial
 from typing import Annotated, Any, Optional
 
-from requests.exceptions import HTTPError, ReadTimeout
-
-import yaml
-
 import uvicorn
+import yaml
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
-from prometheus_client import Counter, Gauge, Histogram, CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 from prometheus_client.multiprocess import MultiProcessCollector
 from pydantic import BaseModel
+from requests.exceptions import HTTPError, ReadTimeout
 
 from discobox import NetboxClient, NetdiscoClient, fetch_liveness, reconcile_devices, sync_device, validate_ip
 
@@ -911,16 +908,16 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
         logger.error("Sync failed for %s: %s", host, exc)
         status = "error"
         if _is_overload_error(exc):
-            _on_timeout(host, _retry_count, dict(
-                sync_mac=sync_mac, sync_ip=sync_ip, sync_modules=sync_modules,
-                sync_sfp=sync_sfp, sync_poe=sync_poe, housekeeping=housekeeping,
-                lldp_clear_stale=lldp_clear_stale, cf_neighbor_text=cf_neighbor_text,
-                cf_neighbor_port=cf_neighbor_port, cf_neighbor_device=cf_neighbor_device,
-                cf_neighbor_iface=cf_neighbor_iface, cable_scope=cable_scope,
-                cable_source_cf=cable_source_cf, cable_source_value=cable_source_value,
-                iface_source_cf=iface_source_cf, iface_source_value=iface_source_value,
-                cf_os_version=cf_os_version, cf_os_name=cf_os_name, cf_os_release=cf_os_release,
-            ))
+            _on_timeout(host, _retry_count, {
+                "sync_mac": sync_mac, "sync_ip": sync_ip, "sync_modules": sync_modules,
+                "sync_sfp": sync_sfp, "sync_poe": sync_poe, "housekeeping": housekeeping,
+                "lldp_clear_stale": lldp_clear_stale, "cf_neighbor_text": cf_neighbor_text,
+                "cf_neighbor_port": cf_neighbor_port, "cf_neighbor_device": cf_neighbor_device,
+                "cf_neighbor_iface": cf_neighbor_iface, "cable_scope": cable_scope,
+                "cable_source_cf": cable_source_cf, "cable_source_value": cable_source_value,
+                "iface_source_cf": iface_source_cf, "iface_source_value": iface_source_value,
+                "cf_os_version": cf_os_version, "cf_os_name": cf_os_name, "cf_os_release": cf_os_release,
+            })
     finally:
         sync_running.dec()
         _sync_semaphore.release()

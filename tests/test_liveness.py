@@ -15,7 +15,6 @@ import pytest
 import discobox
 from discobox import fetch_liveness, reconcile_devices
 
-
 # ── fetch_liveness ─────────────────────────────────────────────────────────────
 
 class FakeResponse:

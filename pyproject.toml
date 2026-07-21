@@ -1,0 +1,18 @@
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "F",   # Pyflakes: undefined names, unused imports, unused variables, etc.
+    "E",   # pycodestyle (errors)
+    "W",   # pycodestyle (warnings)
+    "G",   # flake8-logging-format: prevent unsafe/slow logging patterns (f-strings, %-format, etc.)
+    "C4",  # flake8-comprehensions: simplify and speed up comprehensions / constructors
+    "I",   # isort (import sorting): deterministic import order
+]
+ignore = [
+    "E501",  # line too long: server.py embeds multi-hundred-char HTML/CSS template strings
+    "E701",  # multiple statements on one line: discobox.py's map_iftype uses a deliberately
+             # hand-aligned one-line if-table (see the function) for readability as a lookup table
+]

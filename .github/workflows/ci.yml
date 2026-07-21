@@ -6,10 +6,62 @@ on:
     branches:
       - main
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   QUAY_IMAGE: quay.io/zebbra/discobox
 
 jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: hetzner
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint
+        run: ruff check .
+
+  audit:
+    name: Security audit (pip-audit)
+    runs-on: hetzner
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Run pip-audit
+        # Centralized ignore list (only currently-detected findings). Each entry:
+        # caused by <package==version>, fix <version> — remove once the underlying
+        # pin is bumped and re-verified.
+        run: >
+          pip-audit -r requirements.txt
+          --ignore-vuln PYSEC-2026-2275
+          --ignore-vuln PYSEC-2026-161
+          --ignore-vuln PYSEC-2026-248
+          --ignore-vuln PYSEC-2026-249
+          --ignore-vuln PYSEC-2026-1942
+          --ignore-vuln PYSEC-2026-1941
+          --ignore-vuln PYSEC-2026-2281
+          --ignore-vuln PYSEC-2026-2280
+        # PYSEC-2026-2275: requests==2.32.4, fix 2.33.0 (minor bump, needs verification)
+        # PYSEC-2026-{161,248,249,1942,1941,2281,2280}: starlette==0.46.2 (transitive via
+        #   fastapi==0.115.12), fixes require a starlette 0.47+/1.x line — needs a fastapi
+        #   bump + compatibility check, tracked separately
+
   test:
     name: Test
     runs-on: hetzner
@@ -28,13 +80,10 @@ jobs:
 
   build:
     name: Build Docker image
-    needs: test
+    needs: [lint, audit, test]
     runs-on: hetzner
     steps:
       - uses: actions/checkout@v6
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
 
       - name: Login to quay.io
         if: github.ref == 'refs/heads/main'
@@ -44,16 +93,13 @@ jobs:
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_PASSWORD }}
 
-      - name: Inject slug/short variables
-        uses: rlespinasse/github-slug-action@v5
-
       - name: Build and push
-        run: >
-          docker buildx build --pull
-          --push=${{ github.ref == 'refs/heads/main' }}
-          -t ${{ env.QUAY_IMAGE }}:${{ env.GITHUB_SHA_SHORT }}
-          -t ${{ env.QUAY_IMAGE }}:latest
-          --platform linux/amd64
-          --cache-from type=gha
-          --cache-to type=gha,mode=max
-          .
+        uses: zebbra/actions/docker-build@docker-build/latest
+        with:
+          image_name: ${{ env.QUAY_IMAGE }}
+          context: .
+          platforms: linux/amd64
+          push: ${{ github.ref == 'refs/heads/main' }}
+          include_tag_sha: 'true'
+          include_tag_latest: 'true'
+          cache_to_mode: min

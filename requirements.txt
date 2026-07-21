@@ -1,5 +1,5 @@
 pynetbox==7.4.1
-requests==2.32.3
+requests==2.32.4
 fastapi==0.115.12
 uvicorn[standard]==0.34.0
 prometheus-client==0.21.1

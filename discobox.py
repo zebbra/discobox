@@ -8,7 +8,6 @@ Imported by cli.py (one-shot CLI) and server.py (FastAPI webhook receiver).
 import ipaddress
 import json
 import logging
-import os
 import re
 import sys
 from typing import Optional
@@ -772,13 +771,13 @@ class NetboxClient:
         # absent in Netbox 4.4) — creating a Module ALWAYS instantiates the
         # ModuleType's component templates, and any existing same-name interface
         # aborts the whole create with an IntegrityError 500.
-        payload = dict(
-            device=device.id,
-            module_bay=bay.id,
-            module_type=module_type.id,
-            serial=serial,
-            status="active",
-        )
+        payload = {
+            "device": device.id,
+            "module_bay": bay.id,
+            "module_type": module_type.id,
+            "serial": serial,
+            "status": "active",
+        }
         try:
             module = self.nb.dcim.modules.create(**payload)
         except pynetbox.RequestError as exc:
@@ -1655,13 +1654,13 @@ def _create_device_from_nd(
         nb_device = existing[0]
     else:
         try:
-            create_kwargs: dict = dict(
-                name=hostname,
-                device_type=device_type.id,
-                role=roles[0].id,
-                site=resolved_site_id,
-                status=status,
-            )
+            create_kwargs: dict = {
+                "name": hostname,
+                "device_type": device_type.id,
+                "role": roles[0].id,
+                "site": resolved_site_id,
+                "status": status,
+            }
             if serial:
                 create_kwargs["serial"] = serial
             if location_id is not None:
@@ -1697,7 +1696,7 @@ def _create_device_from_nd(
             address = f"{ip}/32"
 
     try:
-        iface_kwargs: dict = dict(device=nb_device.id, name=port_name, type="1000base-t")
+        iface_kwargs: dict = {"device": nb_device.id, "name": port_name, "type": "1000base-t"}
         iface = nb.nb.dcim.interfaces.create(**iface_kwargs)
         if iface_source_cf:
             iface.update({"custom_fields": {iface_source_cf: iface_source_value}})
