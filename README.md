@@ -116,6 +116,7 @@ python cli.py --host 10.0.0.1
 | OS release (parsed from `description`) | `custom_fields.os_release` |
 | Chassis `model` | `device_type.model` |
 | Chassis `type` (vendor prefix) | `device_type.manufacturer` |
+| Chassis count (stack/standalone only) | `custom_fields.stack_members` |
 
 ### Interfaces
 
@@ -256,6 +257,7 @@ These fields are updated on every sync. Create them on the **Device** object in 
 | `os_version` | Text | OS version string (e.g. `17.3.4`) |
 | `os_name` | Text | OS platform name (e.g. `ios-xe`, `fortios`, `nx-os`) |
 | `os_release` | Text | IOS release name parsed from device description (e.g. `Gibraltar`) |
+| `stack_members` | Integer | Total physical units — real count for a traditional stack, `1` for standalone. Unset for VSS (split across two Netbox devices) and FEX (satellites aren't stack members) |
 
 ### Read by discobox (Netbox → Netdisco, reconcile loop)
 

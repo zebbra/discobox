@@ -366,6 +366,7 @@ _IFACE_SOURCE_VALUE: str            = _c   (_CFG, "custom_fields", "source_value
 _CF_OS_VERSION:      Optional[str]  = _cstr(_CFG, "custom_fields", "os_version", default="os_version")
 _CF_OS_NAME:         Optional[str]  = _cstr(_CFG, "custom_fields", "os_name",    default="os_name")
 _CF_OS_RELEASE:      Optional[str]  = _cstr(_CFG, "custom_fields", "os_release", default="os_release")
+_CF_STACK_MEMBERS:   Optional[str]  = _cstr(_CFG, "custom_fields", "stack_members", default="stack_members")
 
 
 async def require_auth(authorization: Annotated[str, Header()] = "") -> None:
@@ -843,7 +844,7 @@ class SyncResponse(BaseModel):
 
 # ── Background sync ────────────────────────────────────────────────────────────
 
-def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync_sfp: bool, sync_poe: bool, housekeeping: bool, lldp_clear_stale: bool = False, cf_neighbor_text: Optional[str] = None, cf_neighbor_port: Optional[str] = None, cf_neighbor_device: Optional[str] = None, cf_neighbor_iface: Optional[str] = None, cable_scope: str = "", cable_source_cf: Optional[str] = None, cable_source_value: Optional[str] = None, iface_source_cf: Optional[str] = None, iface_source_value: str = "netdisco", cf_os_version: Optional[str] = "os_version", cf_os_name: Optional[str] = "os_name", cf_os_release: Optional[str] = "os_release", _retry_count: int = 0) -> None:
+def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync_sfp: bool, sync_poe: bool, housekeeping: bool, lldp_clear_stale: bool = False, cf_neighbor_text: Optional[str] = None, cf_neighbor_port: Optional[str] = None, cf_neighbor_device: Optional[str] = None, cf_neighbor_iface: Optional[str] = None, cable_scope: str = "", cable_source_cf: Optional[str] = None, cable_source_value: Optional[str] = None, iface_source_cf: Optional[str] = None, iface_source_value: str = "netdisco", cf_os_version: Optional[str] = "os_version", cf_os_name: Optional[str] = "os_name", cf_os_release: Optional[str] = "os_release", cf_stack_members: Optional[str] = "stack_members", _retry_count: int = 0) -> None:
     """Run sync_device in a background thread and record metrics."""
     while True:
         _sync_semaphore.acquire()
@@ -887,6 +888,7 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             cf_os_version=cf_os_version,
             cf_os_name=cf_os_name,
             cf_os_release=cf_os_release,
+            cf_stack_members=cf_stack_members,
         )
         status = "success" if result.get("ok") else "error"
         if result.get("reason") == "discovery_incomplete":
@@ -917,6 +919,7 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
                 "cable_source_cf": cable_source_cf, "cable_source_value": cable_source_value,
                 "iface_source_cf": iface_source_cf, "iface_source_value": iface_source_value,
                 "cf_os_version": cf_os_version, "cf_os_name": cf_os_name, "cf_os_release": cf_os_release,
+                "cf_stack_members": cf_stack_members,
             })
     finally:
         sync_running.dec()
@@ -1043,14 +1046,14 @@ async def sync(
                 _CF_NEIGHBOR_TEXT, _CF_NEIGHBOR_PORT, _CF_NEIGHBOR_DEVICE, _CF_NEIGHBOR_IFACE,
                 _CABLE_SCOPE, _CABLE_SOURCE_CF, _CABLE_SOURCE_VALUE,
                 _IFACE_SOURCE_CF, _IFACE_SOURCE_VALUE,
-                _CF_OS_VERSION, _CF_OS_NAME, _CF_OS_RELEASE,
+                _CF_OS_VERSION, _CF_OS_NAME, _CF_OS_RELEASE, _CF_STACK_MEMBERS,
             )
         finally:
             discobox_log.removeHandler(cap)
             discobox_log.setLevel(prev_level)
         return PlainTextResponse("\n".join(cap.lines))
 
-    background_tasks.add_task(_run_sync, resolved_host, sync_mac, sync_ip, sync_modules, sync_sfp, sync_poe, housekeeping, lldp_clear_stale, _CF_NEIGHBOR_TEXT, _CF_NEIGHBOR_PORT, _CF_NEIGHBOR_DEVICE, _CF_NEIGHBOR_IFACE, _CABLE_SCOPE, _CABLE_SOURCE_CF, _CABLE_SOURCE_VALUE, _IFACE_SOURCE_CF, _IFACE_SOURCE_VALUE, _CF_OS_VERSION, _CF_OS_NAME, _CF_OS_RELEASE)
+    background_tasks.add_task(_run_sync, resolved_host, sync_mac, sync_ip, sync_modules, sync_sfp, sync_poe, housekeeping, lldp_clear_stale, _CF_NEIGHBOR_TEXT, _CF_NEIGHBOR_PORT, _CF_NEIGHBOR_DEVICE, _CF_NEIGHBOR_IFACE, _CABLE_SCOPE, _CABLE_SOURCE_CF, _CABLE_SOURCE_VALUE, _IFACE_SOURCE_CF, _IFACE_SOURCE_VALUE, _CF_OS_VERSION, _CF_OS_NAME, _CF_OS_RELEASE, _CF_STACK_MEMBERS)
     logger.info("hook from %s: %s  queued", caller, resolved_host)
     return SyncResponse(status="queued", host=resolved_host)
 
@@ -1181,7 +1184,7 @@ async def sync_all(
             _CF_NEIGHBOR_TEXT, _CF_NEIGHBOR_PORT, _CF_NEIGHBOR_DEVICE, _CF_NEIGHBOR_IFACE,
             _CABLE_SCOPE, _CABLE_SOURCE_CF, _CABLE_SOURCE_VALUE,
             _IFACE_SOURCE_CF, _IFACE_SOURCE_VALUE,
-            _CF_OS_VERSION, _CF_OS_NAME, _CF_OS_RELEASE,
+            _CF_OS_VERSION, _CF_OS_NAME, _CF_OS_RELEASE, _CF_STACK_MEMBERS,
         ))
 
     counts = _enqueue_all(hosts, submit, limit=limit, force=force)

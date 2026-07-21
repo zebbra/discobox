@@ -1848,6 +1848,21 @@ def _discovery_incomplete(nd_ports: list) -> bool:
     return bool(names) and all(n.isdigit() for n in names)
 
 
+def _stack_member_count(topo: str, chassis: list) -> Optional[int]:
+    """
+    Total physical units for the stack_members custom field.
+
+    Only meaningful for a traditional stack (real member count) and a
+    standalone device (always 1, giving every device a value). VSS splits
+    a pair across two separate Netbox devices and FEX satellites aren't
+    stack members in the switch-stacking sense, so both are left unset
+    (None) rather than guessing.
+    """
+    if topo in ("stack", "standalone"):
+        return len(chassis)
+    return None
+
+
 def reconcile_devices(
     nd: "NetdiscoClient",
     nb: "NetboxClient",
@@ -2056,6 +2071,7 @@ def sync_device(
     cf_os_version: Optional[str] = "os_version",
     cf_os_name: Optional[str] = "os_name",
     cf_os_release: Optional[str] = "os_release",
+    cf_stack_members: Optional[str] = "stack_members",
 ) -> dict:
     """
     Sync device fields, interfaces, MACs, IPs, modules, and SFPs.
@@ -2271,6 +2287,13 @@ def sync_device(
                         prefix, ch.get("name", ""), ch.get("model", ""), ch.get("serial", ""))
         topo = "fex" if is_fex else ("vss" if is_vss else ("standalone" if is_standalone else "stack"))
         log.debug("Modules   chassis=%d  topology=%s", len(chassis), topo)
+
+        member_count = _stack_member_count(topo, chassis)
+        if cf_stack_members and member_count is not None:
+            current_cf = dict(getattr(nb_device, "custom_fields", {}) or {})
+            if current_cf.get(cf_stack_members) != member_count:
+                nb_device.update({"custom_fields": {cf_stack_members: member_count}})
+                log.debug("  %s=%d updated", cf_stack_members, member_count)
 
         manufacturer = nb_device.device_type.manufacturer
 

@@ -19,6 +19,7 @@ from discobox import (
     _ha_node_info,
     _slave_link_field,
     _slot_from_iface,
+    _stack_member_count,
     expand_iface_name,
     map_iftype,
     parse_speed_kbps,
@@ -554,6 +555,17 @@ def test_port_to_netbox_over_fortiproxy_sample() -> None:
         # Every fortiproxy `port[1-9]` entry must be physical, not lag.
         if out["name"].startswith("port") and out["name"][4:].isdigit():
             assert out["type"] != "lag", f"{out['name']} regressed to lag"
+
+
+def test_stack_member_count() -> None:
+    """Only traditional stacks (real count) and standalone (always 1) get a
+    value; VSS and FEX are left unset (None) since neither maps cleanly to
+    a single per-device unit count."""
+    chassis = [{"name": "Switch 1"}, {"name": "Switch 2"}, {"name": "Switch 3"}]
+    assert _stack_member_count("stack", chassis) == 3
+    assert _stack_member_count("standalone", chassis[:1]) == 1
+    assert _stack_member_count("vss", chassis[:2]) is None
+    assert _stack_member_count("fex", chassis) is None
 
 
 def test_discovery_incomplete() -> None:
