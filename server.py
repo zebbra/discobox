@@ -32,7 +32,6 @@ import yaml
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Gauge, Histogram, generate_latest
-from prometheus_client.multiprocess import MultiProcessCollector
 from pydantic import BaseModel
 from requests.exceptions import HTTPError, ReadTimeout
 
@@ -74,20 +73,29 @@ _UVICORN_LOG_CONFIG = {
     },
 }
 
+# ── Persistent state directory ──────────────────────────────────────────────────
+# Shared writable directory for file-based state that must survive a container
+# restart: pause flag, circuit breaker, reconcile leadership/gap reports,
+# in-flight sync claims (also used for cross-worker dedup, moot at
+# DISCOBOX_WORKERS=1 but harmless to keep). Not Prometheus-related — see below.
+
+_STATE_DIR = os.environ.get("DISCOBOX_STATE_DIR", "/tmp/discobox")
+os.makedirs(_STATE_DIR, exist_ok=True)
+
 # ── Prometheus metrics ─────────────────────────────────────────────────────────
-# Multi-worker support: set PROMETHEUS_MULTIPROC_DIR to a writable directory so
-# all uvicorn workers share metrics via the filesystem. Without it, each worker
-# has its own in-memory state and the scrape target rotates between them.
-
-_MULTIPROC_DIR = os.environ.get("PROMETHEUS_MULTIPROC_DIR", "/tmp/prometheus")
-os.makedirs(_MULTIPROC_DIR, exist_ok=True)
-os.environ["PROMETHEUS_MULTIPROC_DIR"] = _MULTIPROC_DIR
-
+# Plain in-memory metrics: DISCOBOX_WORKERS=1 means there is exactly one process,
+# so Prometheus's multiprocess mode (aggregating separate processes' metrics via
+# shared mmap files) has nothing to aggregate — it only added failure modes
+# (an import-order bug made every metric silently in-memory-only anyway: the
+# multiprocess value class is decided once, at prometheus_client's own import
+# time, based on PROMETHEUS_MULTIPROC_DIR already being set — but this module
+# only set it *after* that import, so it was never actually active).
+#
 # Always register metrics to a private registry so the default global REGISTRY
-# (and its built-in process/GC collectors) is never touched. In multiprocess mode,
-# prometheus_client writes metric values to files via _ValueClass regardless of
-# which registry the metric is attached to, so MultiProcessCollector at scrape
-# time picks them up correctly.
+# (and its built-in process/GC collectors) is never touched, and so the second
+# of the two times uvicorn imports this module per process (once as __main__,
+# once as "server" for the "server:app" import string) doesn't crash with
+# "Duplicated timeseries in CollectorRegistry".
 _custom_registry = CollectorRegistry()
 _reg = {"registry": _custom_registry}
 
@@ -111,13 +119,11 @@ sync_duration = Histogram(
 sync_in_progress = Gauge(
     "discobox_sync_queued",
     "Device syncs in flight: waiting for a slot + actively running",
-    multiprocess_mode="livesum",
     **_reg,
 )
 sync_running = Gauge(
     "discobox_sync_running",
     "Device syncs actively running (semaphore slot acquired)",
-    multiprocess_mode="livesum",
     **_reg,
 )
 interfaces_total = Counter(
@@ -158,39 +164,33 @@ device_sync_duration = Gauge(
     "discobox_device_last_sync_duration_seconds",
     "Duration of the last completed sync for each device",
     ["instance"],
-    multiprocess_mode="livemax",
     **_reg,
 )
 device_sync_timestamp = Gauge(
     "discobox_device_last_sync_timestamp_seconds",
     "Unix timestamp of the last completed sync for each device",
     ["instance"],
-    multiprocess_mode="livemax",
     **_reg,
 )
 sync_paused = Gauge(
     "discobox_sync_paused",
     "1 if sync intake is paused, 0 if running",
-    multiprocess_mode="livemax",
     **_reg,
 )
 device_sync_failed = Gauge(
     "discobox_device_last_sync_failed",
     "1 if the last sync attempt for this device failed, 0 if it succeeded",
     ["instance"],
-    multiprocess_mode="livemax",
     **_reg,
 )
 reconcile_netbox_devices = Gauge(
     "discobox_reconcile_netbox_devices",
     "Active Netbox devices with a primary IP seen during last reconcile",
-    multiprocess_mode="livemax",
     **_reg,
 )
 reconcile_netdisco_devices = Gauge(
     "discobox_reconcile_netdisco_devices",
     "Devices known to Netdisco seen during last reconcile",
-    multiprocess_mode="livemax",
     **_reg,
 )
 reconcile_enqueued_total = Counter(
@@ -207,7 +207,6 @@ reconcile_runs_total = Counter(
 reconcile_last_run_timestamp = Gauge(
     "discobox_reconcile_last_run_timestamp_seconds",
     "Unix timestamp of the last completed reconcile run",
-    multiprocess_mode="livemax",
     **_reg,
 )
 reconcile_aborted_total = Counter(
@@ -223,27 +222,23 @@ unknown_devices_total = Counter(
 reconcile_not_in_netdisco = Gauge(
     "discobox_reconcile_not_in_netdisco",
     "Active Netbox devices not found in Netdisco (last reconcile)",
-    multiprocess_mode="livemax",
     **_reg,
 )
 reconcile_skipped_offline = Gauge(
     "discobox_reconcile_skipped_offline",
     "Devices not enqueued by the last reconcile because liveness reported them down",
-    multiprocess_mode="livemax",
     **_reg,
 )
 
 liveness_query_up = Gauge(
     "discobox_liveness_query_up",
     "1 if the liveness query during the last reconcile succeeded, 0 on error",
-    multiprocess_mode="livemax",
     **_reg,
 )
 
 reconcile_not_in_netbox = Gauge(
     "discobox_reconcile_not_in_netbox",
     "Netdisco devices not found in Netbox (last reconcile)",
-    multiprocess_mode="livemax",
     **_reg,
 )
 sync_timeouts_total = Counter(
@@ -259,6 +254,18 @@ circuit_breaker_trips_total = Counter(
 sync_retries_total = Counter(
     "discobox_sync_retries_total",
     "Per-device sync retries scheduled after a timeout",
+    **_reg,
+)
+netbox_requests_total = Counter(
+    "discobox_netbox_requests_total",
+    "Outbound HTTP requests made to Netbox",
+    ["method"],
+    **_reg,
+)
+netdisco_requests_total = Counter(
+    "discobox_netdisco_requests_total",
+    "Outbound HTTP requests made to Netdisco",
+    ["method"],
     **_reg,
 )
 
@@ -409,16 +416,25 @@ _AUTO_CREATE_STATUS:   str           = _c    (_CFG, "auto_create", "status",   d
 _AUTO_CREATE_LOCATION: bool          = _cbool(_CFG, "auto_create", "location", default=False)
 
 
+def _count_netdisco_request(method: str) -> None:
+    netdisco_requests_total.labels(method=method).inc()
+
+
+def _count_netbox_request(method: str) -> None:
+    netbox_requests_total.labels(method=method).inc()
+
+
 def _make_netdisco_client() -> NetdiscoClient:
     tls = os.getenv("NETDISCO_TLS_VERIFY", "true").lower() != "false"
     token = os.getenv("NETDISCO_TOKEN")
     if token:
-        return NetdiscoClient(base_url=os.environ["NETDISCO_URL"], token=token, verify_tls=tls)
+        return NetdiscoClient(base_url=os.environ["NETDISCO_URL"], token=token, verify_tls=tls, on_request=_count_netdisco_request)
     return NetdiscoClient(
         base_url=os.environ["NETDISCO_URL"],
         username=os.environ["NETDISCO_USERNAME"],
         password=os.environ["NETDISCO_PASSWORD"],
         verify_tls=tls,
+        on_request=_count_netdisco_request,
     )
 
 
@@ -460,6 +476,7 @@ def _get_netbox_client() -> NetboxClient:
                     token=os.environ["NETBOX_TOKEN"],
                     verify_tls=os.getenv("NETBOX_TLS_VERIFY", "true").lower() != "false",
                     changelog_message="discobox",
+                    on_request=_count_netbox_request,
                 )
     return _netbox_client
 
@@ -620,7 +637,7 @@ app = FastAPI(
 # _claim_host / _release_host use O_CREAT|O_EXCL files for cross-worker dedup.
 _in_flight: set[str] = set()
 _in_flight_lock = threading.Lock()
-_INFLIGHT_DIR: str = os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp")
+_INFLIGHT_DIR: str = _STATE_DIR
 
 
 def _claim_host(host: str) -> bool:
@@ -714,7 +731,7 @@ def _mark_synced(host: str) -> None:
 # Devices seen in Netdisco webhooks but not found in Netbox
 # Unknown devices: file-backed so all workers share state.
 _UNKNOWN_DEVICES_FILE: str = os.path.join(
-    os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp"), "discobox.unknown.json"
+    _STATE_DIR, "discobox.unknown.json"
 )
 _unknown_devices_lock = threading.Lock()
 
@@ -731,10 +748,10 @@ def _save_unknown_devices(devices: dict[str, dict]) -> None:
 
 # Reconcile gap lists: replaced wholesale after each reconcile run.
 _NOT_IN_NETDISCO_FILE: str = os.path.join(
-    os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp"), "discobox.not_in_netdisco.json"
+    _STATE_DIR, "discobox.not_in_netdisco.json"
 )
 _NOT_IN_NETBOX_FILE: str = os.path.join(
-    os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp"), "discobox.not_in_netbox.json"
+    _STATE_DIR, "discobox.not_in_netbox.json"
 )
 _reconcile_gaps_lock = threading.Lock()
 
@@ -751,7 +768,7 @@ def _save_gap(path: str, devices: list[dict]) -> None:
 
 # Liveness query health, written on each reconcile run for the status page.
 _LIVENESS_FILE: str = os.path.join(
-    os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp"), "discobox.liveness.json"
+    _STATE_DIR, "discobox.liveness.json"
 )
 
 def _load_liveness_status() -> dict:
@@ -774,11 +791,11 @@ _MAX_QUEUE: int = int(os.getenv("DISCOBOX_MAX_QUEUE", "10000"))
 # Pause gate: file-based so all workers see it regardless of which handled the request.
 # Presence of the file = paused; absence = running.
 _PAUSE_FILE: str = os.path.join(
-    os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp"), "discobox.pause"
+    _STATE_DIR, "discobox.pause"
 )
 
 # Circuit-breaker state: file stores resume-at timestamp (float JSON).
-_CB_FILE: str = os.path.join(os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp"), "discobox.cb.json")
+_CB_FILE: str = os.path.join(_STATE_DIR, "discobox.cb.json")
 _recent_timeouts: deque = deque()
 _timeout_lock = threading.Lock()
 
@@ -1227,35 +1244,7 @@ async def sync_all(
 
 @app.get(_METRICS_PATH, include_in_schema=False)
 async def metrics() -> Response:
-    if _MULTIPROC_DIR:
-        reg = CollectorRegistry()
-        MultiProcessCollector(reg, path=_MULTIPROC_DIR)
-        content = generate_latest(reg)
-    else:
-        content = generate_latest(_custom_registry)
-
-    if not content:
-        # generate_latest() returns b"" when the multiprocess collector finds
-        # zero *.db files — this should be structurally impossible (every
-        # metric is constructed, and thus gets a backing file, at import
-        # time) but has been observed in prod. Never let this look like a
-        # healthy empty scrape: log full context for next time, and fail the
-        # scrape (503) so Prometheus's own up==0 alerting catches it instead
-        # of silently recording "0 samples, scrape succeeded".
-        try:
-            entries = [
-                (f.name, f.stat().st_size, f.stat().st_mtime)
-                for f in os.scandir(_MULTIPROC_DIR)
-            ]
-        except OSError as exc:
-            entries = f"<could not list {_MULTIPROC_DIR}: {exc}>"
-        logger.error(
-            "GET /metrics: empty scrape (pid=%d dir=%r dir_exists=%s entries=%r)",
-            os.getpid(), _MULTIPROC_DIR, os.path.isdir(_MULTIPROC_DIR), entries,
-        )
-        return PlainTextResponse("metrics collector returned no data — see server logs", status_code=503)
-
-    return Response(content=content, media_type=CONTENT_TYPE_LATEST)
+    return Response(content=generate_latest(_custom_registry), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.api_route("/sync/pause", methods=["GET", "POST"], dependencies=[Depends(require_auth)], summary="Pause queued syncs")

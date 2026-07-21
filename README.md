@@ -180,8 +180,12 @@ NETBOX_TOKEN=your-token-here
 
 # Server mode
 DISCOBOX_LISTEN_PORT=8080   # default: 8080 (avoid DISCOBOX_PORT — Docker overrides it with a service URL)
-DISCOBOX_WORKERS=4          # uvicorn worker count, default: 4
+DISCOBOX_WORKERS=4          # uvicorn worker count, default: 4. Metrics are plain in-memory (no
+                            # cross-process aggregation): with >1 worker, /metrics only reflects
+                            # whichever worker answers that particular scrape. Recommended: 1.
 DISCOBOX_AUTH_TOKEN=secret  # bearer token for /sync; leave unset to disable auth
+DISCOBOX_STATE_DIR=/tmp/discobox  # writable dir for pause flag, circuit breaker, reconcile
+                                   # leadership/gap reports, in-flight sync claims; default: /tmp/discobox
 
 # Sync concurrency
 DISCOBOX_MAX_CONCURRENT_SYNCS=3   # max parallel syncs (semaphore), default: 3

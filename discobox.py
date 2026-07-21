@@ -10,7 +10,7 @@ import json
 import logging
 import re
 import sys
-from typing import Optional
+from typing import Callable, Optional
 
 import pynetbox
 import requests
@@ -178,6 +178,7 @@ class NetdiscoClient:
         password: Optional[str] = None,
         token: Optional[str] = None,
         verify_tls: bool = True,
+        on_request: Optional[Callable[[str], None]] = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
@@ -187,6 +188,7 @@ class NetdiscoClient:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         self._username = username
         self._password = password
+        self._on_request = on_request or (lambda method: None)
         if token:
             self.session.headers["Authorization"] = f"Bearer {token}"
             logger.debug("Netdisco auth via static token")
@@ -198,6 +200,7 @@ class NetdiscoClient:
     def _login(self, username: str, password: str) -> None:
         url = f"{self.base_url}/login"
         logger.debug("POST %s", url)
+        self._on_request("POST")
         resp = self.session.post(url, auth=(username, password), timeout=15)
         resp.raise_for_status()
         token = resp.json().get("api_key") or resp.json().get("token")
@@ -218,8 +221,10 @@ class NetdiscoClient:
     def _get(self, path: str) -> dict | list:
         url = f"{self.base_url}{path}"
         logger.debug("GET %s", url)
+        self._on_request("GET")
         resp = self.session.get(url, timeout=30)
         if resp.status_code == 401 and self._reauth():
+            self._on_request("GET")
             resp = self.session.get(url, timeout=30)
         if resp.status_code == 401:
             logger.error("Netdisco 401 GET %s: response: %s", url, resp.text[:200])
@@ -229,8 +234,10 @@ class NetdiscoClient:
     def _post(self, path: str, body) -> dict | list:
         url = f"{self.base_url}{path}"
         logger.debug("POST %s", url)
+        self._on_request("POST")
         resp = self.session.post(url, json=body, timeout=30)
         if resp.status_code == 401 and self._reauth():
+            self._on_request("POST")
             resp = self.session.post(url, json=body, timeout=30)
         if resp.status_code == 401:
             logger.error("Netdisco 401 POST %s: response: %s", url, resp.text[:200])
@@ -276,12 +283,14 @@ class NetdiscoClient:
 
 class _ChangelogSession(requests.Session):
     """requests.Session that injects changelog_message into every write body."""
-    def __init__(self, changelog_message: str):
+    def __init__(self, changelog_message: str, on_request: Optional[Callable[[str], None]] = None):
         super().__init__()
         self._changelog_message = changelog_message
+        self._on_request = on_request or (lambda method: None)
         self.headers.update({"User-Agent": "discobox"})
 
     def request(self, method, url, **kwargs):
+        self._on_request(method.upper())
         if method.upper() in ("POST", "PATCH", "PUT") and self._changelog_message:
             json_data = kwargs.get("json")
             if isinstance(json_data, dict):
@@ -290,8 +299,15 @@ class _ChangelogSession(requests.Session):
 
 
 class NetboxClient:
-    def __init__(self, url: str, token: str, verify_tls: bool = True, changelog_message: str = "DiscoBox"):
-        session = _ChangelogSession(changelog_message)
+    def __init__(
+        self,
+        url: str,
+        token: str,
+        verify_tls: bool = True,
+        changelog_message: str = "DiscoBox",
+        on_request: Optional[Callable[[str], None]] = None,
+    ):
+        session = _ChangelogSession(changelog_message, on_request=on_request)
         if not verify_tls:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             session.verify = False
