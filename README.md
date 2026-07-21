@@ -207,6 +207,8 @@ DISCOBOX_RECONCILE_MAX_ENQUEUE=200 # max devices enqueued per run; unset = no li
                                    # 0 = never enqueue, but still run the gap scan (report-only mode)
 DISCOBOX_RECONCILE_MAX_QUEUED=500  # abort run if Netdisco queue has more than N jobs queued (default: 500)
 DISCOBOX_RECONCILE_MAX_FAILED=500  # abort run if Netdisco reports more than N failures (default: 500)
+# A few reconcile options are yaml-only (no env var): reconcile.roles, reconcile.statuses,
+# reconcile.require_auth_tag — see discobox.yaml for defaults and comments.
 
 # Liveness gate (optional) — before enqueueing, query a Prometheus-compatible API
 # (VictoriaMetrics vmselect) and skip devices whose monitoring says they are down.

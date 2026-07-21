@@ -43,6 +43,8 @@ reconcile:
                                         # setups (see the network-netbox-ping alert rules, which
                                         # treat active|maintenance as reachable) — add "maintenance"
                                         # here to reconcile those too.
+  require_auth_tag: false    # only enqueue discovery for devices with snmp_auth_profile set;
+                             # without it Netdisco has no credentials to try, so discovery just fails
   liveness:                 # skip enqueueing devices a metrics store reports as down
     url: null               # Prometheus-compatible query API incl. tenant prefix, e.g.
                             # http://vmselect:8481/select/0/prometheus — null disables

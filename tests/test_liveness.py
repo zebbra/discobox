@@ -176,6 +176,18 @@ def test_reconcile_statuses_param_passed_through() -> None:
     assert nb.nb.dcim.devices.filter_calls[0]["status"] == ["active", "maintenance"]
 
 
+def test_reconcile_require_auth_tag_skips_devices_without_snmp_profile() -> None:
+    tagged = FakeDevice("sw-tagged", "10.0.0.4")
+    tagged.custom_fields = {"snmp_auth_profile": "default"}
+    untagged = FakeDevice("sw-untagged", "10.0.0.5")
+    nd = FakeND()
+    counts = reconcile_devices(
+        nd, FakeNB([tagged, untagged]), max_queued=None, max_failed=None, require_auth_tag=True,
+    )
+    assert nd.enqueued == ["10.0.0.4"]
+    assert counts["enqueued"] == 1 and counts["skipped"] == 1
+
+
 def test_reconcile_liveness_disabled_enqueues_all() -> None:
     nd, counts = _reconcile(None)
     assert nd.enqueued == ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
