@@ -2,6 +2,9 @@
 
 ![DiscoBox](banner.png)
 
+[![CI](https://github.com/zebbra/discobox/actions/workflows/ci.yml/badge.svg)](https://github.com/zebbra/discobox/actions/workflows/ci.yml)
+[![Image](https://img.shields.io/badge/quay.io-zebbra%2Fdiscobox-blue)](https://quay.io/repository/zebbra/discobox)
+
 Syncs network device inventory from [Netdisco](https://github.com/netdisco/netdisco) into [Netbox](https://netbox.dev/), enriching existing Netbox device records with live data discovered by Netdisco.
 
 Devices are matched by management IP. Hostnames are verified and a warning is logged on mismatch, but the sync proceeds regardless.
