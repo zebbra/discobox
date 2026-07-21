@@ -1200,10 +1200,32 @@ async def sync_all(
 async def metrics() -> Response:
     if _MULTIPROC_DIR:
         reg = CollectorRegistry()
-        MultiProcessCollector(reg)
+        MultiProcessCollector(reg, path=_MULTIPROC_DIR)
         content = generate_latest(reg)
     else:
         content = generate_latest(_custom_registry)
+
+    if not content:
+        # generate_latest() returns b"" when the multiprocess collector finds
+        # zero *.db files — this should be structurally impossible (every
+        # metric is constructed, and thus gets a backing file, at import
+        # time) but has been observed in prod. Never let this look like a
+        # healthy empty scrape: log full context for next time, and fail the
+        # scrape (503) so Prometheus's own up==0 alerting catches it instead
+        # of silently recording "0 samples, scrape succeeded".
+        try:
+            entries = [
+                (f.name, f.stat().st_size, f.stat().st_mtime)
+                for f in os.scandir(_MULTIPROC_DIR)
+            ]
+        except OSError as exc:
+            entries = f"<could not list {_MULTIPROC_DIR}: {exc}>"
+        logger.error(
+            "GET /metrics: empty scrape (pid=%d dir=%r dir_exists=%s entries=%r)",
+            os.getpid(), _MULTIPROC_DIR, os.path.isdir(_MULTIPROC_DIR), entries,
+        )
+        return PlainTextResponse("metrics collector returned no data — see server logs", status_code=503)
+
     return Response(content=content, media_type=CONTENT_TYPE_LATEST)
 
 
