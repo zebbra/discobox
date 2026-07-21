@@ -1852,13 +1852,13 @@ def _stack_member_count(topo: str, chassis: list) -> Optional[int]:
     """
     Total physical units for the stack_members custom field.
 
-    Only meaningful for a traditional stack (real member count) and a
-    standalone device (always 1, giving every device a value). VSS splits
-    a pair across two separate Netbox devices and FEX satellites aren't
-    stack members in the switch-stacking sense, so both are left unset
-    (None) rather than guessing.
+    Only meaningful for a traditional stack (real member count > 1). A
+    standalone device's count is trivially always 1 — writing that adds no
+    signal, so it's left unset like VSS (splits a pair across two separate
+    Netbox devices) and FEX (satellites aren't stack members in the
+    switch-stacking sense).
     """
-    if topo in ("stack", "standalone"):
+    if topo == "stack":
         return len(chassis)
     return None
 

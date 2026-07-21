@@ -27,8 +27,8 @@ custom_fields:
   os_version: os_version    # null to disable
   os_name: os_name          # null to disable
   os_release: os_release    # null to disable
-  stack_members: stack_members  # total physical units; only set for traditional stacks
-                                # (real count) and standalone devices (always 1) — null to disable
+  stack_members: stack_members  # total physical units in a traditional stack; unset for
+                                # standalone/VSS/FEX (a constant 1 or split count adds no signal) — null to disable
   neighbor_text: neighbor
   neighbor_port: neighbor_port
   neighbor_device: neighbor_device
