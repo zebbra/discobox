@@ -20,12 +20,14 @@ flowchart LR
     ND["Netdisco"]
     DB["discobox"]
     NB["Netbox"]
+    VM["VictoriaMetrics"]
 
     DEV -- SNMP --> ND
     ND -- "webhook after discovery" --> DB
     DB -- "fetch device data" --> ND
     DB -- "write inventory" --> NB
     DB -. "reconcile: enqueue missing devices" .-> ND
+    DB -. "reconcile: liveness check" .-> VM
 ```
 
 ---
