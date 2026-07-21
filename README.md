@@ -11,8 +11,6 @@ Devices are matched by management IP. Hostnames are verified and a warning is lo
 
 Netbox is written to directly via [pynetbox](https://github.com/netbox-community/pynetbox) for simplicity. Migration to [Netbox Diode](https://github.com/netbox-community/netbox-diode) is a future consideration once its entity coverage matures.
 
-![Flow](flow.svg)
-
 ---
 
 ## Architecture
