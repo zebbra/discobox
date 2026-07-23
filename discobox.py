@@ -1170,7 +1170,10 @@ PORT_BLACKLIST_PREFIXES: tuple[str, ...] = (
     "null",
     "modem",
     "bluetooth",
-    "ssl."
+    "ssl.",
+    "appgigabitethernet",
+    "eobc",
+    "sdwan",
 )
 
 def vendor_from_chassis(chassis: dict) -> Optional[str]:
