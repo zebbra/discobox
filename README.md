@@ -261,7 +261,7 @@ These fields are updated on every sync. Create them on the **Device** object in 
 | `os_version` | Text | OS version string (e.g. `17.3.4`) |
 | `os_name` | Text | OS platform name (e.g. `ios-xe`, `fortios`, `nx-os`) |
 | `os_release` | Text | IOS release name parsed from device description (e.g. `Gibraltar`) |
-| `stack_members` | Integer | Total physical units in a traditional stack. Unset for standalone (a constant `1` adds no signal), VSS (split across two Netbox devices), and FEX (satellites aren't stack members) |
+| `stack_members` | Integer | Total physical units in a traditional stack with more than one member. Unset for standalone, a degraded 1-member stack (a count of `1` adds no signal), VSS (split across two Netbox devices), and FEX (satellites aren't stack members) |
 
 ### Read by discobox (Netbox → Netdisco, reconcile loop)
 

@@ -558,10 +558,12 @@ def test_port_to_netbox_over_fortiproxy_sample() -> None:
 
 
 def test_stack_member_count() -> None:
-    """Only traditional stacks get a value (real count); standalone (a
-    constant 1 adds no signal), VSS, and FEX are all left unset (None)."""
+    """Only a traditional stack with >1 member gets a value; a degraded
+    stack down to its last member, standalone, VSS, and FEX are all left
+    unset (None) since a count of 1 carries no signal."""
     chassis = [{"name": "Switch 1"}, {"name": "Switch 2"}, {"name": "Switch 3"}]
     assert _stack_member_count("stack", chassis) == 3
+    assert _stack_member_count("stack", chassis[:1]) is None  # degraded to 1 member
     assert _stack_member_count("standalone", chassis[:1]) is None
     assert _stack_member_count("vss", chassis[:2]) is None
     assert _stack_member_count("fex", chassis) is None
