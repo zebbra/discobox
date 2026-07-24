@@ -30,6 +30,9 @@ custom_fields:
   stack_members: stack_members  # total physical units in a traditional stack with >1 member;
                                 # unset for standalone/VSS/FEX/a degraded 1-member stack (a count
                                 # of 1 or a split count adds no signal) — null to disable
+  stack_members_only_increase: true  # never write a lower count than what's already recorded —
+                                      # a dead stack member must not silently ratchet it down.
+                                      # Set false to always follow Netdisco's current count.
   neighbor_text: neighbor
   neighbor_port: neighbor_port
   neighbor_device: neighbor_device

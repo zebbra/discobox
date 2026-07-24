@@ -17,6 +17,7 @@ from discobox import (
     _discovery_incomplete,
     _fill_module_names,
     _ha_node_info,
+    _should_update_stack_members,
     _slave_link_field,
     _slot_from_iface,
     _stack_member_count,
@@ -567,6 +568,20 @@ def test_stack_member_count() -> None:
     assert _stack_member_count("standalone", chassis[:1]) is None
     assert _stack_member_count("vss", chassis[:2]) is None
     assert _stack_member_count("fex", chassis) is None
+
+
+def test_should_update_stack_members() -> None:
+    # No change: never "update" (would be a no-op write anyway).
+    assert _should_update_stack_members(3, 3, only_increase=True) is False
+    # Never written before (None) or non-numeric: always allow.
+    assert _should_update_stack_members(None, 3, only_increase=True) is True
+    # Increase: always allowed regardless of only_increase.
+    assert _should_update_stack_members(2, 3, only_increase=True) is True
+    assert _should_update_stack_members(2, 3, only_increase=False) is True
+    # Decrease: blocked by default (a dead member shouldn't ratchet it down)...
+    assert _should_update_stack_members(3, 2, only_increase=True) is False
+    # ...but allowed when the operator explicitly disables the guard.
+    assert _should_update_stack_members(3, 2, only_increase=False) is True
 
 
 def test_discovery_incomplete() -> None:

@@ -1882,6 +1882,22 @@ def _stack_member_count(topo: str, chassis: list) -> Optional[int]:
     return None
 
 
+def _should_update_stack_members(current_value: object, new_value: int, only_increase: bool) -> bool:
+    """
+    Whether to write a new stack_members value over the existing one.
+
+    With only_increase (the default), a lower new count is rejected — a
+    dead stack member must not silently ratchet the recorded value down.
+    A non-numeric or missing current value (e.g. never set) always allows
+    the write; only a genuine numeric decrease is blocked.
+    """
+    if current_value == new_value:
+        return False
+    if only_increase and isinstance(current_value, (int, float)) and new_value < current_value:
+        return False
+    return True
+
+
 def reconcile_devices(
     nd: "NetdiscoClient",
     nb: "NetboxClient",
@@ -2091,6 +2107,7 @@ def sync_device(
     cf_os_name: Optional[str] = "os_name",
     cf_os_release: Optional[str] = "os_release",
     cf_stack_members: Optional[str] = "stack_members",
+    stack_members_only_increase: bool = True,
 ) -> dict:
     """
     Sync device fields, interfaces, MACs, IPs, modules, and SFPs.
@@ -2310,9 +2327,15 @@ def sync_device(
         member_count = _stack_member_count(topo, chassis)
         if cf_stack_members and member_count is not None:
             current_cf = dict(getattr(nb_device, "custom_fields", {}) or {})
-            if current_cf.get(cf_stack_members) != member_count:
+            current_value = current_cf.get(cf_stack_members)
+            if _should_update_stack_members(current_value, member_count, stack_members_only_increase):
                 nb_device.update({"custom_fields": {cf_stack_members: member_count}})
                 log.debug("  %s=%d updated", cf_stack_members, member_count)
+            elif current_value != member_count:
+                log.debug(
+                    "  %s: keeping %s (new count %d is lower — a dead member shouldn't reduce it)",
+                    cf_stack_members, current_value, member_count,
+                )
 
         manufacturer = nb_device.device_type.manufacturer
 
