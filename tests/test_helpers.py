@@ -12,11 +12,15 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from datetime import date
+
 from discobox import (
     NetboxClient,
+    _counts_changed,
     _discovery_incomplete,
     _fill_module_names,
     _ha_node_info,
+    _recently_touched,
     _should_update_stack_members,
     _slave_link_field,
     _slot_from_iface,
@@ -582,6 +586,38 @@ def test_should_update_stack_members() -> None:
     assert _should_update_stack_members(3, 2, only_increase=True) is False
     # ...but allowed when the operator explicitly disables the guard.
     assert _should_update_stack_members(3, 2, only_increase=False) is True
+
+
+def test_recently_touched() -> None:
+    today = date(2026, 7, 27)
+    # Touched today: within a 1-day cooldown (cooldown_days=1 means "at most once/day").
+    assert _recently_touched("2026-07-27", 1, today=today) is True
+    # Touched yesterday: outside a 1-day cooldown...
+    assert _recently_touched("2026-07-26", 1, today=today) is False
+    # ...but within a 2-day cooldown.
+    assert _recently_touched("2026-07-26", 2, today=today) is True
+    # Two days ago is outside a 1-day cooldown.
+    assert _recently_touched("2026-07-25", 1, today=today) is False
+    # datetime-style values are truncated to the date portion.
+    assert _recently_touched("2026-07-27T10:00:00", 1, today=today) is True
+    # Missing/empty value never blocks a sync.
+    assert _recently_touched(None, 1, today=today) is False
+    assert _recently_touched("", 1, today=today) is False
+    # Unparseable value never blocks a sync.
+    assert _recently_touched("not-a-date", 1, today=today) is False
+    # cooldown_days=0 disables the check entirely.
+    assert _recently_touched("2026-07-27", 0, today=today) is False
+
+
+def test_counts_changed() -> None:
+    assert _counts_changed(None) is False
+    assert _counts_changed({}) is False
+    assert _counts_changed({"unchanged": 5, "skipped": 2, "error": 1}) is False
+    assert _counts_changed({"unchanged": 5, "conflict": 3}) is False
+    assert _counts_changed({"unchanged": 5, "created": 1}) is True
+    assert _counts_changed({"unchanged": 5, "updated": 0}) is False
+    assert _counts_changed({"fixed": 1}) is True
+    assert _counts_changed({"deleted": 1}) is True
 
 
 def test_discovery_incomplete() -> None:

@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import sys
+from datetime import date, timedelta
 from typing import Callable, Optional
 
 import pynetbox
@@ -364,8 +365,12 @@ class NetboxClient:
         cf_os_version: Optional[str] = "os_version",
         cf_os_name: Optional[str] = "os_name",
         cf_os_release: Optional[str] = "os_release",
-    ) -> None:
-        """Update serial, and custom fields os_ver / os_name / os_release."""
+    ) -> bool:
+        """Update serial, and custom fields os_ver / os_name / os_release.
+
+        Returns True if a PATCH was actually sent (pynetbox diffs against the
+        record's fetched state, so an unchanged value never issues a request).
+        """
         _log = log or logger
         patch: dict = {}
 
@@ -386,14 +391,15 @@ class NetboxClient:
 
         if not patch:
             _log.debug("Device fields: nothing to update")
-            return
+            return False
 
-        device.update(patch)
+        changed = device.update(patch)
         _log.debug(
             "Device fields: serial=%r os_name=%r os_ver=%r os_release=%r",
             patch.get("serial"), custom.get(cf_os_name or ""),
             custom.get(cf_os_version or ""), custom.get(cf_os_release or ""),
         )
+        return bool(changed)
 
     def fetch_interfaces(self, device_id: int) -> dict[str, pynetbox.core.response.Record]:
         """Return all existing interfaces for a device, keyed by name."""
@@ -1898,6 +1904,31 @@ def _should_update_stack_members(current_value: object, new_value: int, only_inc
     return True
 
 
+def _recently_touched(touch_value: object, cooldown_days: int, today: Optional[date] = None) -> bool:
+    """
+    Whether a device's touch field shows a real config change within cooldown_days.
+
+    touch_value is a "YYYY-MM-DD"-ish string written to the touch custom field
+    the last time sync_device made an actual change. Missing/unparseable
+    values never block a sync (treated as "not recently touched").
+    """
+    if not touch_value or cooldown_days <= 0:
+        return False
+    try:
+        touched = date.fromisoformat(str(touch_value)[:10])
+    except ValueError:
+        return False
+    return (today or date.today()) - touched < timedelta(days=cooldown_days)
+
+
+_UNCHANGED_ACTIONS = {"unchanged", "skipped", "error", "conflict"}
+
+
+def _counts_changed(counts: Optional[dict]) -> bool:
+    """True if a per-section counts dict recorded any real write (not unchanged/skipped/error)."""
+    return bool(counts) and any(v for k, v in counts.items() if k not in _UNCHANGED_ACTIONS and v)
+
+
 def reconcile_devices(
     nd: "NetdiscoClient",
     nb: "NetboxClient",
@@ -2108,6 +2139,8 @@ def sync_device(
     cf_os_release: Optional[str] = "os_release",
     cf_stack_members: Optional[str] = "stack_members",
     stack_members_only_increase: bool = True,
+    cf_touch: Optional[str] = "netdisco_last_update",
+    touch_cooldown_days: int = 1,
 ) -> dict:
     """
     Sync device fields, interfaces, MACs, IPs, modules, and SFPs.
@@ -2148,6 +2181,18 @@ def sync_device(
                 "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
 
     logger.debug("Netbox    device=%r  id=%s", nb_device.name, nb_device.id)
+
+    if cf_touch:
+        touch_value = dict(getattr(nb_device, "custom_fields", {}) or {}).get(cf_touch)
+        if _recently_touched(touch_value, touch_cooldown_days):
+            log.info(
+                "  %s=%r within %dd cooldown: skipping sync",
+                cf_touch, touch_value, touch_cooldown_days,
+            )
+            return {"ok": True, "reason": "recently_touched", "hostname": nd_hostname,
+                    "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
+
+    device_changed = False
 
     # ── HA / VIP detection ────────────────────────────────────────────────────────
     # Signal: SNMP hostname belongs to a different Netbox device than the IP lookup found.
@@ -2205,6 +2250,8 @@ def sync_device(
                 try:
                     vc_action, _ = nb.upsert_virtual_chassis(vc_name, vc_members)
                     log.info("HA VirtualChassis %r: %s", vc_name, vc_action)
+                    if vc_action != "unchanged":
+                        device_changed = True
                 except Exception as exc:
                     log.error("HA VirtualChassis error: %s", exc)
 
@@ -2255,14 +2302,17 @@ def sync_device(
                         "HA peer VirtualChassis %r: %s  (topology=standalone per Netdisco; VC is Netbox-side)",
                         vc_name, vc_action,
                     )
+                    if vc_action != "unchanged":
+                        device_changed = True
                 except Exception as exc:
                     log.error("HA peer VirtualChassis error: %s", exc)
 
                 if found_vip_dev:
                     _handle_vip_device(nb, found_vip_dev, vip_mode, log, active_device=nb_device)
 
-    nb.update_device_fields(nb_device, nd_device, log=log,
-                            cf_os_version=cf_os_version, cf_os_name=cf_os_name, cf_os_release=cf_os_release)
+    if nb.update_device_fields(nb_device, nd_device, log=log,
+                               cf_os_version=cf_os_version, cf_os_name=cf_os_name, cf_os_release=cf_os_release):
+        device_changed = True
 
     if housekeeping:
         deleted_bays = nb.remove_stale_device_bays(nb_device, STALE_DEVICE_BAY_PATTERNS)
@@ -2272,6 +2322,8 @@ def sync_device(
             if p.get("port") or p.get("descr")
         }
         deleted_ifaces = nb.remove_empty_dummy_interfaces(nb_device, DUMMY_INTERFACES, nd_port_names)
+        if deleted_bays or deleted_mod_bays or deleted_ifaces:
+            device_changed = True
         log.debug(
             "Housekeeping: deleted %d stale device bay(s), %d stale module bay(s), %d empty dummy interface(s)",
             deleted_bays, deleted_mod_bays, deleted_ifaces,
@@ -2329,7 +2381,8 @@ def sync_device(
             current_cf = dict(getattr(nb_device, "custom_fields", {}) or {})
             current_value = current_cf.get(cf_stack_members)
             if _should_update_stack_members(current_value, member_count, stack_members_only_increase):
-                nb_device.update({"custom_fields": {cf_stack_members: member_count}})
+                if nb_device.update({"custom_fields": {cf_stack_members: member_count}}):
+                    device_changed = True
                 log.debug("  %s=%d updated", cf_stack_members, member_count)
             elif current_value != member_count:
                 log.debug(
@@ -2525,7 +2578,8 @@ def sync_device(
                 ver = parse_sw_ver(ch.get("sw_ver", ""))
                 if ver:
                     try:
-                        nb_device.update({"custom_fields": {cf_os_version: ver}})
+                        if nb_device.update({"custom_fields": {cf_os_version: ver}}):
+                            device_changed = True
                         log.debug("  OS version from chassis sw_ver: %s", ver)
                     except Exception as exc:
                         log.error("  OS version update error: %s", exc)
@@ -2731,6 +2785,8 @@ def sync_device(
                 cable_counts["created"], cable_counts["updated"],
                 cable_counts["unchanged"], cable_counts["error"],
             )
+            if _counts_changed(cable_counts):
+                device_changed = True
 
         # Blades (linecards / supervisors / FRU uplink modules): module bay + module per slot.
         blades = [
@@ -2974,6 +3030,8 @@ def sync_device(
 
     if any(cable_counts.values()):
         log.debug("Cables     : %s", "  ".join(f"{k}: {v}" for k, v in cable_counts.items() if v))
+    if _counts_changed(cable_counts):
+        device_changed = True
 
     # Wire up parent links for subinterfaces (e.g. GigabitEthernet0/0/1.1132 → GigabitEthernet0/0/1)
     # For VSS, wire parents per member device (subinterface and parent are always on the same device).
@@ -3241,6 +3299,21 @@ def sync_device(
                 "PoE: updated=%d unchanged=%d skipped=%d errors=%d",
                 poe_counts["updated"], poe_counts["unchanged"], poe_counts["skipped"], poe_counts["error"],
             )
+
+    if not device_changed:
+        for _name in ("counts", "ip_counts", "mod_counts", "sfp_counts",
+                      "fan_counts", "psu_counts", "blade_counts",
+                      "mod_iface_counts", "poe_counts"):
+            if _counts_changed(locals().get(_name)):
+                device_changed = True
+                break
+
+    if cf_touch and device_changed:
+        try:
+            nb_device.update({"custom_fields": {cf_touch: date.today().isoformat()}})
+            log.debug("  %s updated (config changed)", cf_touch)
+        except Exception as exc:
+            log.error("  %s update error: %s", cf_touch, exc)
 
     def _fmt(label: str, c: dict) -> Optional[str]:
         changed = c.get("created", 0) + c.get("updated", 0)

@@ -10,6 +10,8 @@ sync:
   lldp_clear_stale: false     # also gates stale discobox-owned cable deletion
   housekeeping: false
   pause_on_error: false
+  touch_cooldown_days: 1    # skip a device's sync while its touch field (below) shows a
+                            # real change within this many days; 0 disables the skip
   # no_mac: false
   # no_ip: false            # skips interface IPs; the management IP is always synced
   # no_modules: false
@@ -33,6 +35,11 @@ custom_fields:
   stack_members_only_increase: true  # never write a lower count than what's already recorded —
                                       # a dead stack member must not silently ratchet it down.
                                       # Set false to always follow Netdisco's current count.
+  touch: netdisco_last_update  # date field written with today's date whenever a sync makes a
+                                # real change (device fields, interfaces, IPs, modules, cables,
+                                # SFPs, PoE...); untouched on a no-op sync — null to disable.
+                                # Also used to skip a device outright (see sync.touch_cooldown_days)
+                                # and to pre-filter /sync/all when a Netbox device filter is given.
   neighbor_text: neighbor
   neighbor_port: neighbor_port
   neighbor_device: neighbor_device
