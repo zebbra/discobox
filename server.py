@@ -36,7 +36,13 @@ from pydantic import BaseModel
 from requests.exceptions import HTTPError, ReadTimeout
 
 from discobox import (
-    NetboxClient, NetdiscoClient, _recently_touched, fetch_liveness, reconcile_devices, sync_device, validate_ip,
+    NetboxClient,
+    NetdiscoClient,
+    _recently_touched,
+    fetch_liveness,
+    reconcile_devices,
+    sync_device,
+    validate_ip,
 )
 
 # ── Logging ────────────────────────────────────────────────────────────────────
