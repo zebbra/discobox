@@ -1784,6 +1784,46 @@ def fetch_liveness(
     return liveness
 
 
+def _resolve_ha_member_ip(
+    url: str,
+    hostname: str,
+    metric: str = "fgHaStatsSyncStatus_info",
+    hostname_label: str = "fgHaStatsHostname",
+    target_label: str = "netbox_primary_ip",
+    timeout: int = 15,
+    verify_tls: bool = True,
+) -> Optional[str]:
+    """
+    Resolve a vendor-reported HA cluster member hostname (e.g. a FortiGate's
+    own `hostname`, which usually has no relation to its Netbox device name)
+    to the correct Netbox device IP, via a Prometheus-compatible query API
+    exposing a metric whose labels already carry the resolved Netbox identity
+    (e.g. fgHaStatsSyncStatus_info{fgHaStatsHostname=...} with a
+    netbox_primary_ip label attached by the scrape/relabeling pipeline).
+
+    Returns None when nothing matches. Raises on HTTP or payload errors —
+    the caller decides fail-open behavior.
+    """
+    escaped = hostname.replace("\\", "\\\\").replace('"', '\\"')
+    query = f'{metric}{{{hostname_label}="{escaped}"}}'
+    resp = requests.get(
+        f"{url.rstrip('/')}/api/v1/query",
+        params={"query": query},
+        timeout=timeout,
+        verify=verify_tls,
+        headers={"Accept": "application/json", "User-Agent": "discobox"},
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    if payload.get("status") != "success":
+        raise RuntimeError(f"HA member resolve query failed: {payload.get('error') or 'unknown error'}")
+    for series in payload.get("data", {}).get("result", []):
+        value = series.get("metric", {}).get(target_label)
+        if value:
+            return str(value).split("/")[0]
+    return None
+
+
 def _iface_lookup(existing: dict, name: str):
     """
     Get an interface by name with a case-insensitive fallback: Netdisco's
@@ -2141,6 +2181,12 @@ def sync_device(
     stack_members_only_increase: bool = True,
     cf_touch: Optional[str] = "netdisco_last_update",
     touch_cooldown_days: int = 1,
+    ha_metrics_url: Optional[str] = None,
+    ha_metrics_metric: str = "fgHaStatsSyncStatus_info",
+    ha_metrics_hostname_label: str = "fgHaStatsHostname",
+    ha_metrics_target_label: str = "netbox_primary_ip",
+    ha_metrics_timeout: int = 15,
+    ha_metrics_tls_verify: bool = True,
 ) -> dict:
     """
     Sync device fields, interfaces, MACs, IPs, modules, and SFPs.
@@ -2206,10 +2252,31 @@ def sync_device(
         if nd_short != nb_short:
             # Try to find the real physical device by SNMP hostname
             real_device = None
+            # 0. HA-metrics lookup: an exporter-provided label (e.g. Fortinet
+            #    fgHaStatsSyncStatus_info) may already carry the correct Netbox
+            #    primary IP for this vendor-reported hostname — trustworthy
+            #    regardless of how unrelated the vendor's own hostname is to
+            #    Netbox naming. Tried first; falls through on any failure.
+            if ha_metrics_url:
+                try:
+                    resolved_ip = _resolve_ha_member_ip(
+                        ha_metrics_url, nd_hostname,
+                        metric=ha_metrics_metric,
+                        hostname_label=ha_metrics_hostname_label,
+                        target_label=ha_metrics_target_label,
+                        timeout=ha_metrics_timeout,
+                        verify_tls=ha_metrics_tls_verify,
+                    )
+                except Exception as exc:
+                    log.warning("HA metrics lookup for %r failed: %s", nd_hostname, exc)
+                    resolved_ip = None
+                if resolved_ip:
+                    real_device = nb.find_device_by_ip(resolved_ip)
             # 1. Exact match, then contains with short-name verification
-            for dev in nb.nb.dcim.devices.filter(name__ie=nd_hostname):
-                real_device = dev
-                break
+            if not real_device:
+                for dev in nb.nb.dcim.devices.filter(name__ie=nd_hostname):
+                    real_device = dev
+                    break
             if not real_device:
                 for dev in nb.nb.dcim.devices.filter(name__ic=nd_short):
                     if dev.name and dev.name.lower().split(".")[0] == nd_short:

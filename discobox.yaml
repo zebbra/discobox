@@ -12,6 +12,14 @@ sync:
   pause_on_error: false
   touch_cooldown_days: 1    # skip a device's sync while its touch field (below) shows a
                             # real change within this many days; 0 disables the skip
+  ha_resolve:               # resolve a vendor-reported HA hostname (e.g. a FortiGate's own
+                            # `hostname`, unrelated to its NetBox name) to the correct NetBox
+                            # device via a metric whose labels already carry that mapping —
+                            # tried before the exact/contains-name and serial fallbacks.
+                            # Reuses reconcile.liveness.url/timeout; disabled unless that's set.
+    metric: fgHaStatsSyncStatus_info
+    hostname_label: fgHaStatsHostname   # label carrying the vendor-reported hostname
+    target_label: netbox_primary_ip     # label already carrying the correct NetBox device IP
   # no_mac: false
   # no_ip: false            # skips interface IPs; the management IP is always synced
   # no_modules: false
