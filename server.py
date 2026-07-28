@@ -40,6 +40,7 @@ from discobox import (
     NetdiscoClient,
     _recently_touched,
     fetch_liveness,
+    fix_tag_mismatches,
     reconcile_devices,
     sync_device,
     validate_ip,
@@ -252,6 +253,11 @@ reconcile_not_in_netbox = Gauge(
 reconcile_tag_mismatches = Gauge(
     "discobox_reconcile_tag_mismatches",
     "Netdisco devices with a missing or Netbox-mismatched auth tag (last reconcile)",
+    **_reg,
+)
+fix_tags_enqueued_total = Counter(
+    "discobox_fix_tags_enqueued_total",
+    "Devices re-enqueued for Netdisco discovery to correct an auth tag mismatch",
     **_reg,
 )
 sync_timeouts_total = Counter(
@@ -574,6 +580,25 @@ def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = No
         _save_gap(_TAG_MISMATCHES_FILE, counts.get("tag_mismatches_list", []))
     reconcile_runs_total.labels(status="success").inc()
     reconcile_last_run_timestamp.set(time.time())
+
+
+def _run_fix_tag_mismatches(max_enqueue: Optional[int] = None) -> None:
+    if _is_paused():
+        logger.info("Fix tag mismatches skipped: sync is paused")
+        return
+    nd = _get_netdisco_client()
+    with _reconcile_gaps_lock:
+        mismatches = _load_gap(_TAG_MISMATCHES_FILE)
+    result = fix_tag_mismatches(
+        nd, mismatches,
+        max_queued=_RECONCILE_MAX_QUEUED,
+        max_failed=_RECONCILE_MAX_FAILED,
+        max_enqueue=max_enqueue,
+    )
+    if result.get("aborted"):
+        return
+    fix_tags_enqueued_total.inc(result.get("enqueued", 0))
+    logger.info("Fix tag mismatches: %s", result)
 
 
 async def _reconcile_loop() -> None:
@@ -1435,11 +1460,12 @@ async def index() -> str:
 <h2>Endpoints</h2>
 <table class="endpoints">
   <tr><th>Method</th><th>Path</th><th>Description</th></tr>
-  <tr><td>POST</td><td><a href=/docs#/default/sync_sync_post>/sync</a></td><td>Netdisco webhook: trigger device sync</td></tr>
-  <tr><td>POST</td><td>/sync/all</td><td>Queue a sync for every device known to Netdisco</td></tr>
+  <tr><td>POST</td><td><a href=/docs#/default/sync_sync_post>/sync</a>?host=&lt;ip&gt;</td><td>Sync one device's details from Netdisco to Netbox</td></tr>
+  <tr><td>POST</td><td>/sync/all</td><td>Queue a sync for every known device from Netdisco to Netbox</td></tr>
   <tr><td>POST</td><td>/sync/pause</td><td>Pause queued syncs</td></tr>
   <tr><td>POST</td><td>/sync/resume</td><td>Resume queued syncs</td></tr>
-  <tr><td>POST</td><td>/reconcile</td><td>Trigger reconcile run manually</td></tr>
+  <tr><td>POST</td><td>/reconcile</td><td>Trigger reconcile: enqueue Netdisco discovery for Netbox devices Netdisco doesn't know yet</td></tr>
+  <tr><td>POST</td><td>/reconcile/fix-tags</td><td>Re-enqueue discovery (with Netbox's expected auth tag as a hint) for the last reconcile's tag mismatches</td></tr>
   <tr><td>GET</td><td><a href=/unknown-devices>/unknown-devices</a></td><td>Devices seen via LLDP but not found in Netbox (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/not-in-netdisco>/not-in-netdisco</a></td><td>Active Netbox devices not in Netdisco (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/not-in-netbox>/not-in-netbox</a></td><td>Netdisco devices not in Netbox (JSON)</td></tr>
@@ -1469,6 +1495,21 @@ async def trigger_reconcile(
     effective_max = max_enqueue if max_enqueue is not None else _RECONCILE_MAX_ENQUEUE
     background_tasks.add_task(_run_reconcile, max_enqueue=effective_max, offset=offset)
     return {"status": "reconcile queued", "max_enqueue": effective_max, "offset": offset}
+
+
+@app.post(
+    "/reconcile/fix-tags",
+    dependencies=[Depends(require_auth)],
+    summary="Re-enqueue Netdisco discovery for devices from the last reconcile's tag-mismatch report",
+)
+async def trigger_fix_tags(
+    background_tasks: BackgroundTasks,
+    max_enqueue: Annotated[Optional[int], Query(description="Max devices to re-enqueue")] = None,
+) -> dict:
+    with _reconcile_gaps_lock:
+        pending = len(_load_gap(_TAG_MISMATCHES_FILE))
+    background_tasks.add_task(_run_fix_tag_mismatches, max_enqueue=max_enqueue)
+    return {"status": "fix-tags queued", "max_enqueue": max_enqueue, "pending": pending}
 
 
 @app.get("/unknown-devices", summary="Devices seen in Netdisco webhooks but not found in Netbox")

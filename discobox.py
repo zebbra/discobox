@@ -1985,6 +1985,78 @@ def _counts_changed(counts: Optional[dict]) -> bool:
     return bool(counts) and any(v for k, v in counts.items() if k not in _UNCHANGED_ACTIONS and v)
 
 
+def _netdisco_queue_ok(
+    nd: "NetdiscoClient",
+    max_queued: Optional[int],
+    max_failed: Optional[int],
+    log: logging.Logger,
+    action: str,
+) -> bool:
+    """Check Netdisco's job queue (last 1h) against the given thresholds. None disables a check."""
+    if max_queued is None and max_failed is None:
+        return True
+    try:
+        qs = nd.get_queue_status(since="1h")
+    except requests.HTTPError as exc:
+        log.error("%s aborted: could not fetch Netdisco queue status: %s", action, exc)
+        return False
+    queued, failed = qs.get("queued", 0), qs.get("failed", 0)
+    if (max_queued is not None and queued > max_queued) or \
+       (max_failed is not None and failed > max_failed):
+        log.warning(
+            "%s aborted: queue too busy (queued=%d failed=%d, limits queued=%s failed=%s)",
+            action, queued, failed, max_queued, max_failed,
+        )
+        return False
+    return True
+
+
+def fix_tag_mismatches(
+    nd: "NetdiscoClient",
+    mismatches: list[dict],
+    max_queued: Optional[int] = 500,
+    max_failed: Optional[int] = 500,
+    max_enqueue: Optional[int] = None,
+) -> dict:
+    """
+    Re-enqueue Netdisco discovery, hinting the Netbox-expected auth tag, for
+    devices from reconcile's tag-mismatch report (see reconcile_devices).
+    Entries with no Netbox tag to hint toward (reason="missing" and Netbox
+    itself has no snmp_auth_profile set) are skipped since there's nothing to
+    correct toward.
+
+    This does not re-derive the mismatch list itself — pass in the list from
+    a prior reconcile run (e.g. counts["tag_mismatches_list"]).
+    """
+    log = logging.getLogger("discobox.reconcile")
+    result = {"aborted": False, "enqueued": 0, "skipped": 0, "errors": 0}
+
+    if not _netdisco_queue_ok(nd, max_queued, max_failed, log, "Fix tag mismatches"):
+        result["aborted"] = True
+        return result
+
+    for entry in mismatches:
+        nb_tag = entry.get("netbox_tag")
+        if not nb_tag:
+            result["skipped"] += 1
+            continue
+        if max_enqueue is not None and result["enqueued"] >= max_enqueue:
+            result["skipped"] += 1
+            continue
+
+        ip = entry["ip"]
+        try:
+            nd.enqueue_discover(ip, device_auth_tag_hint=nb_tag)
+            log.info("Re-enqueued discover for %s (%s) to fix auth tag: %r -> %r",
+                      ip, entry.get("name"), entry.get("netdisco_tag"), nb_tag)
+            result["enqueued"] += 1
+        except Exception as exc:
+            log.error("Failed to enqueue discover for %s: %s", ip, exc)
+            result["errors"] += 1
+
+    return result
+
+
 def reconcile_devices(
     nd: "NetdiscoClient",
     nb: "NetboxClient",
