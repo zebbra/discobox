@@ -6,7 +6,16 @@
 # Set any value to null (or omit it) to disable that feature/mapping.
 
 sync:
-  vip_mode: threenode       # threenode | soft | hard | off
+  vip_mode: threenode       # threenode | soft | hard | off; fallback for any vendor not
+                            # listed in vip_mode_by_vendor below
+  # vip_mode_by_vendor:     # override vip_mode per vendor (nd_device["vendor"], already
+  #                         # lowercased at the source — see e.g. tests/samples/*-device.json).
+  #                         # Useful when a VIP/floating address behaves differently across
+  #                         # vendors — e.g. Fortinet FGCP's cluster IP is a real, distinct
+  #                         # member address (threenode keeps the VIP device + its address),
+  #                         # while a VSS/HSRP floating IP really belongs to whichever
+  #                         # physical interface answers it (soft frees it for reassignment).
+  #   fortinet: threenode
   lldp_clear_stale: false     # also gates stale discobox-owned cable deletion
   housekeeping: false
   pause_on_error: false

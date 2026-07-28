@@ -2164,7 +2164,10 @@ def sync_device(
     sync_poe: bool = True,
     housekeeping: bool = False,
     lldp_clear_stale: bool = False,
-    vip_mode: str = "threenode",   # threenode | soft | hard | off
+    vip_mode: str = "threenode",   # threenode | soft | hard | off; fallback when the device's
+                                    # vendor isn't in vip_mode_by_vendor
+    vip_mode_by_vendor: Optional[dict[str, str]] = None,  # e.g. {"fortinet": "threenode", "cisco": "soft"} —
+                                                            # keyed by nd_device["vendor"] (already lowercased)
     cf_neighbor_text: Optional[str] = "neighbor",
     cf_neighbor_port: Optional[str] = "neighbor_port",
     cf_neighbor_device: Optional[str] = "neighbor_device",
@@ -2209,6 +2212,7 @@ def sync_device(
 
     nd_hostname = nd_device.get("name") or nd_device.get("dns") or ""
     nd_serial = nd_device.get("serial") or ""
+    vip_mode = (vip_mode_by_vendor or {}).get((nd_device.get("vendor") or "").lower(), vip_mode)
     log.info("sync start %s", nd_hostname or ip)
     log.debug("Netdisco  hostname=%r  ports=%d", nd_hostname, len(nd_ports))
 
@@ -2299,8 +2303,8 @@ def sync_device(
                 # Find partner node by swapping node indicator in hostname
                 partner_dev = nb.find_ha_partner(nb_device.name)
 
-                # Create / update Virtual Chassis using the VIP device's short name as identity
-                vc_name = vip_device.name.split(".")[0]
+                # Create / update Virtual Chassis using the VIP device's FQDN as identity
+                vc_name = vip_device.name
                 active_m = re.search(r"p(\d+)h", nb_device.name, re.IGNORECASE)
                 active_pos = int(active_m.group(1)) if active_m else 1
                 vc_members: list[tuple] = [(nb_device, active_pos)]
@@ -2352,12 +2356,13 @@ def sync_device(
                         found_vip_dev = vip_results[0]
                         break
 
-                # VC identity: prefer the VIP's short name so this path and the
+                # VC identity: prefer the VIP's FQDN so this path and the
                 # VIP-hook path (which names the VC after the VIP device) agree
                 # on the same VC — otherwise each path creates its own VC and
                 # fights over the members. Fall back to the short hostname with
-                # the node indicator stripped when no VIP device exists.
-                vc_name = found_vip_dev.name.split(".")[0] if found_vip_dev else vc_base
+                # the node indicator stripped, plus this device's own domain
+                # suffix, when no VIP device exists.
+                vc_name = found_vip_dev.name if found_vip_dev else (vc_base + domain)
 
                 if vip_mode == "threenode" and found_vip_dev:
                     vc_members.append((found_vip_dev, 0))
@@ -2609,8 +2614,10 @@ def sync_device(
 
                 vc_members.append((partner_dev, partner_pos))
 
-            # Create/update Virtual Chassis linking both physical devices
-            vc_name = nd_hostname.split(".")[0] if nd_hostname else f"vc-{ip}"
+            # Create/update Virtual Chassis linking both physical devices, named
+            # after the primary device's own FQDN (Netbox-sourced, so it's stable
+            # even when Netdisco's reported hostname is bare/short).
+            vc_name = nb_device.name or nd_hostname or f"vc-{ip}"
             try:
                 vc_action, _vc = nb.upsert_virtual_chassis(vc_name, vc_members)
                 log.info("  VirtualChassis %r: %s", vc_name, vc_action)

@@ -351,6 +351,13 @@ _DEFAULT_POE              = not _cbool(_CFG, "sync", "no_poe",          default=
 _DEFAULT_HOUSEKEEPING     =     _cbool(_CFG, "sync", "housekeeping",    default=False)
 _DEFAULT_LLDP_CLEAR_STALE =     _cbool(_CFG, "sync", "lldp_clear_stale", default=False)
 _VIP_MODE: str            = _c   (_CFG, "sync", "vip_mode",            default="threenode")
+# Per-vendor override, e.g. {fortinet: threenode} while _VIP_MODE stays the
+# fallback for everything else (VSS, HSRP, ...). Keyed by nd_device["vendor"],
+# which is already lowercased at the source (see tests/samples/*-device.json).
+_VIP_MODE_BY_VENDOR: dict[str, str] = {
+    str(k).lower(): str(v).lower()
+    for k, v in (_c(_CFG, "sync", "vip_mode_by_vendor", default={}) or {}).items()
+}
 _PAUSE_ON_ERROR: bool     = _cbool(_CFG, "sync", "pause_on_error",     default=False)
 
 # Circuit breaker: trip when >= _CB_THRESHOLD timeouts occur within _CB_WINDOW seconds.
@@ -947,6 +954,7 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             housekeeping=housekeeping,
             lldp_clear_stale=lldp_clear_stale,
             vip_mode=_VIP_MODE,
+            vip_mode_by_vendor=_VIP_MODE_BY_VENDOR,
             cf_neighbor_text=cf_neighbor_text,
             cf_neighbor_port=cf_neighbor_port,
             cf_neighbor_device=cf_neighbor_device,
