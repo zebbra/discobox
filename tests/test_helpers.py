@@ -19,6 +19,7 @@ from discobox import (
     _counts_changed,
     _discovery_incomplete,
     _fill_module_names,
+    _guess_prefix_len,
     _ha_node_info,
     _recently_touched,
     _should_update_stack_members,
@@ -618,6 +619,21 @@ def test_counts_changed() -> None:
     assert _counts_changed({"unchanged": 5, "updated": 0}) is False
     assert _counts_changed({"fixed": 1}) is True
     assert _counts_changed({"deleted": 1}) is True
+
+
+class _FakeDeviceWithIP:
+    def __init__(self, primary_ip4=None):
+        self.primary_ip4 = primary_ip4
+
+
+def test_guess_prefix_len() -> None:
+    # No device has a primary_ip4: falls back to a bare host route.
+    assert _guess_prefix_len(_FakeDeviceWithIP(), _FakeDeviceWithIP(None)) == "32"
+    # None entries (e.g. a missing partner) are skipped safely.
+    assert _guess_prefix_len(None, _FakeDeviceWithIP("10.0.0.1/24")) == "24"
+    # First device with a prefix wins, regardless of position.
+    assert _guess_prefix_len(_FakeDeviceWithIP(), _FakeDeviceWithIP("10.0.0.2/29")) == "29"
+    assert _guess_prefix_len() == "32"
 
 
 def test_discovery_incomplete() -> None:

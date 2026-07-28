@@ -29,6 +29,12 @@ sync:
     metric: fgHaStatsSyncStatus_info
     hostname_label: fgHaStatsHostname   # label carrying the vendor-reported hostname
     target_label: netbox_primary_ip     # label already carrying the correct NetBox device IP
+    instance_label: instance   # label carrying the already-known NetBox device FQDN — used to
+                                # also ensure EACH HA member's own management IP is set as
+                                # primary_ip4 (not just whichever one triggered the lookup),
+                                # even when Netdisco never discovers that member's IP directly
+    mgmt_iface_name: mgmt1     # interface created for a member that has none yet, to hold
+                                # its management IP
   # no_mac: false
   # no_ip: false            # skips interface IPs; the management IP is always synced
   # no_modules: false

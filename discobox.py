@@ -1800,6 +1800,46 @@ def fetch_liveness(
     return liveness
 
 
+def _query_ha_metric(
+    url: str,
+    label: str,
+    value: str,
+    metric: str = "fgHaStatsSyncStatus_info",
+    target_label: str = "netbox_primary_ip",
+    timeout: int = 15,
+    verify_tls: bool = True,
+) -> Optional[str]:
+    """
+    Query a Prometheus-compatible API for `metric{label="value"}` and return
+    the first matching series' target_label — e.g. resolving either a
+    vendor-reported hostname (fgHaStatsHostname) or an already-known NetBox
+    device FQDN (instance) to the correct netbox_primary_ip, via a metric
+    whose labels already carry that resolved identity (attached by the
+    scrape/relabeling pipeline).
+
+    Returns None when nothing matches. Raises on HTTP or payload errors —
+    the caller decides fail-open behavior.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    query = f'{metric}{{{label}="{escaped}"}}'
+    resp = requests.get(
+        f"{url.rstrip('/')}/api/v1/query",
+        params={"query": query},
+        timeout=timeout,
+        verify=verify_tls,
+        headers={"Accept": "application/json", "User-Agent": "discobox"},
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    if payload.get("status") != "success":
+        raise RuntimeError(f"HA metric query failed: {payload.get('error') or 'unknown error'}")
+    for series in payload.get("data", {}).get("result", []):
+        result = series.get("metric", {}).get(target_label)
+        if result:
+            return str(result).split("/")[0]
+    return None
+
+
 def _resolve_ha_member_ip(
     url: str,
     hostname: str,
@@ -1812,32 +1852,77 @@ def _resolve_ha_member_ip(
     """
     Resolve a vendor-reported HA cluster member hostname (e.g. a FortiGate's
     own `hostname`, which usually has no relation to its Netbox device name)
-    to the correct Netbox device IP, via a Prometheus-compatible query API
-    exposing a metric whose labels already carry the resolved Netbox identity
-    (e.g. fgHaStatsSyncStatus_info{fgHaStatsHostname=...} with a
-    netbox_primary_ip label attached by the scrape/relabeling pipeline).
-
-    Returns None when nothing matches. Raises on HTTP or payload errors —
-    the caller decides fail-open behavior.
+    to the correct Netbox device IP. See _query_ha_metric for details.
     """
-    escaped = hostname.replace("\\", "\\\\").replace('"', '\\"')
-    query = f'{metric}{{{hostname_label}="{escaped}"}}'
-    resp = requests.get(
-        f"{url.rstrip('/')}/api/v1/query",
-        params={"query": query},
-        timeout=timeout,
-        verify=verify_tls,
-        headers={"Accept": "application/json", "User-Agent": "discobox"},
+    return _query_ha_metric(
+        url, hostname_label, hostname,
+        metric=metric, target_label=target_label, timeout=timeout, verify_tls=verify_tls,
     )
-    resp.raise_for_status()
-    payload = resp.json()
-    if payload.get("status") != "success":
-        raise RuntimeError(f"HA member resolve query failed: {payload.get('error') or 'unknown error'}")
-    for series in payload.get("data", {}).get("result", []):
-        value = series.get("metric", {}).get(target_label)
-        if value:
-            return str(value).split("/")[0]
-    return None
+
+
+def _guess_prefix_len(*devices: object) -> str:
+    """Borrow a prefix length from the first device with an existing primary_ip4 (HA
+    members share a subnet); "32" (a bare host route) when none is known."""
+    for device in devices:
+        primary = getattr(device, "primary_ip4", None) if device else None
+        if primary and "/" in str(primary):
+            return str(primary).split("/")[-1]
+    return "32"
+
+
+def _ensure_ha_member_ip(
+    nb: "NetboxClient",
+    device: Optional[pynetbox.core.response.Record],
+    prefix_len: str,
+    ha_metrics_url: str,
+    instance_label: str,
+    metric: str,
+    target_label: str,
+    timeout: int,
+    verify_tls: bool,
+    mgmt_iface_name: str,
+    log: logging.Logger,
+) -> bool:
+    """
+    Ensure `device` has its own management IP — resolved by its NetBox FQDN
+    via the same HA-metrics endpoint used for member identification — assigned
+    to one of its interfaces and set as primary_ip4. Creates a management
+    interface if the device has none yet.
+
+    No-op if the device already has a primary_ip4, the metric has no row for
+    it, or the lookup fails. Never steals an IP already claimed by a
+    different device's interface — upsert_ip's own safeguard (marks it
+    role=vip and skips instead).
+    """
+    if not device or not device.name or getattr(device, "primary_ip4", None):
+        return False
+    try:
+        target_ip = _query_ha_metric(
+            ha_metrics_url, instance_label, device.name,
+            metric=metric, target_label=target_label, timeout=timeout, verify_tls=verify_tls,
+        )
+    except Exception as exc:
+        log.warning("HA management-IP lookup for %r failed: %s", device.name, exc)
+        return False
+    if not target_ip:
+        return False
+
+    ifaces = list(nb.nb.dcim.interfaces.filter(device_id=device.id))
+    iface = ifaces[0] if ifaces else None
+    if not iface:
+        iface = nb.nb.dcim.interfaces.create(device=device.id, name=mgmt_iface_name, type="other")
+        log.info("  Created management interface %r on %r", mgmt_iface_name, device.name)
+
+    action = nb.upsert_ip(f"{target_ip}/{prefix_len}", iface)
+    if action not in ("created", "moved", "fixed"):
+        return False  # already elsewhere / unchanged — upsert_ip already logged why
+
+    ip_obj = next(iter(nb.nb.ipam.ip_addresses.filter(address=target_ip)), None)
+    if not ip_obj or nb._nb_value(getattr(ip_obj, "assigned_object_id", None)) != iface.id:
+        return False
+    device.update({"primary_ip4": ip_obj.id})
+    log.info("  Management IP %s set as primary for %r", target_ip, device.name)
+    return True
 
 
 def _iface_lookup(existing: dict, name: str):
@@ -2290,6 +2375,8 @@ def sync_device(
     ha_metrics_target_label: str = "netbox_primary_ip",
     ha_metrics_timeout: int = 15,
     ha_metrics_tls_verify: bool = True,
+    ha_metrics_instance_label: str = "instance",
+    ha_mgmt_iface_name: str = "mgmt1",
 ) -> dict:
     """
     Sync device fields, interfaces, MACs, IPs, modules, and SFPs.
@@ -2405,6 +2492,16 @@ def sync_device(
                 # Find partner node by swapping node indicator in hostname
                 partner_dev = nb.find_ha_partner(nb_device.name)
 
+                if ha_metrics_url:
+                    mgmt_prefix = _guess_prefix_len(nb_device, partner_dev, pre_redirect)
+                    for member in (nb_device, partner_dev):
+                        if _ensure_ha_member_ip(
+                            nb, member, mgmt_prefix, ha_metrics_url, ha_metrics_instance_label,
+                            ha_metrics_metric, ha_metrics_target_label, ha_metrics_timeout,
+                            ha_metrics_tls_verify, ha_mgmt_iface_name, log,
+                        ):
+                            device_changed = True
+
                 real_short = nb_device.name.split(".")[0]
                 domain = nb_device.name[len(real_short):]
                 real_ha_info = _ha_node_info(real_short)
@@ -2489,6 +2586,16 @@ def sync_device(
         if ha_info:
             partner_dev = nb.find_ha_partner(nb_device.name)
             if partner_dev:
+                if ha_metrics_url:
+                    mgmt_prefix = _guess_prefix_len(nb_device, partner_dev)
+                    for member in (nb_device, partner_dev):
+                        if _ensure_ha_member_ip(
+                            nb, member, mgmt_prefix, ha_metrics_url, ha_metrics_instance_label,
+                            ha_metrics_metric, ha_metrics_target_label, ha_metrics_timeout,
+                            ha_metrics_tls_verify, ha_mgmt_iface_name, log,
+                        ):
+                            device_changed = True
+
                 node_num, vc_base, vip_short = ha_info
                 partner_num = 2 if node_num == 1 else 1
                 vc_members = [(nb_device, node_num), (partner_dev, partner_num)]
