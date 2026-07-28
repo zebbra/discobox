@@ -1071,6 +1071,7 @@ async def sync(
     housekeeping: Annotated[bool, Query(description="Remove stale device bays and empty dummy interfaces")] = _DEFAULT_HOUSEKEEPING,
     lldp_clear_stale: Annotated[bool, Query(description="Clear LLDP neighbor fields and delete stale discobox-owned cables when no neighbor is present")] = _DEFAULT_LLDP_CLEAR_STALE,
     debug: Annotated[bool, Query(description="Run synchronously and return debug logs as plain text")] = False,
+    force: Annotated[bool, Query(description="Ignore the sync cooldown window")] = False,
     body: Optional[SyncRequest] = None,
 ) -> SyncResponse:
     """
@@ -1104,7 +1105,7 @@ async def sync(
     caller = request.headers.get("x-forwarded-for", "").split(",")[0].strip() \
              or (request.client.host if request.client else "unknown")
 
-    if _recently_synced(resolved_host):
+    if not force and _recently_synced(resolved_host):
         logger.debug("hook from %s: %s  cooldown active: skipping", caller, resolved_host)
         syncs_skipped_total.inc()
         return SyncResponse(status="skipped", host=resolved_host, reason="cooldown")
@@ -1137,7 +1138,7 @@ async def sync(
                 _CABLE_SCOPE, _CABLE_SOURCE_CF, _CABLE_SOURCE_VALUE,
                 _IFACE_SOURCE_CF, _IFACE_SOURCE_VALUE,
                 _CF_OS_VERSION, _CF_OS_NAME, _CF_OS_RELEASE, _CF_STACK_MEMBERS, _STACK_MEMBERS_ONLY_INCREASE,
-                _CF_TOUCH, _TOUCH_COOLDOWN_DAYS,
+                _CF_TOUCH, 0 if force else _TOUCH_COOLDOWN_DAYS,
                 _LIVENESS_URL, _HA_METRICS_METRIC, _HA_METRICS_HOSTNAME_LABEL, _HA_METRICS_TARGET_LABEL,
                 _HA_METRICS_TIMEOUT, _LIVENESS_TLS_VERIFY,
             )
@@ -1146,7 +1147,7 @@ async def sync(
             discobox_log.setLevel(prev_level)
         return PlainTextResponse("\n".join(cap.lines))
 
-    background_tasks.add_task(_run_sync, resolved_host, sync_mac, sync_ip, sync_modules, sync_sfp, sync_poe, housekeeping, lldp_clear_stale, _CF_NEIGHBOR_TEXT, _CF_NEIGHBOR_PORT, _CF_NEIGHBOR_DEVICE, _CF_NEIGHBOR_IFACE, _CABLE_SCOPE, _CABLE_SOURCE_CF, _CABLE_SOURCE_VALUE, _IFACE_SOURCE_CF, _IFACE_SOURCE_VALUE, _CF_OS_VERSION, _CF_OS_NAME, _CF_OS_RELEASE, _CF_STACK_MEMBERS, _STACK_MEMBERS_ONLY_INCREASE, _CF_TOUCH, _TOUCH_COOLDOWN_DAYS, _LIVENESS_URL, _HA_METRICS_METRIC, _HA_METRICS_HOSTNAME_LABEL, _HA_METRICS_TARGET_LABEL, _HA_METRICS_TIMEOUT, _LIVENESS_TLS_VERIFY)
+    background_tasks.add_task(_run_sync, resolved_host, sync_mac, sync_ip, sync_modules, sync_sfp, sync_poe, housekeeping, lldp_clear_stale, _CF_NEIGHBOR_TEXT, _CF_NEIGHBOR_PORT, _CF_NEIGHBOR_DEVICE, _CF_NEIGHBOR_IFACE, _CABLE_SCOPE, _CABLE_SOURCE_CF, _CABLE_SOURCE_VALUE, _IFACE_SOURCE_CF, _IFACE_SOURCE_VALUE, _CF_OS_VERSION, _CF_OS_NAME, _CF_OS_RELEASE, _CF_STACK_MEMBERS, _STACK_MEMBERS_ONLY_INCREASE, _CF_TOUCH, 0 if force else _TOUCH_COOLDOWN_DAYS, _LIVENESS_URL, _HA_METRICS_METRIC, _HA_METRICS_HOSTNAME_LABEL, _HA_METRICS_TARGET_LABEL, _HA_METRICS_TIMEOUT, _LIVENESS_TLS_VERIFY)
     logger.info("hook from %s: %s  queued", caller, resolved_host)
     return SyncResponse(status="queued", host=resolved_host)
 
