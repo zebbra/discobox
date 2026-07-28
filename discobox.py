@@ -2250,6 +2250,7 @@ def sync_device(
     # is unreliable because previous syncs may have written the active node's serial
     # onto the VIP device. Hostname mismatch is the primary signal.
     vip_device = None
+    vip_redirected = False
     if nd_hostname and nb_device.name:
         nd_short = nd_hostname.lower().split(".")[0]
         nb_short = nb_device.name.lower().split(".")[0]
@@ -2293,18 +2294,62 @@ def sync_device(
                     real_device = serial_match
 
             if real_device and real_device.id != nb_device.id:
+                pre_redirect = nb_device
+                nb_device = real_device
+                vip_redirected = True
                 log.info(
                     "HA VIP detected: %r → redirecting to %r",
-                    nb_device.name, real_device.name,
+                    pre_redirect.name, nb_device.name,
                 )
-                vip_device = nb_device
-                nb_device = real_device
 
                 # Find partner node by swapping node indicator in hostname
                 partner_dev = nb.find_ha_partner(nb_device.name)
 
-                # Create / update Virtual Chassis using the VIP device's FQDN as identity
-                vc_name = vip_device.name
+                real_short = nb_device.name.split(".")[0]
+                domain = nb_device.name[len(real_short):]
+                real_ha_info = _ha_node_info(real_short)
+                vip_short = real_ha_info[2] if real_ha_info else None
+
+                pre_short = pre_redirect.name.split(".")[0] if pre_redirect.name else ""
+                if _ha_node_info(pre_short):
+                    # pre_redirect (found by the synced IP) is itself an already-identified
+                    # cluster member, not a VIP placeholder — its address must have drifted
+                    # onto it (e.g. a prior `soft` vip_mode run freed the real VIP's address
+                    # and a later interface sync claimed it for this member). Never
+                    # mirror/rename a real member as if it were the VIP: look up the
+                    # (possibly orphaned) VIP device by its expected name instead.
+                    found_vip = None
+                    if vip_short:
+                        for candidate in (vip_short + domain, vip_short):
+                            results = list(nb.nb.dcim.devices.filter(name__ie=candidate))
+                            if results:
+                                found_vip = results[0]
+                                break
+                    if found_vip:
+                        log.warning(
+                            "%s resolved to %r, but that's already a real cluster member, not "
+                            "the VIP — its address must have drifted; using orphaned VIP %r instead",
+                            ip, pre_redirect.name, found_vip.name,
+                        )
+                    else:
+                        log.warning(
+                            "%s resolved to %r, but that's already a real cluster member, not "
+                            "the VIP, and no orphaned VIP device (%s) was found in NetBox — "
+                            "skipping VIP handling to avoid corrupting %r",
+                            ip, pre_redirect.name, vip_short or "?", pre_redirect.name,
+                        )
+                    vip_device = found_vip
+                else:
+                    vip_device = pre_redirect
+
+                # Create / update Virtual Chassis, named after the VIP's own FQDN when we
+                # have a device record for it, otherwise its expected name pattern.
+                if vip_device:
+                    vc_name = vip_device.name
+                elif vip_short:
+                    vc_name = vip_short + domain
+                else:
+                    vc_name = pre_redirect.name
                 active_m = re.search(r"p(\d+)h", nb_device.name, re.IGNORECASE)
                 active_pos = int(active_m.group(1)) if active_m else 1
                 vc_members: list[tuple] = [(nb_device, active_pos)]
@@ -2315,7 +2360,7 @@ def sync_device(
                     log.info("HA partner found: %r", partner_dev.name)
                 else:
                     log.warning("HA partner not found for %r: VC will have one member", nb_device.name)
-                if vip_mode == "threenode":
+                if vip_mode == "threenode" and vip_device:
                     vc_members.append((vip_device, 0))
                     log.info("HA VIP device %r added as VC member pos=0", vip_device.name)
                 try:
@@ -2326,7 +2371,8 @@ def sync_device(
                 except Exception as exc:
                     log.error("HA VirtualChassis error: %s", exc)
 
-                _handle_vip_device(nb, vip_device, vip_mode, log, active_device=nb_device)
+                if vip_device:
+                    _handle_vip_device(nb, vip_device, vip_mode, log, active_device=nb_device)
             else:
                 log.warning(
                     "Hostname mismatch for %s: Netdisco=%r  Netbox=%r",
@@ -2337,7 +2383,7 @@ def sync_device(
     # Signal: device hostname contains an HA node indicator (p1h/p2h, node1/node2, -1/-2)
     # and a partner device exists in Netbox at the swapped hostname.
     # Handles pairs where Netdisco hooks each physical node directly with no shared VIP.
-    if not vip_device:
+    if not vip_redirected:
         short = nb_device.name.split(".")[0]
         ha_info = _ha_node_info(short)
         if ha_info:
