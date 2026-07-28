@@ -1870,6 +1870,44 @@ def _guess_prefix_len(*devices: object) -> str:
     return "32"
 
 
+def _ensure_member_ip(
+    nb: "NetboxClient",
+    device: Optional[pynetbox.core.response.Record],
+    target_ip: Optional[str],
+    prefix_len: str,
+    iface_name: str,
+    log: logging.Logger,
+) -> bool:
+    """
+    Ensure `device` has target_ip assigned to one of its interfaces and set
+    as primary_ip4. Creates `iface_name` if the device has none yet.
+
+    No-op if the device already has any primary_ip4 (never second-guesses an
+    existing assignment) or target_ip is falsy. Never steals an IP already
+    claimed by a different device's interface — upsert_ip's own safeguard
+    (marks it role=vip and skips instead).
+    """
+    if not device or not target_ip or getattr(device, "primary_ip4", None):
+        return False
+
+    ifaces = list(nb.nb.dcim.interfaces.filter(device_id=device.id))
+    iface = ifaces[0] if ifaces else None
+    if not iface:
+        iface = nb.nb.dcim.interfaces.create(device=device.id, name=iface_name, type="other")
+        log.info("  Created management interface %r on %r", iface_name, device.name)
+
+    action = nb.upsert_ip(f"{target_ip}/{prefix_len}", iface)
+    if action not in ("created", "moved", "fixed"):
+        return False  # already elsewhere / unchanged — upsert_ip already logged why
+
+    ip_obj = next(iter(nb.nb.ipam.ip_addresses.filter(address=target_ip)), None)
+    if not ip_obj or nb._nb_value(getattr(ip_obj, "assigned_object_id", None)) != iface.id:
+        return False
+    device.update({"primary_ip4": ip_obj.id})
+    log.info("  Management IP %s set as primary for %r", target_ip, device.name)
+    return True
+
+
 def _ensure_ha_member_ip(
     nb: "NetboxClient",
     device: Optional[pynetbox.core.response.Record],
@@ -1886,13 +1924,10 @@ def _ensure_ha_member_ip(
     """
     Ensure `device` has its own management IP — resolved by its NetBox FQDN
     via the same HA-metrics endpoint used for member identification — assigned
-    to one of its interfaces and set as primary_ip4. Creates a management
-    interface if the device has none yet.
+    to one of its interfaces and set as primary_ip4. See _ensure_member_ip.
 
     No-op if the device already has a primary_ip4, the metric has no row for
-    it, or the lookup fails. Never steals an IP already claimed by a
-    different device's interface — upsert_ip's own safeguard (marks it
-    role=vip and skips instead).
+    it, or the lookup fails.
     """
     if not device or not device.name or getattr(device, "primary_ip4", None):
         return False
@@ -1904,25 +1939,7 @@ def _ensure_ha_member_ip(
     except Exception as exc:
         log.warning("HA management-IP lookup for %r failed: %s", device.name, exc)
         return False
-    if not target_ip:
-        return False
-
-    ifaces = list(nb.nb.dcim.interfaces.filter(device_id=device.id))
-    iface = ifaces[0] if ifaces else None
-    if not iface:
-        iface = nb.nb.dcim.interfaces.create(device=device.id, name=mgmt_iface_name, type="other")
-        log.info("  Created management interface %r on %r", mgmt_iface_name, device.name)
-
-    action = nb.upsert_ip(f"{target_ip}/{prefix_len}", iface)
-    if action not in ("created", "moved", "fixed"):
-        return False  # already elsewhere / unchanged — upsert_ip already logged why
-
-    ip_obj = next(iter(nb.nb.ipam.ip_addresses.filter(address=target_ip)), None)
-    if not ip_obj or nb._nb_value(getattr(ip_obj, "assigned_object_id", None)) != iface.id:
-        return False
-    device.update({"primary_ip4": ip_obj.id})
-    log.info("  Management IP %s set as primary for %r", target_ip, device.name)
-    return True
+    return _ensure_member_ip(nb, device, target_ip, prefix_len, mgmt_iface_name, log)
 
 
 def _iface_lookup(existing: dict, name: str):
@@ -2491,9 +2508,9 @@ def sync_device(
 
                 # Find partner node by swapping node indicator in hostname
                 partner_dev = nb.find_ha_partner(nb_device.name)
+                mgmt_prefix = _guess_prefix_len(nb_device, partner_dev, pre_redirect)
 
                 if ha_metrics_url:
-                    mgmt_prefix = _guess_prefix_len(nb_device, partner_dev, pre_redirect)
                     for member in (nb_device, partner_dev):
                         if _ensure_ha_member_ip(
                             nb, member, mgmt_prefix, ha_metrics_url, ha_metrics_instance_label,
@@ -2560,6 +2577,12 @@ def sync_device(
                 if vip_mode == "threenode" and vip_device:
                     vc_members.append((vip_device, 0))
                     log.info("HA VIP device %r added as VC member pos=0", vip_device.name)
+                    # ip is the address currently being synced — by construction (a
+                    # hostname mismatch redirected us here) it's the floating/cluster
+                    # address, so it belongs on the VIP device, not wherever a prior
+                    # vip_mode may have left it.
+                    if _ensure_member_ip(nb, vip_device, ip, mgmt_prefix, ha_mgmt_iface_name, log):
+                        device_changed = True
                 try:
                     vc_action, _ = nb.upsert_virtual_chassis(vc_name, vc_members)
                     log.info("HA VirtualChassis %r: %s", vc_name, vc_action)
