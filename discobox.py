@@ -265,7 +265,23 @@ class NetdiscoClient:
         return self._get(f"/api/v1/object/device/{ip}/powered_ports")
 
     def get_all_devices(self) -> list[dict]:
-        return self._get("/api/v1/object/devices?fields=ip,dns,name")
+        """
+        Full device inventory via /api/v1/search/device. That endpoint requires
+        both "limit" and "offset" when no "q"/filter param is given, so page
+        through it rather than requesting everything in one call.
+        """
+        devices: list[dict] = []
+        limit = 500
+        offset = 0
+        while True:
+            page = self._get(f"/api/v1/search/device?fields=ip,dns,name&limit={limit}&offset={offset}")
+            if not page:
+                break
+            devices.extend(page)
+            if len(page) < limit:
+                break
+            offset += limit
+        return devices
 
     def get_queue_status(self, since: str = "1h") -> dict:
         return self._get(f"/api/v1/queue/status?since={since}")
