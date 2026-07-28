@@ -271,10 +271,10 @@ class NetdiscoClient:
         through it rather than requesting everything in one call.
         """
         devices: list[dict] = []
-        limit = 500
+        limit = 1000
         offset = 0
         while True:
-            page = self._get(f"/api/v1/search/device?fields=ip,dns,name&limit={limit}&offset={offset}")
+            page = self._get(f"/api/v1/search/device?fields=ip,dns,name,device_auth_tag&limit={limit}&offset={offset}")
             if not page:
                 break
             devices.extend(page)
@@ -2048,22 +2048,23 @@ def reconcile_devices(
 
     try:
         nd_all_devices = nd.get_all_devices()
-        nd_ips = {d["ip"] for d in nd_all_devices if d.get("ip")}
+        nd_by_ip = {d["ip"]: d for d in nd_all_devices if d.get("ip")}
     except requests.HTTPError as exc:
         log.error("Reconcile aborted: could not fetch Netdisco devices: %s", exc)
         return _aborted
-    log.info("Netdisco knows %d devices", len(nd_ips))
+    log.info("Netdisco knows %d devices", len(nd_by_ip))
 
     role_filter = {"role": roles} if roles else {}
     status_filter = statuses or ["active"]
     nb_total = nb.nb.dcim.devices.count(status=status_filter, has_primary_ip=True, **role_filter)
-    counts = {"enqueued": 0, "skipped": 0, "skipped_offline": 0, "already_known": 0, "netdisco_total": len(nd_ips), "netbox_total": nb_total}
+    counts = {"enqueued": 0, "skipped": 0, "skipped_offline": 0, "already_known": 0, "netdisco_total": len(nd_by_ip), "netbox_total": nb_total}
     if roles:
         log.info("Reconcile role filter: %s", roles)
     if statuses:
         log.info("Reconcile status filter: %s", statuses)
 
     not_in_netdisco: list[dict] = []
+    tag_mismatches: list[dict] = []
     enqueue_cap_logged = False
     for device in nb.nb.dcim.devices.filter(status=status_filter, has_primary_ip=True, **role_filter):
         primary = device.primary_ip4
@@ -2072,8 +2073,15 @@ def reconcile_devices(
             continue
         ip = str(primary).split("/")[0]
 
-        if ip in nd_ips:
+        if ip in nd_by_ip:
             counts["already_known"] += 1
+            cf = getattr(device, "custom_fields", {}) or {}
+            nb_tag = cf.get("snmp_auth_profile") or None
+            nd_tag = nd_by_ip[ip].get("device_auth_tag") or None
+            if not nd_tag:
+                tag_mismatches.append({"ip": ip, "name": device.name, "netbox_tag": nb_tag, "netdisco_tag": nd_tag, "reason": "missing"})
+            elif nb_tag and nd_tag != nb_tag:
+                tag_mismatches.append({"ip": ip, "name": device.name, "netbox_tag": nb_tag, "netdisco_tag": nd_tag, "reason": "mismatch"})
             continue
 
         entry = {"ip": ip, "name": device.name}
@@ -2133,8 +2141,11 @@ def reconcile_devices(
     ]
     counts["not_in_netdisco"] = len(not_in_netdisco)
     counts["not_in_netbox"] = len(not_in_netbox)
+    counts["tag_mismatches"] = len(tag_mismatches)
     if not_in_netdisco or not_in_netbox:
         log.info("Gaps: not_in_netdisco=%d  not_in_netbox=%d", len(not_in_netdisco), len(not_in_netbox))
+    if tag_mismatches:
+        log.info("Auth tag mismatches: %d", len(tag_mismatches))
 
     # Auto-create: bootstrap NetBox devices for Netdisco entries not yet in NetBox
     if auto_create_role and auto_create_site:
@@ -2166,6 +2177,7 @@ def reconcile_devices(
     log.info("Reconcile done: %s", counts)
     counts["not_in_netdisco_list"] = not_in_netdisco
     counts["not_in_netbox_list"] = not_in_netbox
+    counts["tag_mismatches_list"] = tag_mismatches
     return counts
 
 

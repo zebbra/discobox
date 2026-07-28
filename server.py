@@ -249,6 +249,11 @@ reconcile_not_in_netbox = Gauge(
     "Netdisco devices not found in Netbox (last reconcile)",
     **_reg,
 )
+reconcile_tag_mismatches = Gauge(
+    "discobox_reconcile_tag_mismatches",
+    "Netdisco devices with a missing or Netbox-mismatched auth tag (last reconcile)",
+    **_reg,
+)
 sync_timeouts_total = Counter(
     "discobox_sync_timeouts_total",
     "Syncs that failed with a timeout or gateway error",
@@ -561,10 +566,12 @@ def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = No
     reconcile_enqueued_total.inc(counts.get("enqueued", 0))
     reconcile_not_in_netdisco.set(counts.get("not_in_netdisco", 0))
     reconcile_not_in_netbox.set(counts.get("not_in_netbox", 0))
+    reconcile_tag_mismatches.set(counts.get("tag_mismatches", 0))
     reconcile_skipped_offline.set(counts.get("skipped_offline", 0))
     with _reconcile_gaps_lock:
         _save_gap(_NOT_IN_NETDISCO_FILE, counts.get("not_in_netdisco_list", []))
         _save_gap(_NOT_IN_NETBOX_FILE, counts.get("not_in_netbox_list", []))
+        _save_gap(_TAG_MISMATCHES_FILE, counts.get("tag_mismatches_list", []))
     reconcile_runs_total.labels(status="success").inc()
     reconcile_last_run_timestamp.set(time.time())
 
@@ -780,6 +787,9 @@ _NOT_IN_NETDISCO_FILE: str = os.path.join(
 )
 _NOT_IN_NETBOX_FILE: str = os.path.join(
     _STATE_DIR, "discobox.not_in_netbox.json"
+)
+_TAG_MISMATCHES_FILE: str = os.path.join(
+    _STATE_DIR, "discobox.tag_mismatches.json"
 )
 _reconcile_gaps_lock = threading.Lock()
 
@@ -1351,6 +1361,7 @@ async def index() -> str:
     with _reconcile_gaps_lock:
         not_in_netdisco_list = _load_gap(_NOT_IN_NETDISCO_FILE)
         not_in_netbox_list = _load_gap(_NOT_IN_NETBOX_FILE)
+        tag_mismatches_list = _load_gap(_TAG_MISMATCHES_FILE)
 
     if not _LIVENESS_URL:
         liveness_str = '<span style="color:#888">disabled</span>'
@@ -1387,6 +1398,22 @@ async def index() -> str:
         if not_in_netbox_list else "<h2>In Netdisco, not in Netbox</h2><p>None</p>"
     )
 
+    def _tag_mismatch_table(devices: list[dict]) -> str:
+        header = "<tr><th>IP</th><th>Name</th><th>Netbox tag</th><th>Netdisco tag</th><th>Reason</th></tr>"
+        rows = ""
+        for d in devices:
+            rows += (
+                f"<tr><td>{d['ip']}</td><td>{d['name']}</td>"
+                f"<td>{d.get('netbox_tag') or ''}</td><td>{d.get('netdisco_tag') or ''}</td>"
+                f"<td>{d.get('reason', '')}</td></tr>"
+            )
+        return f"<table>{header}{rows}</table>"
+
+    tag_mismatches_section = (
+        f"<h2>Auth tag mismatches ({len(tag_mismatches_list)})</h2>{_tag_mismatch_table(tag_mismatches_list)}"
+        if tag_mismatches_list else "<h2>Auth tag mismatches</h2><p>None</p>"
+    )
+
     return f"""<!doctype html><html><head><meta charset=utf-8>
 <title>discobox</title>
 <style>
@@ -1416,6 +1443,7 @@ async def index() -> str:
   <tr><td>GET</td><td><a href=/unknown-devices>/unknown-devices</a></td><td>Devices seen via LLDP but not found in Netbox (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/not-in-netdisco>/not-in-netdisco</a></td><td>Active Netbox devices not in Netdisco (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/not-in-netbox>/not-in-netbox</a></td><td>Netdisco devices not in Netbox (JSON)</td></tr>
+  <tr><td>GET</td><td><a href=/tag-mismatches>/tag-mismatches</a></td><td>Devices with a missing or Netbox-mismatched auth tag (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/metrics>/metrics</a></td><td>Prometheus metrics</td></tr>
   <tr><td>GET</td><td><a href=/health>/health</a></td><td>Liveness check</td></tr>
   <tr><td>GET</td><td><a href=/docs>/docs</a></td><td>Swagger UI</td></tr>
@@ -1423,6 +1451,7 @@ async def index() -> str:
 {unknown_section}
 {not_in_netdisco_section}
 {not_in_netbox_section}
+{tag_mismatches_section}
 </body></html>"""
 
 
@@ -1459,6 +1488,12 @@ async def not_in_netdisco() -> list:
 async def not_in_netbox() -> list:
     with _reconcile_gaps_lock:
         return _load_gap(_NOT_IN_NETBOX_FILE)
+
+
+@app.get("/tag-mismatches", summary="Netdisco devices with a missing or Netbox-mismatched auth tag (last reconcile)")
+async def tag_mismatches() -> list:
+    with _reconcile_gaps_lock:
+        return _load_gap(_TAG_MISMATCHES_FILE)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
