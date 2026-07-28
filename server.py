@@ -1505,8 +1505,9 @@ async def trigger_reconcile(
     return {"status": "reconcile queued", "max_enqueue": effective_max, "offset": offset}
 
 
-@app.post(
+@app.api_route(
     "/reconcile/fix-tags",
+    methods=["GET", "POST"],
     dependencies=[Depends(require_auth)],
     summary="Re-enqueue Netdisco discovery for devices from the last reconcile's tag-mismatch report",
 )
