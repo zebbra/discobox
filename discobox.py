@@ -441,6 +441,7 @@ class NetboxClient:
         existing: Optional[pynetbox.core.response.Record],
         source_cf: Optional[str] = None,
         source_value: str = "netdisco",
+        batch: Optional[list] = None,
     ) -> tuple:
         """
         Create or update a Netbox interface.
@@ -451,6 +452,14 @@ class NetboxClient:
         MAC address is handled separately via upsert_mac() because in Netbox 4.x
         it is its own model (dcim.mac-addresses) rather than a plain string field.
         Custom fields are compared key-by-key to avoid overwriting unrelated fields.
+
+        If batch is given, a field patch on an existing interface is appended to it
+        (as {"id": ..., **patch}) instead of being PATCHed immediately — the caller
+        is responsible for flushing it (e.g. via flush_interface_updates()) so that
+        one device's interface changes land in a single bulk request/changelog
+        request_id instead of one per interface. The in-memory record is updated
+        either way, so callers reading `iface` attributes see the new values
+        immediately regardless of whether the write has actually been flushed yet.
 
         Returns (action, iface) where action is one of: "created", "updated", "unchanged", "skipped".
         """
@@ -502,7 +511,16 @@ class NetboxClient:
                 if cf_patch:
                     patch["custom_fields"] = cf_patch
             if patch:
-                existing.update(patch)
+                if batch is not None:
+                    for k, v in patch.items():
+                        if k == "custom_fields":
+                            existing_cf = dict(getattr(existing, "custom_fields", {}) or {})
+                            existing.custom_fields = {**existing_cf, **v}
+                        else:
+                            setattr(existing, k, v)
+                    batch.append({"id": existing.id, **patch})
+                else:
+                    existing.update(patch)
                 action = "updated"
             else:
                 action = "unchanged"
@@ -512,6 +530,54 @@ class NetboxClient:
             self._upsert_mac(iface, mac)
 
         return action, iface
+
+    def _flush_bulk_update(
+        self, endpoint, batch: list, label: str, log: Optional[logging.Logger] = None,
+    ) -> set:
+        """
+        Send a batch of {"id": ..., **patch} dicts (built up by an upsert_*(..., batch=[])
+        call) to `endpoint` as a single bulk PATCH, so all resulting changelog entries
+        share one request_id instead of one per object.
+
+        If the bulk request fails (e.g. one bad item in the batch — Netbox bulk PATCH
+        is atomic, so one invalid item rolls back the whole request), falls back to
+        applying each patch individually so a single bad item doesn't silently drop
+        every other update in the batch.
+
+        Returns the set of ids that failed to update (empty on full success), so the
+        caller can correct any optimistic "updated" counts.
+        """
+        _log = log or logger
+        if not batch:
+            return set()
+        try:
+            endpoint.update(batch)
+            return set()
+        except Exception as exc:
+            _log.warning(
+                "Bulk %s update failed (%d items), falling back to per-item: %s",
+                label, len(batch), exc,
+            )
+        failed_ids: set = set()
+        for item in batch:
+            try:
+                endpoint.update([item])
+            except Exception as exc:
+                failed_ids.add(item["id"])
+                _log.error("  %s id=%s update error: %s", label, item["id"], exc)
+        return failed_ids
+
+    def flush_interface_updates(
+        self, batch: list, log: Optional[logging.Logger] = None,
+    ) -> set:
+        """Flush a batch of interface patches built up by upsert_interface(..., batch=[])."""
+        return self._flush_bulk_update(self.nb.dcim.interfaces, batch, "interface", log)
+
+    def flush_module_updates(
+        self, batch: list, log: Optional[logging.Logger] = None,
+    ) -> set:
+        """Flush a batch of module patches built up by upsert_module(..., batch=[])."""
+        return self._flush_bulk_update(self.nb.dcim.modules, batch, "module", log)
 
     def upsert_cable(
         self,
@@ -789,8 +855,15 @@ class NetboxClient:
         bay: pynetbox.core.response.Record,
         module_type: pynetbox.core.response.Record,
         serial: str,
+        batch: Optional[list] = None,
     ) -> tuple[str, pynetbox.core.response.Record]:
-        """Install or update a Module in a ModuleBay. Returns (action, module_record)."""
+        """
+        Install or update a Module in a ModuleBay. Returns (action, module_record).
+
+        If batch is given, a field patch on an existing module is appended to it
+        instead of being PATCHed immediately — see upsert_interface()'s batch
+        parameter for the full rationale. The in-memory record is updated either way.
+        """
         serial = serial or ""
         results = list(self.nb.dcim.modules.filter(module_bay_id=bay.id))
         existing = results[0] if results else None
@@ -802,7 +875,12 @@ class NetboxClient:
                 patch["serial"] = serial
             if not patch:
                 return "unchanged", existing
-            existing.update(patch)
+            if batch is not None:
+                for k, v in patch.items():
+                    setattr(existing, k, v)
+                batch.append({"id": existing.id, **patch})
+            else:
+                existing.update(patch)
             return "updated", existing
 
         # Note: the REST API has no replicate/adopt control (UI-form only, still
@@ -2684,6 +2762,8 @@ def sync_device(
 
     # slot_to_module populated during module sync; consumed by interface→module pass.
     slot_to_module: dict[int, int] = {}  # slot key (stack pos / FEX ID) → nb module id
+    module_patch_batch: list = []
+    module_names_by_id: dict[int, str] = {}
     # slot_to_device populated for VSS; used to route blades to the correct member device.
     slot_to_device: dict[int, object] = {}  # VSS pos → nb device record
     topo = "standalone"                   # updated inside sync_modules block
@@ -2783,8 +2863,10 @@ def sync_device(
             mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
             module_type = nb.get_or_create_module_type(mfr, model)
             bay = nb.upsert_module_bay(nb_device, name, position)
-            action, module = nb.upsert_module(nb_device, bay, module_type, serial)
+            action, module = nb.upsert_module(nb_device, bay, module_type, serial, batch=module_patch_batch)
             mod_counts[action] += 1
+            if action == "updated" and module:
+                module_names_by_id[module.id] = name
             if slot_key is not None and module:
                 slot_to_module[slot_key] = module.id
             log.debug("  %s  %s  serial=%s  %s", name, model, serial, action)
@@ -2914,6 +2996,13 @@ def sync_device(
                 except Exception as exc:
                     mod_counts["error"] += 1
                     log.error("  %-30s error: %s", ch.get("name", ""), exc)
+
+        if module_patch_batch:
+            failed_ids = nb.flush_module_updates(module_patch_batch, log=log)
+            for failed_id in failed_ids:
+                mod_counts["updated"] -= 1
+                mod_counts["error"] += 1
+                log.error("  %-30s failed to apply (see above)", module_names_by_id.get(failed_id, failed_id))
 
         log.debug(
             "Modules: updated=%d unchanged=%d errors=%d",
@@ -3149,6 +3238,8 @@ def sync_device(
         ]
         log.debug("Blades    entries: %d", len(blades))
         blade_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
+        blade_patch_batch: list = []
+        blade_names_by_id: dict[int, str] = {}
         for blade in blades:
             blade_name = blade.get("name") or ""
             blade_model = blade.get("model") or ""
@@ -3176,13 +3267,24 @@ def sync_device(
                 mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
                 module_type = nb.get_or_create_module_type(mfr, blade_model)
                 bay = nb.upsert_module_bay(target_device, blade_name, position)
-                action, _ = nb.upsert_module(target_device, bay, module_type, blade_serial)
+                action, blade_module = nb.upsert_module(
+                    target_device, bay, module_type, blade_serial, batch=blade_patch_batch,
+                )
                 blade_counts[action] += 1
+                if action == "updated" and blade_module:
+                    blade_names_by_id[blade_module.id] = blade_name
                 log.debug("  Blade %s  model=%s  serial=%s  %s",
                           blade_name, blade_model, blade_serial, action)
             except Exception as exc:
                 blade_counts["error"] += 1
                 log.error("  Blade %-35s error: %s", blade_name, exc)
+
+        if blade_patch_batch:
+            failed_ids = nb.flush_module_updates(blade_patch_batch, log=log)
+            for failed_id in failed_ids:
+                blade_counts["updated"] -= 1
+                blade_counts["error"] += 1
+                log.error("  Blade %-35s failed to apply (see above)", blade_names_by_id.get(failed_id, failed_id))
 
         log.debug(
             "Blades: created=%d updated=%d unchanged=%d errors=%d",
@@ -3259,6 +3361,8 @@ def sync_device(
     neighbors = neighbors_linked = 0
     seen_cable_iface_ids: set[int] = set()
     cable_counts: dict[str, int] = {"created": 0, "conflict": 0, "deleted": 0, "error": 0}
+    iface_patch_batch: list = []
+    iface_names_by_id: dict[int, str] = {}
     for port in nd_ports_sorted:
         iface_name = port.get("port") or port.get("descr") or "?"
         if iface_name.lower().startswith(PORT_BLACKLIST_PREFIXES):
@@ -3308,8 +3412,11 @@ def sync_device(
                     source_cf=iface_source_cf, source_value=iface_source_value,
                 ),
                 source_cf=iface_source_cf, source_value=iface_source_value,
+                batch=iface_patch_batch,
             )
             counts[action] += 1
+            if action == "updated" and nb_iface:
+                iface_names_by_id[nb_iface.id] = iface_name
             if action != "unchanged":
                 log.debug("  %-40s %s", iface_name, action)
             else:
@@ -3348,6 +3455,13 @@ def sync_device(
         except Exception as exc:
             counts["error"] += 1
             log.error("  %-40s error: %s", iface_name, exc)
+
+    if iface_patch_batch:
+        failed_ids = nb.flush_interface_updates(iface_patch_batch, log=log)
+        for failed_id in failed_ids:
+            counts["updated"] -= 1
+            counts["error"] += 1
+            log.error("  %-40s failed to apply (see above)", iface_names_by_id.get(failed_id, failed_id))
 
     if neighbors:
         log.debug("Neighbors  : found: %d  linked: %d  unresolved: %d",
