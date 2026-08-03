@@ -419,9 +419,9 @@ _RECONCILE_INTERVAL:      int           = int(_c(_CFG, "reconcile", "interval", 
 _RECONCILE_MAX_QUEUED:    Optional[int] = _c (_CFG, "reconcile", "max_queued",     default=None)
 _RECONCILE_MAX_FAILED:    Optional[int] = _c (_CFG, "reconcile", "max_failed",     default=None)
 _RECONCILE_MAX_ENQUEUE:   Optional[int] = _c (_CFG, "reconcile", "max_enqueue",    default=None)
-_RECONCILE_ROLES:         list[str]     = _clist(_CFG, "reconcile", "roles") or ["router", "switch", "firewall"]
+_RECONCILE_ROLES:         list[str]     = _clist(_CFG, "reconcile", "roles") or ["router", "switch", "firewall", "appliance"]
 _RECONCILE_STATUSES:      list[str]     = _clist(_CFG, "reconcile", "statuses") or ["active"]
-_RECONCILE_REQUIRE_AUTH_TAG: bool       = _cbool(_CFG, "reconcile", "require_auth_tag", default=False)
+_RECONCILE_REQUIRE_AUTH_TAG: bool       = _cbool(_CFG, "reconcile", "require_auth_tag", default=True)
 
 # Liveness gate: before enqueueing discovery, ask a Prometheus-compatible API
 # (VictoriaMetrics vmselect) which devices actually respond, and skip the dead
