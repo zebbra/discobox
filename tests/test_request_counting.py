@@ -16,7 +16,7 @@ from discobox import NetboxClient, _ChangelogSession
 
 def test_changelog_session_invokes_on_request(monkeypatch) -> None:
     calls: list[str] = []
-    session = _ChangelogSession("discobox", on_request=calls.append)
+    session = _ChangelogSession(on_request=calls.append)
 
     class _FakeResponse:
         status_code = 200
@@ -41,7 +41,7 @@ def test_netbox_client_wires_on_request_into_session() -> None:
 
 def test_no_on_request_is_a_safe_no_op() -> None:
     # Default (no callback) must not raise.
-    session = _ChangelogSession("discobox")
+    session = _ChangelogSession()
     session._on_request("GET")
 
 

@@ -299,19 +299,14 @@ class NetdiscoClient:
 # ── Netbox client ──────────────────────────────────────────────────────────────
 
 class _ChangelogSession(requests.Session):
-    """requests.Session that injects changelog_message into every write body."""
-    def __init__(self, changelog_message: str, on_request: Optional[Callable[[str], None]] = None):
+    """requests.Session that sets the discobox User-Agent and counts requests."""
+    def __init__(self, on_request: Optional[Callable[[str], None]] = None):
         super().__init__()
-        self._changelog_message = changelog_message
         self._on_request = on_request or (lambda method: None)
         self.headers.update({"User-Agent": "discobox"})
 
     def request(self, method, url, **kwargs):
         self._on_request(method.upper())
-        if method.upper() in ("POST", "PATCH", "PUT") and self._changelog_message:
-            json_data = kwargs.get("json")
-            if isinstance(json_data, dict):
-                kwargs["json"] = {**json_data, "changelog_message": self._changelog_message}
         return super().request(method, url, **kwargs)
 
 
@@ -321,10 +316,9 @@ class NetboxClient:
         url: str,
         token: str,
         verify_tls: bool = True,
-        changelog_message: str = "DiscoBox",
         on_request: Optional[Callable[[str], None]] = None,
     ):
-        session = _ChangelogSession(changelog_message, on_request=on_request)
+        session = _ChangelogSession(on_request=on_request)
         if not verify_tls:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             session.verify = False

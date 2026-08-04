@@ -519,7 +519,6 @@ def _get_netbox_client() -> NetboxClient:
                     url=os.environ["NETBOX_URL"],
                     token=os.environ["NETBOX_TOKEN"],
                     verify_tls=os.getenv("NETBOX_TLS_VERIFY", "true").lower() != "false",
-                    changelog_message="discobox",
                     on_request=_count_netbox_request,
                 )
     return _netbox_client
