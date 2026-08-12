@@ -964,6 +964,15 @@ class SyncResponse(BaseModel):
     reason: Optional[str] = None
 
 
+class RebuildResponse(BaseModel):
+    status: str
+    host: str
+    dry_run: bool
+    hostname: Optional[str] = None
+    prune: dict = {}
+    reason: Optional[str] = None
+
+
 # ── Background sync ────────────────────────────────────────────────────────────
 
 def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync_sfp: bool, sync_poe: bool, housekeeping: bool, lldp_clear_stale: bool = False, cf_neighbor_text: Optional[str] = None, cf_neighbor_port: Optional[str] = None, cf_neighbor_device: Optional[str] = None, cf_neighbor_iface: Optional[str] = None, cable_scope: str = "", cable_source_cf: Optional[str] = None, cable_source_value: Optional[str] = None, iface_source_cf: Optional[str] = None, iface_source_value: str = "netdisco", cf_os_version: Optional[str] = "os_version", cf_os_name: Optional[str] = "os_name", cf_os_release: Optional[str] = "os_release", cf_stack_members: Optional[str] = "stack_members", stack_members_only_increase: bool = True, cf_touch: Optional[str] = "netdisco_last_update", touch_cooldown_days: int = 1, ha_metrics_url: Optional[str] = None, ha_metrics_metric: str = "fgHaStatsSyncStatus_info", ha_metrics_hostname_label: str = "fgHaStatsHostname", ha_metrics_target_label: str = "netbox_primary_ip", ha_metrics_timeout: int = 15, ha_metrics_tls_verify: bool = True, ha_metrics_instance_label: str = "instance", ha_mgmt_iface_name: str = "mgmt1", _retry_count: int = 0) -> None:
@@ -1200,6 +1209,102 @@ async def sync(
     background_tasks.add_task(_run_sync, resolved_host, sync_mac, sync_ip, sync_modules, sync_sfp, sync_poe, housekeeping, lldp_clear_stale, _CF_NEIGHBOR_TEXT, _CF_NEIGHBOR_PORT, _CF_NEIGHBOR_DEVICE, _CF_NEIGHBOR_IFACE, _CABLE_SCOPE, _CABLE_SOURCE_CF, _CABLE_SOURCE_VALUE, _IFACE_SOURCE_CF, _IFACE_SOURCE_VALUE, _CF_OS_VERSION, _CF_OS_NAME, _CF_OS_RELEASE, _CF_STACK_MEMBERS, _STACK_MEMBERS_ONLY_INCREASE, _CF_TOUCH, 0 if force else _TOUCH_COOLDOWN_DAYS, _LIVENESS_URL, _HA_METRICS_METRIC, _HA_METRICS_HOSTNAME_LABEL, _HA_METRICS_TARGET_LABEL, _HA_METRICS_TIMEOUT, _LIVENESS_TLS_VERIFY, _HA_METRICS_INSTANCE_LABEL, _HA_MGMT_IFACE_NAME)
     logger.info("hook from %s: %s  queued", caller, resolved_host)
     return SyncResponse(status="queued", host=resolved_host)
+
+
+@app.api_route(
+    "/rebuild",
+    methods=["POST"],
+    response_model=RebuildResponse,
+    dependencies=[Depends(require_auth)],
+    summary="Rebuild one device's inventory to exactly match Netdisco (deletes stale interfaces/modules/inventory)",
+)
+async def rebuild(
+    host: Annotated[str, Query(description="Device management IP")],
+    dry_run: Annotated[bool, Query(description="Report what would be deleted without deleting anything")] = True,
+) -> RebuildResponse:
+    """
+    Reconcile one device's interfaces, chassis/blade modules, fans/PSUs, SFPs,
+    and stack_members to exactly what Netdisco reports right now — including
+    deletions. Unlike /sync this is destructive, so it's a separate, explicit,
+    synchronous call rather than something the regular background sync/hook
+    path ever does on its own.
+
+    Only discobox-owned interfaces (the `source` custom field) are ever
+    deleted. Modules/fans/PSUs/SFPs have no ownership marker, so a rebuild
+    trusts the current Netdisco snapshot as truth for those — except a module
+    bay whose installed module still has a non-netdisco-owned interface
+    attached is kept and logged as a warning/skip rather than deleted.
+
+    Bypasses the sync cooldown and touch-field throttle (a deliberate manual
+    action, not a hook), but still claims the host like /sync does so it
+    can't race a concurrent sync for the same device, and still respects the
+    global pause flag (skips rather than blocking if sync is paused).
+
+    Defaults to dry_run=true: nothing is deleted unless dry_run=false is
+    passed explicitly.
+    """
+    try:
+        resolved_host = validate_ip(host)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if _is_paused():
+        return RebuildResponse(status="skipped", host=resolved_host, dry_run=dry_run, reason="paused")
+
+    with _in_flight_lock:
+        if not _claim_host(resolved_host):
+            return RebuildResponse(
+                status="skipped", host=resolved_host, dry_run=dry_run, reason="already in progress",
+            )
+        _in_flight.add(resolved_host)
+
+    nd = _get_netdisco_client()
+    nb = _get_netbox_client()
+
+    def _do_rebuild() -> dict:
+        _sync_semaphore.acquire()
+        try:
+            return sync_device(
+                nd=nd, nb=nb, ip=resolved_host,
+                sync_mac=_DEFAULT_MAC, sync_ip=_DEFAULT_IP, sync_modules=_DEFAULT_MODULES,
+                sync_sfp=_DEFAULT_SFP, sync_poe=_DEFAULT_POE,
+                housekeeping=True, lldp_clear_stale=_DEFAULT_LLDP_CLEAR_STALE,
+                vip_mode=_VIP_MODE, vip_mode_by_vendor=_VIP_MODE_BY_VENDOR,
+                cf_neighbor_text=_CF_NEIGHBOR_TEXT, cf_neighbor_port=_CF_NEIGHBOR_PORT,
+                cf_neighbor_device=_CF_NEIGHBOR_DEVICE, cf_neighbor_iface=_CF_NEIGHBOR_IFACE,
+                cable_scope=_CABLE_SCOPE, cable_source_cf=_CABLE_SOURCE_CF, cable_source_value=_CABLE_SOURCE_VALUE,
+                iface_source_cf=_IFACE_SOURCE_CF, iface_source_value=_IFACE_SOURCE_VALUE,
+                cf_os_version=_CF_OS_VERSION, cf_os_name=_CF_OS_NAME, cf_os_release=_CF_OS_RELEASE,
+                cf_stack_members=_CF_STACK_MEMBERS, stack_members_only_increase=_STACK_MEMBERS_ONLY_INCREASE,
+                cf_touch=_CF_TOUCH, touch_cooldown_days=0,
+                ha_metrics_url=_LIVENESS_URL, ha_metrics_metric=_HA_METRICS_METRIC,
+                ha_metrics_hostname_label=_HA_METRICS_HOSTNAME_LABEL,
+                ha_metrics_target_label=_HA_METRICS_TARGET_LABEL,
+                ha_metrics_timeout=_HA_METRICS_TIMEOUT, ha_metrics_tls_verify=_LIVENESS_TLS_VERIFY,
+                ha_metrics_instance_label=_HA_METRICS_INSTANCE_LABEL, ha_mgmt_iface_name=_HA_MGMT_IFACE_NAME,
+                prune=True, dry_run=dry_run,
+            )
+        finally:
+            _sync_semaphore.release()
+
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, _do_rebuild)
+    finally:
+        _release_host(resolved_host)
+        with _in_flight_lock:
+            _in_flight.discard(resolved_host)
+
+    reason = result.get("reason")
+    status = "skipped" if reason else ("ok" if result.get("ok") else "error")
+    logger.info(
+        "rebuild %s for %s%s: %s", status, resolved_host, " [dry-run]" if dry_run else "",
+        result.get("prune", {}),
+    )
+    return RebuildResponse(
+        status=status, host=resolved_host, dry_run=dry_run,
+        hostname=result.get("hostname"), prune=result.get("prune", {}), reason=reason,
+    )
 
 
 def _enqueue_all(hosts: list, submit, limit: Optional[int] = None, force: bool = False) -> dict[str, int]:
@@ -1469,6 +1574,7 @@ async def index() -> str:
   <tr><th>Method</th><th>Path</th><th>Description</th></tr>
   <tr><td>POST</td><td><a href=/docs#/default/sync_sync_post>/sync</a>?host=&lt;ip&gt;</td><td>Sync one device's details from Netdisco to Netbox</td></tr>
   <tr><td>POST</td><td>/sync/all</td><td>Queue a sync for every known device from Netdisco to Netbox</td></tr>
+  <tr><td>POST</td><td>/rebuild?host=&lt;ip&gt;</td><td>Rebuild one device's inventory to exactly match Netdisco — deletes stale interfaces/modules/inventory (dry_run=true by default)</td></tr>
   <tr><td>POST</td><td>/sync/pause</td><td>Pause queued syncs</td></tr>
   <tr><td>POST</td><td>/sync/resume</td><td>Resume queued syncs</td></tr>
   <tr><td>POST</td><td>/reconcile</td><td>Trigger reconcile: enqueue Netdisco discovery for Netbox devices Netdisco doesn't know yet</td></tr>

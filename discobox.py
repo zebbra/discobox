@@ -1156,6 +1156,145 @@ class NetboxClient:
             deleted += 1
         return deleted
 
+    def remove_stale_interfaces(
+        self,
+        device: pynetbox.core.response.Record,
+        current_names: set[str],
+        source_cf: Optional[str],
+        source_value: str,
+        dry_run: bool = True,
+    ) -> int:
+        """
+        Delete discobox-owned interfaces on `device` that Netdisco no longer reports.
+
+        Only interfaces whose custom_fields[source_cf] == source_value are touched —
+        an interface with no ownership marker, or owned by something else, is left
+        alone regardless of whether it's in current_names.
+
+        Returns the number of interfaces deleted (or that would be, under dry_run).
+        """
+        if not source_cf:
+            return 0
+        lower_names = {n.lower() for n in current_names}
+        deleted = 0
+        for iface in self.nb.dcim.interfaces.filter(device_id=device.id):
+            if not iface.name or iface.name.lower() in lower_names:
+                continue
+            owner = dict(getattr(iface, "custom_fields", {}) or {}).get(source_cf) or ""
+            if owner != source_value:
+                continue
+            if dry_run:
+                logger.info("  [dry-run] would delete stale interface %r", iface.name)
+            else:
+                iface.delete()
+                logger.info("  Deleted stale interface %r", iface.name)
+            deleted += 1
+        return deleted
+
+    def remove_stale_modules(
+        self,
+        device: pynetbox.core.response.Record,
+        current_bay_names: set[str],
+        iface_source_cf: Optional[str],
+        iface_source_value: str,
+        dry_run: bool = True,
+    ) -> tuple[int, int]:
+        """
+        Delete module bays (+ their installed module) on `device` that Netdisco no
+        longer reports as a chassis member / blade.
+
+        A bay is kept (and the skip logged as a warning) if its installed module
+        still has an interface attached that isn't discobox-owned — deleting the
+        module would orphan someone else's manually-managed interface. Run
+        remove_stale_interfaces() first so any discobox-owned interfaces on a
+        genuinely-removed module are already gone by the time this runs.
+
+        Returns (deleted, skipped_foreign).
+        """
+        deleted = 0
+        skipped_foreign = 0
+        for bay in self.nb.dcim.module_bays.filter(device_id=device.id):
+            if bay.name in current_bay_names:
+                continue
+            module = getattr(bay, "installed_module", None)
+            if module:
+                foreign = [
+                    iface for iface in self.nb.dcim.interfaces.filter(module_id=module.id)
+                    if (dict(getattr(iface, "custom_fields", {}) or {}).get(iface_source_cf or "") or "")
+                    != iface_source_value
+                ]
+                if foreign:
+                    logger.warning(
+                        "  Module bay %r: kept — %d non-netdisco interface(s) still attached",
+                        bay.name, len(foreign),
+                    )
+                    skipped_foreign += 1
+                    continue
+                if dry_run:
+                    logger.info("  [dry-run] would delete module %r in bay %r", module, bay.name)
+                else:
+                    module.delete()
+            if dry_run:
+                logger.info("  [dry-run] would delete module bay %r", bay.name)
+            else:
+                bay.delete()
+                logger.info("  Deleted stale module bay %r", bay.name)
+            deleted += 1
+        return deleted, skipped_foreign
+
+    def remove_stale_bare_inventory_items(
+        self,
+        device: pynetbox.core.response.Record,
+        current_names: set[str],
+        dry_run: bool = True,
+    ) -> int:
+        """
+        Delete device-level Inventory Items (fans, PSUs — no component link) that
+        Netdisco no longer reports. Items linked to an interface (SFPs) are left to
+        remove_stale_sfps() instead.
+
+        Returns the number of items deleted (or that would be, under dry_run).
+        """
+        deleted = 0
+        for item in self.nb.dcim.inventory_items.filter(device_id=device.id):
+            if getattr(item, "component_type", None):
+                continue
+            if item.name in current_names:
+                continue
+            if dry_run:
+                logger.info("  [dry-run] would delete inventory item %r", item.name)
+            else:
+                item.delete()
+                logger.info("  Deleted stale inventory item %r", item.name)
+            deleted += 1
+        return deleted
+
+    def remove_stale_sfps(
+        self,
+        device: pynetbox.core.response.Record,
+        current_iface_ids: set[int],
+        dry_run: bool = True,
+    ) -> int:
+        """
+        Delete SFP Inventory Items (component-linked to an interface) on `device`
+        whose interface no longer reports an SFP in this Netdisco snapshot.
+
+        Returns the number of items deleted (or that would be, under dry_run).
+        """
+        deleted = 0
+        for item in self.nb.dcim.inventory_items.filter(
+            device_id=device.id, component_type="dcim.interface",
+        ):
+            if item.component_id in current_iface_ids:
+                continue
+            if dry_run:
+                logger.info("  [dry-run] would delete SFP inventory item %r", item.name)
+            else:
+                item.delete()
+                logger.info("  Deleted stale SFP inventory item %r", item.name)
+            deleted += 1
+        return deleted
+
     def upsert_sfp(
         self,
         device: pynetbox.core.response.Record,
@@ -2470,6 +2609,8 @@ def sync_device(
     ha_metrics_tls_verify: bool = True,
     ha_metrics_instance_label: str = "instance",
     ha_mgmt_iface_name: str = "mgmt1",
+    prune: bool = False,
+    dry_run: bool = True,
 ) -> dict:
     """
     Sync device fields, interfaces, MACs, IPs, modules, and SFPs.
@@ -2479,6 +2620,14 @@ def sync_device(
       interfaces  dict  : created/updated/unchanged/error counts
       ips         dict  : created/fixed/moved/unchanged/skipped/error counts
       modules     dict  : created/updated/unchanged/error counts
+      prune       dict  : only present when prune=True — deletion counts (see below)
+
+    prune=True additionally reconciles this device's interfaces, chassis/blade
+    modules, fans/PSUs, and SFP inventory items to exactly what this Netdisco
+    snapshot reports, deleting anything else, and bypasses the stack_members
+    increase-only ratchet. Unlike the rest of sync_device this is destructive —
+    it's meant for an explicit manual rebuild, never the regular background sync.
+    dry_run (default True) reports what prune would delete without deleting it.
     """
     log = logging.getLogger(f"discobox.{ip}")
 
@@ -2738,13 +2887,16 @@ def sync_device(
                                cf_os_version=cf_os_version, cf_os_name=cf_os_name, cf_os_release=cf_os_release):
         device_changed = True
 
+    # Hoisted above the housekeeping guard: prune (below) needs it too, and it's
+    # cheap — just a comprehension over ports already fetched.
+    nd_port_names = {
+        p.get("port") or p.get("descr") for p in nd_ports
+        if p.get("port") or p.get("descr")
+    }
+
     if housekeeping:
         deleted_bays = nb.remove_stale_device_bays(nb_device, STALE_DEVICE_BAY_PATTERNS)
         deleted_mod_bays = nb.remove_stale_module_bays(nb_device, STALE_DEVICE_BAY_PATTERNS)
-        nd_port_names = {
-            p.get("port") or p.get("descr") for p in nd_ports
-            if p.get("port") or p.get("descr")
-        }
         deleted_ifaces = nb.remove_empty_dummy_interfaces(nb_device, DUMMY_INTERFACES, nd_port_names)
         if deleted_bays or deleted_mod_bays or deleted_ifaces:
             device_changed = True
@@ -2765,6 +2917,12 @@ def sync_device(
     # slot_to_device populated for VSS; used to route blades to the correct member device.
     slot_to_device: dict[int, object] = {}  # VSS pos → nb device record
     topo = "standalone"                   # updated inside sync_modules block
+
+    # prune-only bookkeeping: names/ids claimed by this run, per target device —
+    # anything already in Netbox but not in these sets is a candidate for deletion.
+    current_module_names_by_device: dict[int, set[str]] = {}
+    current_bare_inventory_names_by_device: dict[int, set[str]] = {}
+    current_sfp_iface_ids: set[int] = set()
 
     # ── Modules (before interfaces so bays exist when interfaces are assigned) ────
 
@@ -2806,10 +2964,19 @@ def sync_device(
         if cf_stack_members and member_count is not None:
             current_cf = dict(getattr(nb_device, "custom_fields", {}) or {})
             current_value = current_cf.get(cf_stack_members)
-            if _should_update_stack_members(current_value, member_count, stack_members_only_increase):
-                if nb_device.update({"custom_fields": {cf_stack_members: member_count}}):
-                    device_changed = True
-                log.debug("  %s=%d updated", cf_stack_members, member_count)
+            # A rebuild (prune) force-corrects the count, including decreases —
+            # the regular background sync never bypasses the ratchet.
+            effective_only_increase = stack_members_only_increase and not prune
+            if _should_update_stack_members(current_value, member_count, effective_only_increase):
+                if prune and dry_run:
+                    log.info(
+                        "  [dry-run] would set %s=%d (was %r)",
+                        cf_stack_members, member_count, current_value,
+                    )
+                else:
+                    if nb_device.update({"custom_fields": {cf_stack_members: member_count}}):
+                        device_changed = True
+                    log.debug("  %s=%d updated", cf_stack_members, member_count)
             elif current_value != member_count:
                 log.debug(
                     "  %s: keeping %s (new count %d is lower — a dead member shouldn't reduce it)",
@@ -2867,6 +3034,7 @@ def sync_device(
                 module_names_by_id[module.id] = name
             if slot_key is not None and module:
                 slot_to_module[slot_key] = module.id
+            current_module_names_by_device.setdefault(nb_device.id, set()).add(name)
             log.debug("  %s  %s  serial=%s  %s", name, model, serial, action)
 
         if is_standalone:
@@ -3047,6 +3215,7 @@ def sync_device(
                         fan_model, fan_serial,
                     )
                     fan_counts[action] += 1
+                    current_bare_inventory_names_by_device.setdefault(fan_target.id, set()).add(fan_name)
                     if action != "unchanged":
                         log.debug("  Fan  %s  model=%s  serial=%s  %s",
                                   fan_name, fan_model or "-", fan_serial or "-", action)
@@ -3086,6 +3255,7 @@ def sync_device(
                     psu_model, psu_serial,
                 )
                 psu_counts[action] += 1
+                current_bare_inventory_names_by_device.setdefault(psu_target.id, set()).add(psu_name)
                 if action != "unchanged":
                     log.debug("  PSU %s  model=%s  serial=%s  %s",
                               psu_name, psu_model or "-", psu_serial or "-", action)
@@ -3271,6 +3441,7 @@ def sync_device(
                 blade_counts[action] += 1
                 if action == "updated" and blade_module:
                     blade_names_by_id[blade_module.id] = blade_name
+                current_module_names_by_device.setdefault(target_device.id, set()).add(blade_name)
                 log.debug("  Blade %s  model=%s  serial=%s  %s",
                           blade_name, blade_model, blade_serial, action)
             except Exception as exc:
@@ -3712,6 +3883,7 @@ def sync_device(
             try:
                 action = nb.upsert_sfp(target_device, iface, manufacturer, name, model, serial)
                 sfp_counts[action] += 1
+                current_sfp_iface_ids.add(iface.id)
                 if action != "unchanged":
                     log.debug("  SFP %-20s model=%-20s serial=%s → %s", name, model, serial, action)
                 else:
@@ -3770,6 +3942,51 @@ def sync_device(
                 device_changed = True
                 break
 
+    prune_counts: dict[str, int] = {}
+    if prune:
+        prune_counts = {
+            "interfaces_deleted": 0,
+            "modules_deleted": 0,
+            "modules_skipped_foreign": 0,
+            "inventory_deleted": 0,
+            "sfps_deleted": 0,
+        }
+        devices_to_prune = {nb_device.id: nb_device}
+        for dev in slot_to_device.values():
+            devices_to_prune[dev.id] = dev
+        for dev in devices_to_prune.values():
+            prune_counts["interfaces_deleted"] += nb.remove_stale_interfaces(
+                dev, nd_port_names, iface_source_cf, iface_source_value, dry_run=dry_run,
+            )
+            # Modules/fans/PSUs/SFPs are only pruned when this run actually synced
+            # them — current_*_by_device would otherwise be empty (nothing "current"
+            # was recorded this run) and every existing item would look stale.
+            if sync_modules:
+                mod_deleted, mod_skipped = nb.remove_stale_modules(
+                    dev, current_module_names_by_device.get(dev.id, set()),
+                    iface_source_cf, iface_source_value, dry_run=dry_run,
+                )
+                prune_counts["modules_deleted"] += mod_deleted
+                prune_counts["modules_skipped_foreign"] += mod_skipped
+                prune_counts["inventory_deleted"] += nb.remove_stale_bare_inventory_items(
+                    dev, current_bare_inventory_names_by_device.get(dev.id, set()), dry_run=dry_run,
+                )
+            if sync_sfp:
+                prune_counts["sfps_deleted"] += nb.remove_stale_sfps(
+                    dev, current_sfp_iface_ids, dry_run=dry_run,
+                )
+        log.info(
+            "Prune%s: interfaces=%d modules=%d (skipped_foreign=%d) inventory=%d sfps=%d",
+            " [dry-run]" if dry_run else "",
+            prune_counts["interfaces_deleted"], prune_counts["modules_deleted"],
+            prune_counts["modules_skipped_foreign"], prune_counts["inventory_deleted"],
+            prune_counts["sfps_deleted"],
+        )
+        if not dry_run and any(
+            prune_counts[k] for k in ("interfaces_deleted", "modules_deleted", "inventory_deleted", "sfps_deleted")
+        ):
+            device_changed = True
+
     if cf_touch and device_changed:
         try:
             nb_device.update({"custom_fields": {cf_touch: date.today().isoformat()}})
@@ -3807,6 +4024,7 @@ def sync_device(
         "modules": mod_counts if sync_modules else {},
         "sfps": sfp_counts if sync_sfp else {},
         "ha_vip": vip_device is not None,
+        **({"prune": prune_counts} if prune else {}),
     }
 
 
