@@ -518,6 +518,25 @@ def test_port_to_netbox_disabled_and_zero_speed() -> None:
     assert out["description"] == "SSL VPN interface"
 
 
+def test_port_to_netbox_oper_down_suppresses_speed() -> None:
+    # Admin-up but oper-down (e.g. unplugged/flapping) — ifSpeed is unreliable
+    # while down (some platforms report 0 instead of the nominal speed), so it
+    # must not overwrite the last known-good value in Netbox.
+    port = {
+        "port": "Gi1/0/1", "name": "Gi1/0/1", "descr": "",
+        "type": "ethernetCsmacd", "up_admin": "up", "up": "down",
+        "speed": "1 Gbps", "duplex": None, "duplex_admin": None,
+        "mac": None, "mtu": 1500,
+    }
+    out = port_to_netbox(port)
+    assert out["enabled"] is True           # admin state unaffected
+    assert out["speed"] is None             # oper down → speed suppressed
+
+    port["up"] = "up"
+    out = port_to_netbox(port)
+    assert out["speed"] == 1_000_000        # oper up → speed synced normally
+
+
 def test_port_to_netbox_null_mac() -> None:
     # All-zero MAC must be cleaned to None.
     port = {
@@ -681,6 +700,7 @@ if __name__ == "__main__":
     test_port_to_netbox_fortiproxy_lag()
     test_port_to_netbox_fortiproxy_l2vlan()
     test_port_to_netbox_disabled_and_zero_speed()
+    test_port_to_netbox_oper_down_suppresses_speed()
     test_port_to_netbox_null_mac()
     test_port_to_netbox_over_fortiproxy_sample()
     test_vendor_from_chassis_over_fortinet_samples()

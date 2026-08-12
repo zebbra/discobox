@@ -1514,8 +1514,12 @@ def port_to_netbox(
       up_admin          "up" / "down"  →  Netbox enabled (bool)
       speed             "10 Mbps"      →  Netbox speed in kbps
       duplex            operational duplex; may be NULL → fall back to duplex_admin
+      up                operational state; only gates speed (never written to Netbox
+                         itself) — ifSpeed is unreliable while a link is down (some
+                         platforms report 0 rather than the nominal speed), so a flap
+                         must not clobber the last known-good value.
     """
-    speed_kbps = parse_speed_kbps(port.get("speed"))
+    speed_kbps = None if (port.get("up") or "").lower() == "down" else parse_speed_kbps(port.get("speed"))
 
     raw_duplex = port.get("duplex") or port.get("duplex_admin")
     duplex = raw_duplex if raw_duplex in ("full", "half", "auto") else None
