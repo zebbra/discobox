@@ -2923,6 +2923,7 @@ def sync_device(
     current_module_names_by_device: dict[int, set[str]] = {}
     current_bare_inventory_names_by_device: dict[int, set[str]] = {}
     current_sfp_iface_ids: set[int] = set()
+    stack_members_prune_result: dict = {}
 
     # ── Modules (before interfaces so bays exist when interfaces are assigned) ────
 
@@ -2961,27 +2962,50 @@ def sync_device(
         log.debug("Modules   chassis=%d  topology=%s", len(chassis), topo)
 
         member_count = _stack_member_count(topo, chassis)
-        if cf_stack_members and member_count is not None:
+        if cf_stack_members:
             current_cf = dict(getattr(nb_device, "custom_fields", {}) or {})
             current_value = current_cf.get(cf_stack_members)
-            # A rebuild (prune) force-corrects the count, including decreases —
-            # the regular background sync never bypasses the ratchet.
-            effective_only_increase = stack_members_only_increase and not prune
-            if _should_update_stack_members(current_value, member_count, effective_only_increase):
-                if prune and dry_run:
-                    log.info(
-                        "  [dry-run] would set %s=%d (was %r)",
-                        cf_stack_members, member_count, current_value,
+            if member_count is not None:
+                # A rebuild (prune) force-corrects the count, including decreases —
+                # the regular background sync never bypasses the ratchet.
+                effective_only_increase = stack_members_only_increase and not prune
+                if _should_update_stack_members(current_value, member_count, effective_only_increase):
+                    if prune and dry_run:
+                        log.info(
+                            "  [dry-run] would set %s=%d (was %r)",
+                            cf_stack_members, member_count, current_value,
+                        )
+                        stack_members_prune_result = {"was": current_value, "now": member_count}
+                    else:
+                        if nb_device.update({"custom_fields": {cf_stack_members: member_count}}):
+                            device_changed = True
+                        log.debug("  %s=%d updated", cf_stack_members, member_count)
+                        if prune:
+                            stack_members_prune_result = {"was": current_value, "now": member_count}
+                elif current_value != member_count:
+                    log.debug(
+                        "  %s: keeping %s (new count %d is lower — a dead member shouldn't reduce it)",
+                        cf_stack_members, current_value, member_count,
                     )
+            elif prune and current_value not in (None, ""):
+                # _stack_member_count() only recognizes a genuine multi-member "stack"
+                # topology — a stack that's degraded to its last member (or was
+                # reclassified as standalone/VSS/FEX) reports None here on purpose, so
+                # the regular sync leaves a stale count alone rather than guessing. A
+                # rebuild instead clears it: the current snapshot no longer supports
+                # any specific number, so an unsupported leftover count is worse than
+                # no value at all.
+                if dry_run:
+                    log.info(
+                        "  [dry-run] would clear %s (was %r — topology now %s)",
+                        cf_stack_members, current_value, topo,
+                    )
+                    stack_members_prune_result = {"was": current_value, "now": None}
                 else:
-                    if nb_device.update({"custom_fields": {cf_stack_members: member_count}}):
+                    if nb_device.update({"custom_fields": {cf_stack_members: None}}):
                         device_changed = True
-                    log.debug("  %s=%d updated", cf_stack_members, member_count)
-            elif current_value != member_count:
-                log.debug(
-                    "  %s: keeping %s (new count %d is lower — a dead member shouldn't reduce it)",
-                    cf_stack_members, current_value, member_count,
-                )
+                    log.debug("  %s cleared (topology now %s)", cf_stack_members, topo)
+                    stack_members_prune_result = {"was": current_value, "now": None}
 
         manufacturer = nb_device.device_type.manufacturer
 
@@ -3942,7 +3966,7 @@ def sync_device(
                 device_changed = True
                 break
 
-    prune_counts: dict[str, int] = {}
+    prune_counts: dict = {}
     if prune:
         prune_counts = {
             "interfaces_deleted": 0,
@@ -3950,6 +3974,7 @@ def sync_device(
             "modules_skipped_foreign": 0,
             "inventory_deleted": 0,
             "sfps_deleted": 0,
+            "stack_members": stack_members_prune_result,
         }
         devices_to_prune = {nb_device.id: nb_device}
         for dev in slot_to_device.values():
