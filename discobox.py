@@ -3179,7 +3179,21 @@ def sync_device(
                 slot_to_device[_pos] = _dev
 
         else:
-            # Traditional stack: create a module bay + module per chassis member.
+            # Traditional stack: correct the top-level device's DeviceType from the
+            # stack master (matched by serial, same as the FEX/VSS primary lookup
+            # above) — otherwise a device's DeviceType is only ever set once, at
+            # creation, and never revisited once it's syncing as a multi-member
+            # stack (e.g. hardware swapped from a standalone 3850 to a 9300L
+            # stack: nothing below this point would ever correct it).
+            device_serial = nd_device.get("serial", "")
+            master = next((c for c in chassis if c.get("serial") == device_serial), chassis[0])
+            try:
+                _update_device_type(master)
+            except Exception as exc:
+                mod_counts["error"] += 1
+                log.error("  DeviceType update error: %s", exc)
+
+            # Create a module bay + module per chassis member.
             # Netdisco pos is 0-indexed; Cisco interface names are 1-indexed (Gi1/0/1 = member 1).
             for ch in chassis:
                 try:
