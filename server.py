@@ -40,6 +40,7 @@ from requests.exceptions import HTTPError, ReadTimeout
 from discobox import (
     NetboxClient,
     NetdiscoClient,
+    __version__,
     _recently_touched,
     fetch_liveness,
     fix_tag_mismatches,
@@ -694,7 +695,7 @@ async def lifespan(app):
 app = FastAPI(
     title="discobox",
     description="Netdisco → Netbox sync webhook receiver",
-    version="1.0.0",
+    version=__version__,
     lifespan=lifespan,
 )
 
@@ -1569,7 +1570,7 @@ async def index() -> str:
   .endpoints td:first-child {{ color: #55efc4; }} .endpoints td:nth-child(2) {{ color: #fdcb6e; }}
   a {{ color: #74b9ff; }}
 </style></head><body>
-<h1>discobox</h1>
+<h1>discobox <small style="color:#888;font-size:.5em">v{__version__}</small></h1>
 <p>Status: <span class="badge">{status_label}</span>
 &nbsp; In-flight: <b>{len(in_flight)}</b>
 &nbsp; Unknown devices: <b>{unknown_count}</b>
@@ -1603,7 +1604,7 @@ async def index() -> str:
 
 @app.get("/health", summary="Liveness check")
 async def health() -> dict:
-    return {"status": "ok", "paused": _is_paused(), "in_flight": _inflight_hosts()}
+    return {"status": "ok", "version": __version__, "paused": _is_paused(), "in_flight": _inflight_hosts()}
 
 
 @app.api_route("/reconcile", methods=["GET", "POST"], dependencies=[Depends(require_auth)], summary="Trigger reconcile run manually")
