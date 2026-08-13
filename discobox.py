@@ -3978,7 +3978,7 @@ def sync_device(
 
     if sync_poe:
         try:
-            powered_ports = nd.get_powered_ports(ip)
+            powered_ports = nd.get_powered_ports(nd_ip)
         except requests.HTTPError as exc:
             _reraise_if_gateway_error(exc)
             log.warning("Could not fetch powered ports (device may not support PoE): %s", exc)
