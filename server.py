@@ -7,13 +7,14 @@ Syncs run in a background thread pool; duplicate requests for the
 same host are dropped while a sync is already in progress.
 
 Endpoints:
-  POST /sync             Trigger a device sync
-  POST /sync/all         Queue a sync for every device known to Netdisco
-  POST /sync/pause       Hold queued syncs from starting
-  POST /sync/resume      Release the pause gate
-  GET  /metrics          Prometheus metrics
-  GET  /health           Liveness check
-  GET  /docs             Swagger UI (auto-generated)
+  GET/POST /sync             Trigger a device sync
+  GET/POST /sync/all         Queue a sync for every device known to Netdisco
+  GET/POST /rebuild          Rebuild one device's inventory to exactly match Netdisco (deletes stale entries)
+  GET/POST /sync/pause       Hold queued syncs from starting
+  GET/POST /sync/resume      Release the pause gate
+  GET      /metrics          Prometheus metrics
+  GET      /health           Liveness check
+  GET      /docs             Swagger UI (auto-generated)
 """
 
 import asyncio
@@ -24,6 +25,7 @@ import threading
 import time
 from collections import deque
 from contextlib import asynccontextmanager
+from datetime import date, timedelta
 from functools import partial
 from typing import Annotated, Any, Optional
 
@@ -1213,7 +1215,7 @@ async def sync(
 
 @app.api_route(
     "/rebuild",
-    methods=["POST"],
+    methods=["GET", "POST"],
     response_model=RebuildResponse,
     dependencies=[Depends(require_auth)],
     summary="Rebuild one device's inventory to exactly match Netdisco (deletes stale interfaces/modules/inventory)",
@@ -1474,6 +1476,7 @@ async def resume() -> dict:
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def index() -> str:
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
     paused = _is_paused()
     with _unknown_devices_lock:
         unknown_count = len(_load_unknown_devices())
@@ -1572,13 +1575,13 @@ async def index() -> str:
 <h2>Endpoints</h2>
 <table class="endpoints">
   <tr><th>Method</th><th>Path</th><th>Description</th></tr>
-  <tr><td>POST</td><td><a href=/docs#/default/sync_sync_post>/sync</a>?host=&lt;ip&gt;</td><td>Sync one device's details from Netdisco to Netbox</td></tr>
-  <tr><td>POST</td><td>/sync/all</td><td>Queue a sync for every known device from Netdisco to Netbox</td></tr>
-  <tr><td>POST</td><td>/rebuild?host=&lt;ip&gt;</td><td>Rebuild one device's inventory to exactly match Netdisco — deletes stale interfaces/modules/inventory (dry_run=true by default)</td></tr>
-  <tr><td>POST</td><td>/sync/pause</td><td>Pause queued syncs</td></tr>
-  <tr><td>POST</td><td>/sync/resume</td><td>Resume queued syncs</td></tr>
-  <tr><td>POST</td><td>/reconcile</td><td>Trigger reconcile: enqueue Netdisco discovery for Netbox devices Netdisco doesn't know yet</td></tr>
-  <tr><td>POST</td><td>/reconcile/fix-tags</td><td>Re-enqueue discovery (with Netbox's expected auth tag as a hint) for the last reconcile's tag mismatches</td></tr>
+  <tr><td>GET/POST</td><td><a href=/docs#/default/sync_sync_post>/sync</a>?host=&lt;ip&gt;</td><td>Sync one device's details from Netdisco to Netbox</td></tr>
+  <tr><td>GET/POST</td><td><a href="/sync/all?last_updated__lt={yesterday}">/sync/all?last_updated__lt={yesterday}</a></td><td>Queue a sync for every known device from Netdisco to Netbox — sample filters devices to Netbox's own <code>last_updated</code> (any Netbox device filter works, e.g. <code>site=</code>, <code>role=</code>); no filter at all queues the entire fleet</td></tr>
+  <tr><td>GET/POST</td><td><a href=/docs#/default/rebuild_rebuild_post>/rebuild</a>?host=&lt;ip&gt;&dry_run=true</td><td>Rebuild one device's inventory to exactly match Netdisco — deletes stale interfaces/modules/inventory (dry_run=true by default)</td></tr>
+  <tr><td>GET/POST</td><td><a href=/sync/pause>/sync/pause</a></td><td>Pause queued syncs</td></tr>
+  <tr><td>GET/POST</td><td><a href=/sync/resume>/sync/resume</a></td><td>Resume queued syncs</td></tr>
+  <tr><td>GET/POST</td><td><a href=/reconcile>/reconcile</a></td><td>Trigger reconcile: enqueue Netdisco discovery for Netbox devices Netdisco doesn't know yet</td></tr>
+  <tr><td>GET/POST</td><td><a href=/reconcile/fix-tags>/reconcile/fix-tags</a></td><td>Re-enqueue discovery (with Netbox's expected auth tag as a hint) for the last reconcile's tag mismatches</td></tr>
   <tr><td>GET</td><td><a href=/unknown-devices>/unknown-devices</a></td><td>Devices seen via LLDP but not found in Netbox (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/not-in-netdisco>/not-in-netdisco</a></td><td>Active Netbox devices not in Netdisco (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/not-in-netbox>/not-in-netbox</a></td><td>Netdisco devices not in Netbox (JSON)</td></tr>
