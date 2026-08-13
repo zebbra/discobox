@@ -1694,7 +1694,10 @@ if __name__ == "__main__":
         local_ip = socket.gethostbyname(socket.gethostname())
     except Exception:
         local_ip = "unknown"
-    logger.info("discobox server starting on port %d (%d workers): outbound IP: %s", port, workers, local_ip)
+    logger.info(
+        "discobox v%s starting on port %d (%d workers): outbound IP: %s",
+        __version__, port, workers, local_ip,
+    )
     uvicorn.run(
         "server:app",
         host="0.0.0.0",
