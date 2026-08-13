@@ -215,6 +215,9 @@ def test_ha_node_info() -> None:
     # Fortinet pNh convention
     assert _ha_node_info("zcgate0005p1h") == (1, "zcgate0005", "zcgate0005p0h")
     assert _ha_node_info("zcgate0005p2h") == (2, "zcgate0005", "zcgate0005p0h")
+    # pNv cluster convention (e.g. FortiAnalyzer VM cluster) — same shape, different suffix letter
+    assert _ha_node_info("zcmgt0004p1v") == (1, "zcmgt0004", "zcmgt0004p0v")
+    assert _ha_node_info("zcmgt0004p2v") == (2, "zcmgt0004", "zcmgt0004p0v")
     # nodeN and -N conventions
     assert _ha_node_info("fw-node2") == (2, "fw", "fw-node0")
     assert _ha_node_info("gw-1") == (1, "gw", "gw-0")

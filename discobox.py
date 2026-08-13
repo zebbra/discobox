@@ -254,6 +254,23 @@ class NetdiscoClient:
             return result[0] if result else {}
         return result
 
+    def find_canonical_ip(self, ip: str) -> Optional[str]:
+        """
+        Resolve `ip` to a device's own canonical IP via Netdisco's device search,
+        which (unlike get_device) matches against ANY IP Netdisco knows for a
+        device, not just the one it's keyed on.
+
+        For clustered devices, Netbox's primary_ip4 is sometimes the shared/
+        floating address rather than the member's own management IP — Netdisco
+        only discovers/polls the latter, so /object/device/{floating_ip} 404s
+        even though Netdisco knows the device perfectly well under a different
+        IP. Returns None on no match or an ambiguous (>1) match — never guesses.
+        """
+        result = self._get(f"/api/v1/search/device?ip={ip}&matchall=false&seeallcolumns=false")
+        if isinstance(result, list) and len(result) == 1:
+            return result[0].get("ip") or None
+        return None
+
     def get_ports(self, ip: str) -> list[dict]:
         return self._get(f"/api/v1/object/device/{ip}/ports")
 
@@ -966,7 +983,7 @@ class NetboxClient:
         """
         short = device_name.split(".")[0]
         suffix = device_name[len(short):]
-        m = re.search(r"(p|node|-)([12])(h?)", short, re.IGNORECASE)
+        m = re.search(r"(p|node|-)([12])([a-z]?)", short, re.IGNORECASE)
         if not m:
             return None
         other = "2" if m.group(2) == "1" else "1"
@@ -1490,8 +1507,9 @@ def _ha_node_info(short: str) -> Optional[tuple[int, str, str]]:
     Returns (node_num, vc_base, vip_short) or None when no indicator matches:
       "zcgate0005p1h" → (1, "zcgate0005", "zcgate0005p0h")
       "fw-node2"      → (2, "fw", "fw-node0")
+      "zcmgt0004p1v"  → (1, "zcmgt0004", "zcmgt0004p0v")
     """
-    m = re.search(r"(p|node|-)([12])(h?)", short, re.IGNORECASE)
+    m = re.search(r"(p|node|-)([12])([a-z]?)", short, re.IGNORECASE)
     if not m:
         return None
     node_num = int(m.group(2))
@@ -2633,13 +2651,30 @@ def sync_device(
     """
     log = logging.getLogger(f"discobox.{ip}")
 
+    # nd_ip is what every subsequent Netdisco call uses; ip (Netbox's primary_ip4)
+    # stays the identity for Netbox-side lookups/logging regardless.
+    nd_ip = ip
     try:
-        nd_device = nd.get_device(ip)
-        nd_ports = nd.get_ports(ip)
+        nd_device = nd.get_device(nd_ip)
+        nd_ports = nd.get_ports(nd_ip)
     except requests.HTTPError as exc:
         _reraise_if_gateway_error(exc)
-        log.error("Netdisco request failed: %s", exc)
-        return {"ok": False, "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
+        resolved = nd.find_canonical_ip(ip) if exc.response is not None and exc.response.status_code == 404 else None
+        if not resolved or resolved == ip:
+            log.error("Netdisco request failed: %s", exc)
+            return {"ok": False, "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
+        log.warning(
+            "%s isn't Netdisco's canonical IP for this device (likely a cluster "
+            "floating address) — retrying via %s", ip, resolved,
+        )
+        nd_ip = resolved
+        try:
+            nd_device = nd.get_device(nd_ip)
+            nd_ports = nd.get_ports(nd_ip)
+        except requests.HTTPError as exc2:
+            _reraise_if_gateway_error(exc2)
+            log.error("Netdisco request failed even via canonical IP %s: %s", nd_ip, exc2)
+            return {"ok": False, "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
 
     nd_hostname = nd_device.get("name") or nd_device.get("dns") or ""
     nd_serial = nd_device.get("serial") or ""
@@ -2791,11 +2826,11 @@ def sync_device(
                     vc_name = vip_short + domain
                 else:
                     vc_name = pre_redirect.name
-                active_m = re.search(r"p(\d+)h", nb_device.name, re.IGNORECASE)
+                active_m = re.search(r"p(\d+)[a-z]?", nb_device.name, re.IGNORECASE)
                 active_pos = int(active_m.group(1)) if active_m else 1
                 vc_members: list[tuple] = [(nb_device, active_pos)]
                 if partner_dev:
-                    partner_m = re.search(r"p(\d+)h", partner_dev.name, re.IGNORECASE)
+                    partner_m = re.search(r"p(\d+)[a-z]?", partner_dev.name, re.IGNORECASE)
                     partner_pos = int(partner_m.group(1)) if partner_m else (2 if active_pos == 1 else 1)
                     vc_members.append((partner_dev, partner_pos))
                     log.info("HA partner found: %r", partner_dev.name)
@@ -2931,7 +2966,7 @@ def sync_device(
 
     if sync_modules:
         try:
-            nd_mods = nd.get_modules(ip)
+            nd_mods = nd.get_modules(nd_ip)
         except requests.HTTPError as exc:
             _reraise_if_gateway_error(exc)
             log.error("Could not fetch modules from Netdisco: %s", exc)
@@ -3799,7 +3834,7 @@ def sync_device(
     else:
         existing_ifaces = nb.fetch_interfaces(nb_device.id)
     try:
-        nd_ips = nd.get_device_ips(ip)
+        nd_ips = nd.get_device_ips(nd_ip)
     except requests.HTTPError as exc:
         _reraise_if_gateway_error(exc)
         log.error("Could not fetch device IPs from Netdisco: %s", exc)
@@ -3879,7 +3914,7 @@ def sync_device(
         # nd_mods already fetched if sync_modules ran; fetch only if needed
         if not sync_modules:
             try:
-                nd_mods = nd.get_modules(ip)
+                nd_mods = nd.get_modules(nd_ip)
             except requests.HTTPError as exc:
                 _reraise_if_gateway_error(exc)
                 log.error("Could not fetch modules from Netdisco: %s", exc)
