@@ -14,6 +14,7 @@ Endpoints:
   GET/POST /sync/resume      Release the pause gate
   GET      /metrics          Prometheus metrics
   GET      /health           Liveness check
+  GET      /stats            Aggregated operational status as JSON
   GET      /docs             Swagger UI (auto-generated)
 """
 
@@ -1593,6 +1594,7 @@ async def index() -> str:
   <tr><td>GET</td><td><a href=/tag-mismatches>/tag-mismatches</a></td><td>Devices with a missing or Netbox-mismatched auth tag (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/metrics>/metrics</a></td><td>Prometheus metrics</td></tr>
   <tr><td>GET</td><td><a href=/health>/health</a></td><td>Liveness check</td></tr>
+  <tr><td>GET</td><td><a href=/stats>/stats</a></td><td>Aggregated operational status as JSON (last reconcile, liveness, unknown/mismatch counts) — for external status dashboards</td></tr>
   <tr><td>GET</td><td><a href=/docs>/docs</a></td><td>Swagger UI</td></tr>
 </table>
 {unknown_section}
@@ -1605,6 +1607,29 @@ async def index() -> str:
 @app.get("/health", summary="Liveness check")
 async def health() -> dict:
     return {"status": "ok", "version": __version__, "paused": _is_paused(), "in_flight": _inflight_hosts()}
+
+
+@app.get("/stats", summary="Aggregated operational status as JSON (e.g. for a Netbox backend-status widget)")
+async def stats() -> dict:
+    with _unknown_devices_lock:
+        unknown_devices_count = len(_load_unknown_devices())
+    with _reconcile_gaps_lock:
+        not_in_netdisco_count = len(_load_gap(_NOT_IN_NETDISCO_FILE))
+        not_in_netbox_count = len(_load_gap(_NOT_IN_NETBOX_FILE))
+        tag_mismatches_count = len(_load_gap(_TAG_MISMATCHES_FILE))
+    last_reconcile = reconcile_last_run_timestamp._value.get() if hasattr(reconcile_last_run_timestamp, "_value") else 0
+    return {
+        "version": __version__,
+        "paused": _is_paused(),
+        "in_flight": len(_inflight_hosts()),
+        "last_reconcile": last_reconcile or None,
+        "unknown_devices_count": unknown_devices_count,
+        "not_in_netdisco_count": not_in_netdisco_count,
+        "not_in_netbox_count": not_in_netbox_count,
+        "tag_mismatches_count": tag_mismatches_count,
+        "liveness_enabled": bool(_LIVENESS_URL),
+        "liveness": _load_liveness_status() or None,
+    }
 
 
 @app.api_route("/reconcile", methods=["GET", "POST"], dependencies=[Depends(require_auth)], summary="Trigger reconcile run manually")
