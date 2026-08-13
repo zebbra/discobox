@@ -972,6 +972,7 @@ class RebuildResponse(BaseModel):
     dry_run: bool
     hostname: Optional[str] = None
     prune: dict = {}
+    new_stack_members: Optional[int] = None
     reason: Optional[str] = None
 
 
@@ -1299,13 +1300,16 @@ async def rebuild(
 
     reason = result.get("reason")
     status = "skipped" if reason else ("ok" if result.get("ok") else "error")
+    prune_result = result.get("prune", {})
     logger.info(
         "rebuild %s for %s%s: %s", status, resolved_host, " [dry-run]" if dry_run else "",
-        result.get("prune", {}),
+        prune_result,
     )
     return RebuildResponse(
         status=status, host=resolved_host, dry_run=dry_run,
-        hostname=result.get("hostname"), prune=result.get("prune", {}), reason=reason,
+        hostname=result.get("hostname"), prune=prune_result,
+        new_stack_members=(prune_result.get("stack_members") or {}).get("now"),
+        reason=reason,
     )
 
 
