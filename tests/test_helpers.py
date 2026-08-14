@@ -16,6 +16,7 @@ from datetime import date
 
 from discobox import (
     NetboxClient,
+    _all_descriptions_missing,
     _counts_changed,
     _discovery_incomplete,
     _fill_module_names,
@@ -540,6 +541,23 @@ def test_port_to_netbox_oper_down_suppresses_speed() -> None:
     assert out["speed"] == 1_000_000        # oper up → speed synced normally
 
 
+def test_port_to_netbox_suppress_description() -> None:
+    # sync_device sets suppress_description device-wide when this Netdisco
+    # poll reports every interface with no alias despite Netbox already
+    # having real descriptions — a likely degraded poll, not a mass rename.
+    port = {
+        "port": "Gi1/0/1", "name": "some label", "descr": "",
+        "type": "ethernetCsmacd", "up_admin": "up",
+        "speed": "1 Gbps", "duplex": None, "duplex_admin": None,
+        "mac": None, "mtu": 1500,
+    }
+    out = port_to_netbox(port)
+    assert out["description"] == "some label"   # normal case: alias used as-is
+
+    out = port_to_netbox(port, suppress_description=True)
+    assert out["description"] is None            # suppressed → left untouched in Netbox
+
+
 def test_port_to_netbox_null_mac() -> None:
     # All-zero MAC must be cleaned to None.
     port = {
@@ -674,6 +692,17 @@ def test_discovery_incomplete() -> None:
     assert _discovery_incomplete([]) is False
 
 
+def test_all_descriptions_missing() -> None:
+    """All ports with an empty ifAlias — the raw per-port signal that gates
+    (combined with Netbox already having real descriptions) suppressing
+    description writes for a suspected degraded Netdisco poll."""
+    assert _all_descriptions_missing([{"name": ""}, {"name": None}, {}]) is True
+    # one real alias is enough to proceed normally
+    assert _all_descriptions_missing([{"name": ""}, {"name": "uplink"}]) is False
+    # no ports at all is a different situation — do not treat as missing
+    assert _all_descriptions_missing([]) is False
+
+
 def test_vendor_from_chassis_over_fortinet_samples() -> None:
     """vendor_from_chassis must yield 'Fortinet' for every chassis entry in the
     fortinet/fortiproxy modules fixtures."""
@@ -704,7 +733,10 @@ if __name__ == "__main__":
     test_port_to_netbox_fortiproxy_l2vlan()
     test_port_to_netbox_disabled_and_zero_speed()
     test_port_to_netbox_oper_down_suppresses_speed()
+    test_port_to_netbox_suppress_description()
     test_port_to_netbox_null_mac()
     test_port_to_netbox_over_fortiproxy_sample()
+    test_discovery_incomplete()
+    test_all_descriptions_missing()
     test_vendor_from_chassis_over_fortinet_samples()
     print("OK — all tests passed")

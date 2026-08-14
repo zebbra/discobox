@@ -1686,6 +1686,7 @@ def port_to_netbox(
     cf_neighbor_port: Optional[str] = "neighbor_port",
     cf_neighbor_device: Optional[str] = "neighbor_device",
     cf_neighbor_iface: Optional[str] = "neighbor_iface",
+    suppress_description: bool = False,
 ) -> dict:
     """
     Map a Netdisco port dict to Netbox dcim.interfaces fields.
@@ -1701,6 +1702,11 @@ def port_to_netbox(
                          itself) — ifSpeed is unreliable while a link is down (some
                          platforms report 0 rather than the nominal speed), so a flap
                          must not clobber the last known-good value.
+
+    suppress_description (set device-wide by sync_device via _all_descriptions_missing,
+    when this poll reports every alias empty despite Netbox already having real
+    descriptions — a likely degraded Netdisco poll) skips writing description at
+    all rather than wiping every interface's description to empty.
     """
     speed_kbps = None if (port.get("up") or "").lower() == "down" else parse_speed_kbps(port.get("speed"))
 
@@ -1710,7 +1716,10 @@ def port_to_netbox(
     # Use ifAlias as description only when it differs from the interface name
     full_name = port.get("port") or port.get("descr") or ""
     alias = port.get("name", "")
-    description = alias if alias and alias.lower() != full_name.lower() else ""
+    description = (
+        None if suppress_description
+        else (alias if alias and alias.lower() != full_name.lower() else "")
+    )
 
     data: dict = {
         "name":        full_name,
@@ -2288,6 +2297,22 @@ def _discovery_incomplete(nd_ports: list) -> bool:
     """
     names = [str(p.get("port") or p.get("descr") or "") for p in nd_ports]
     return bool(names) and all(n.isdigit() for n in names)
+
+
+def _all_descriptions_missing(nd_ports: list) -> bool:
+    """
+    True when not a single port has an ifAlias set.
+
+    Unlike _discovery_incomplete, this alone is NOT a reliable "discovery
+    failed" signal — plenty of real, fully-discovered devices genuinely have
+    no configured interface descriptions. It's only meaningful combined with
+    Netbox already having real descriptions for this device (checked by the
+    caller): a poll that suddenly reports every alias empty when Netbox
+    already has some is more likely a degraded/partial Netdisco poll than
+    every interface losing its label in the same instant.
+    """
+    aliases = [str(p.get("name") or "").strip() for p in nd_ports]
+    return bool(aliases) and not any(aliases)
 
 
 def _stack_member_count(topo: str, chassis: list) -> Optional[int]:
@@ -3626,6 +3651,20 @@ def sync_device(
     nd_ports_sorted = sorted(nd_ports, key=lambda p: (1 if "." in (p.get("port") or p.get("descr") or "") else 0))
     log.debug("Interfaces  entries: %d  existing: %d", len(nd_ports_sorted), len(existing_ifaces))
 
+    suppress_description = False
+    if _all_descriptions_missing(nd_ports):
+        all_existing_ifaces = dict(existing_ifaces)
+        for m in vss_ifaces.values():
+            all_existing_ifaces.update(m)
+        if any((getattr(iface, "description", None) or "").strip() for iface in all_existing_ifaces.values()):
+            suppress_description = True
+            log.warning(
+                "All %d interface descriptions are empty in this Netdisco poll, but "
+                "Netbox already has some set: looks like a degraded poll rather than "
+                "a real config change — leaving existing descriptions untouched",
+                len(nd_ports),
+            )
+
     neighbors = neighbors_linked = 0
     seen_cable_iface_ids: set[int] = set()
     cable_counts: dict[str, int] = {"created": 0, "conflict": 0, "deleted": 0, "error": 0}
@@ -3663,6 +3702,7 @@ def sync_device(
                 cf_neighbor_port=cf_neighbor_port,
                 cf_neighbor_device=cf_neighbor_device,
                 cf_neighbor_iface=cf_neighbor_iface,
+                suppress_description=suppress_description,
             )
             if not sync_mac:
                 nb_data.pop("mac_address", None)
