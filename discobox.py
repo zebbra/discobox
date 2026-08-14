@@ -4112,7 +4112,8 @@ def sync_device(
         _fmt("sfps", sfp_counts) if sync_sfp else None,
     ]))
     summary = ("  " + "  ".join(parts)) if parts else "  no changes"
-    log.info("sync done %s%s  errors=%d", nb_device.name, summary, total_errors)
+    errors_suffix = f"  errors={total_errors}" if total_errors else ""
+    log.info("sync done %s%s%s", nb_device.name, summary, errors_suffix)
     return {
         "ok": counts["error"] == 0,
         "hostname": nb_device.name,
