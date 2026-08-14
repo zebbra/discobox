@@ -214,7 +214,7 @@ reconcile_enqueued_total = Counter(
 reconcile_runs_total = Counter(
     "discobox_reconcile_runs_total",
     "Reconcile loop runs",
-    ["status"],   # success | error
+    ["status"],   # success | error | deferred
     **_reg,
 )
 reconcile_last_run_timestamp = Gauge(
@@ -426,6 +426,12 @@ _RECONCILE_MAX_ENQUEUE:   Optional[int] = _c (_CFG, "reconcile", "max_enqueue", 
 _RECONCILE_ROLES:         list[str]     = _clist(_CFG, "reconcile", "roles") or ["router", "switch", "firewall", "appliance"]
 _RECONCILE_STATUSES:      list[str]     = _clist(_CFG, "reconcile", "statuses") or ["active"]
 _RECONCILE_REQUIRE_AUTH_TAG: bool       = _cbool(_CFG, "reconcile", "require_auth_tag", default=True)
+# Reconcile enqueues more discovery work on top of whatever's already syncing —
+# the last thing a large hook-triggered backlog needs is reconcile piling on
+# more load while it's still draining. Deferred (not skipped): re-checked every
+# defer_seconds until the queue clears, so it still always eventually runs.
+_RECONCILE_DEFER_IF_QUEUED: bool         = _cbool(_CFG, "reconcile", "defer_if_queued", default=True)
+_RECONCILE_DEFER_SECONDS:   int          = int(_c(_CFG, "reconcile", "defer_seconds", default=3600))
 
 # Liveness gate: before enqueueing discovery, ask a Prometheus-compatible API
 # (VictoriaMetrics vmselect) which devices actually respond, and skip the dead
@@ -613,6 +619,14 @@ async def _reconcile_loop() -> None:
     loop = asyncio.get_running_loop()
     while True:
         await asyncio.sleep(_RECONCILE_INTERVAL)
+        while _RECONCILE_DEFER_IF_QUEUED and _inflight_hosts():
+            queued = len(_inflight_hosts())
+            logger.info(
+                "Reconcile deferred %ds: %d sync(s) still queued/in-flight",
+                _RECONCILE_DEFER_SECONDS, queued,
+            )
+            reconcile_runs_total.labels(status="deferred").inc()
+            await asyncio.sleep(_RECONCILE_DEFER_SECONDS)
         try:
             await loop.run_in_executor(None, _run_reconcile)
         except Exception as exc:

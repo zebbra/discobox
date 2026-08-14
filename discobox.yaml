@@ -81,6 +81,10 @@ reconcile:
                                         # here to reconcile those too.
   require_auth_tag: true     # only enqueue discovery for devices with snmp_auth_profile set;
                              # without it Netdisco has no credentials to try, so discovery just fails
+  defer_if_queued: true      # postpone reconcile (re-checked every defer_seconds) while any sync
+                             # is still queued/in-flight, instead of piling more work on top of
+                             # a backlog (e.g. a large hook burst) that's still draining
+  defer_seconds: 3600
   liveness:                 # skip enqueueing devices a metrics store reports as down
     url: null               # Prometheus-compatible query API incl. tenant prefix, e.g.
                             # http://vmselect:8481/select/0/prometheus — null disables
