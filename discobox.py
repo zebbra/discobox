@@ -29,6 +29,17 @@ logging.basicConfig(
 logger = logging.getLogger("discobox")
 
 
+class _DeviceLogAdapter(logging.LoggerAdapter):
+    """Prefixes every message with a device IP without creating a new named
+    Logger per device — logging.getLogger() caches loggers for the life of the
+    process, so one per IP (thousands, over a long-running server's uptime)
+    never gets released. Delegates to the shared "discobox" logger, so level
+    changes/handlers on it (e.g. /sync?debug=true's capture handler) still
+    apply exactly as before."""
+    def process(self, msg, kwargs):
+        return f"{self.extra['ip']}  {msg}", kwargs
+
+
 # ── Interface type mapping ─────────────────────────────────────────────────────
 
 def map_iftype(nd_type: Optional[str], iface_name: Optional[str], default: Optional[str] = "other") -> Optional[str]:
@@ -2649,7 +2660,7 @@ def sync_device(
     it's meant for an explicit manual rebuild, never the regular background sync.
     dry_run (default True) reports what prune would delete without deleting it.
     """
-    log = logging.getLogger(f"discobox.{ip}")
+    log = _DeviceLogAdapter(logger, {"ip": ip})
 
     # nd_ip is what every subsequent Netdisco call uses; ip (Netbox's primary_ip4)
     # stays the identity for Netbox-side lookups/logging regardless.
