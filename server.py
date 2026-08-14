@@ -34,7 +34,15 @@ import uvicorn
 import yaml
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
-from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Gauge, Histogram, generate_latest
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry,
+    Counter,
+    Gauge,
+    Histogram,
+    ProcessCollector,
+    generate_latest,
+)
 from pydantic import BaseModel
 from requests.exceptions import HTTPError, ReadTimeout
 
@@ -111,6 +119,12 @@ os.makedirs(_STATE_DIR, exist_ok=True)
 # "Duplicated timeseries in CollectorRegistry".
 _custom_registry = CollectorRegistry()
 _reg = {"registry": _custom_registry}
+
+# process_resident_memory_bytes / process_virtual_memory_bytes / process_cpu_seconds_total /
+# process_open_fds / process_start_time_seconds, right on this same /metrics — same
+# per-worker-process caveat as everything else in this private registry (see above):
+# only reports this one process, meaningful as-is at DISCOBOX_WORKERS=1.
+ProcessCollector(registry=_custom_registry)
 
 hooks_received_total = Counter(
     "discobox_hooks_received_total",
