@@ -521,10 +521,12 @@ class NetboxClient:
                 if owner and owner != source_value:
                     return "skipped", existing
 
-            # speed flaps on its own (autonegotiation jitter) without anything else
-            # about the interface actually changing, so it never justifies a patch
-            # by itself — but if something else already triggers one, apply the
-            # current speed too rather than pinning it to a stale value.
+            # speed/duplex flap on their own (autonegotiation jitter) without
+            # anything else about the interface actually changing, so neither
+            # justifies a patch by itself — but if something else already
+            # triggers one, apply their current values too rather than pinning
+            # them to a stale one.
+            _NON_TRIGGER_FIELDS = {"speed", "duplex"}
             patch = {}
             trigger_fields: set[str] = set()
             for k, v in data.items():
@@ -534,7 +536,7 @@ class NetboxClient:
                 if nb_val != v:
                     logger.debug("  diff %-20s  nb=%r  nd=%r", k, nb_val, v)
                     patch[k] = v
-                    if k != "speed":
+                    if k not in _NON_TRIGGER_FIELDS:
                         trigger_fields.add(k)
             if custom_fields:
                 existing_cf = dict(getattr(existing, "custom_fields", {}) or {})
@@ -543,7 +545,8 @@ class NetboxClient:
                     patch["custom_fields"] = cf_patch
                     trigger_fields.add("custom_fields")
             if not trigger_fields:
-                patch.pop("speed", None)
+                for field in _NON_TRIGGER_FIELDS:
+                    patch.pop(field, None)
             if patch:
                 if batch is not None:
                     for k, v in patch.items():
