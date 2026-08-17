@@ -2758,7 +2758,7 @@ def sync_device(
     nd_hostname = nd_device.get("name") or nd_device.get("dns") or ""
     nd_serial = nd_device.get("serial") or ""
     vip_mode = (vip_mode_by_vendor or {}).get((nd_device.get("vendor") or "").lower(), vip_mode)
-    log.info("sync start %s", nd_hostname or ip)
+    log.info("sync start%s %s", " (rebuild)" if prune else "", nd_hostname or ip)
     log.debug("Netdisco  hostname=%r  ports=%d", nd_hostname, len(nd_ports))
 
     if _discovery_incomplete(nd_ports):
@@ -3515,7 +3515,7 @@ def sync_device(
         ]
         if stack_cables:
             log.debug("StackCables  entries: %d", len(stack_cables))
-            cable_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
+            stack_cable_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
             for cable in stack_cables:
                 cable_name = cable.get("name") or ""
                 cable_model = cable.get("model") or ""
@@ -3532,7 +3532,7 @@ def sync_device(
                     action = nb.upsert_inventory_item(
                         cable_target, cable_name, manufacturer, cable_model, cable_serial,
                     )
-                    cable_counts[action] += 1
+                    stack_cable_counts[action] += 1
                     current_bare_inventory_names_by_device.setdefault(cable_target.id, set()).add(cable_name)
                     if action != "unchanged":
                         log.debug("  Cable %-35s model=%s  serial=%s  %s",
@@ -3540,14 +3540,14 @@ def sync_device(
                     else:
                         log.debug("  Cable %-35s unchanged", cable_name)
                 except Exception as exc:
-                    cable_counts["error"] += 1
+                    stack_cable_counts["error"] += 1
                     log.error("  Cable %-35s error: %s", cable_name, exc)
             log.debug(
                 "StackCables: created=%d updated=%d unchanged=%d errors=%d",
-                cable_counts["created"], cable_counts["updated"],
-                cable_counts["unchanged"], cable_counts["error"],
+                stack_cable_counts["created"], stack_cable_counts["updated"],
+                stack_cable_counts["unchanged"], stack_cable_counts["error"],
             )
-            if _counts_changed(cable_counts):
+            if _counts_changed(stack_cable_counts):
                 device_changed = True
 
         # Blades (linecards / supervisors / FRU uplink modules): module bay + module per slot.
@@ -4175,19 +4175,25 @@ def sync_device(
             s += f"/!{errors}"
         return s
 
+    # stack_cable_counts only exists in locals() when this run's chassis data
+    # actually included any (gated behind `if stack_cables:` above).
+    _stack_cable_counts = locals().get("stack_cable_counts")
     total_errors = sum(
         c.get("error", 0)
         for c in [counts, ip_counts, mod_counts, sfp_counts, poe_counts]
-    )
+    ) + (_stack_cable_counts.get("error", 0) if _stack_cable_counts else 0)
     parts = list(filter(None, [
         _fmt("ifaces", counts),
         _fmt("ips", ip_counts),
         _fmt("mods", mod_counts) if sync_modules else None,
         _fmt("sfps", sfp_counts) if sync_sfp else None,
+        _fmt("stackcables", _stack_cable_counts) if _stack_cable_counts else None,
     ]))
     summary = ("  " + "  ".join(parts)) if parts else "  no changes"
     errors_suffix = f"  errors={total_errors}" if total_errors else ""
-    log.info("sync done %s%s%s", nb_device.name, summary, errors_suffix)
+    log.info(
+        "sync done%s %s%s%s", " (rebuild)" if prune else "", nb_device.name, summary, errors_suffix,
+    )
     return {
         "ok": counts["error"] == 0,
         "hostname": nb_device.name,
