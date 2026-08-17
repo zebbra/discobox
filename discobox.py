@@ -1296,11 +1296,22 @@ class NetboxClient:
         Netdisco no longer reports. Items linked to an interface (SFPs) are left to
         remove_stale_sfps() instead.
 
+        Also skips anything with no serial and no part_id: upsert_inventory_item()
+        only ever creates an item when Netdisco reports a model or serial, so a
+        bare item with neither wasn't created by discobox — it's almost certainly
+        a Netbox ModuleType InventoryItemTemplate placeholder (e.g. a stack
+        member's "StackPort1/1"/"StackAdapter1/1"), which Netbox auto-recreates
+        whenever the parent Module is saved. Deleting those just starts a tug-of-
+        war discobox can't win, identical to the interface-template collision
+        problem _clear_module_template_collisions works around.
+
         Returns the number of items deleted (or that would be, under dry_run).
         """
         deleted = 0
         for item in self.nb.dcim.inventory_items.filter(device_id=device.id):
             if getattr(item, "component_type", None):
+                continue
+            if not (getattr(item, "serial", None) or getattr(item, "part_id", None)):
                 continue
             if item.name in current_names:
                 continue

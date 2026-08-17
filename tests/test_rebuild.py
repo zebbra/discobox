@@ -172,8 +172,10 @@ def test_remove_stale_bare_inventory_items_ignores_component_linked() -> None:
 
 
 def test_remove_stale_bare_inventory_items_deletes_stale_fan_or_psu() -> None:
-    stale_fan = FakeRecord(1, "Fan 1")
-    current_psu = FakeRecord(2, "PSU 1")
+    # Real discobox-created fan/PSU items always have a serial or part_id —
+    # upsert_inventory_item() only ever creates one when Netdisco reports one.
+    stale_fan = FakeRecord(1, "Fan 1", serial="FAN-SN-1")
+    current_psu = FakeRecord(2, "PSU 1", part_id="PWR-715")
     fake = _fake_self(inventory_items=[stale_fan, current_psu])
 
     deleted = NetboxClient.remove_stale_bare_inventory_items(fake, DEVICE, {"PSU 1"}, dry_run=False)
@@ -181,6 +183,21 @@ def test_remove_stale_bare_inventory_items_deletes_stale_fan_or_psu() -> None:
     assert deleted == 1
     assert stale_fan.deleted is True
     assert current_psu.deleted is False
+
+
+def test_remove_stale_bare_inventory_items_skips_template_placeholders() -> None:
+    # A stack member's "StackPort1/1"/"StackAdapter1/1" etc. come from the
+    # Module Type's InventoryItemTemplate, never from upsert_inventory_item() —
+    # they have no serial and no part_id, unlike anything discobox creates.
+    # Netbox auto-recreates these on module save, so discobox must never
+    # touch them regardless of whether they look "stale".
+    stack_port = FakeRecord(1, "StackPort1/1")
+    fake = _fake_self(inventory_items=[stack_port])
+
+    deleted = NetboxClient.remove_stale_bare_inventory_items(fake, DEVICE, set(), dry_run=False)
+
+    assert deleted == 0
+    assert stack_port.deleted is False
 
 
 # ── remove_stale_sfps ────────────────────────────────────────────────────────────
