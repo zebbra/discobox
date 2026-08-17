@@ -3533,6 +3533,7 @@ def sync_device(
                         cable_target, cable_name, manufacturer, cable_model, cable_serial,
                     )
                     cable_counts[action] += 1
+                    current_bare_inventory_names_by_device.setdefault(cable_target.id, set()).add(cable_name)
                     if action != "unchanged":
                         log.debug("  Cable %-35s model=%s  serial=%s  %s",
                                   cable_name, cable_model, cable_serial, action)
