@@ -427,7 +427,7 @@ class NetboxClient:
             if os_release:
                 custom[cf_os_release] = os_release
         if custom:
-            patch["custom_fields"] = custom
+            patch["custom_fields"] = _merged_custom_fields(device, custom)
 
         if not patch:
             _log.debug("Device fields: nothing to update")
@@ -2289,6 +2289,25 @@ def _match_existing_iface(
     return keeper
 
 
+def _merged_custom_fields(device: pynetbox.core.response.Record, updates: dict) -> dict:
+    """
+    Merge `updates` into `device`'s current custom_fields and return the full dict.
+
+    pynetbox's Record.update() does a plain setattr for custom_fields — no
+    merge. Netbox's API merges custom_fields correctly server-side regardless
+    of what's sent, but passing only the changed keys permanently replaces
+    the LOCAL object's .custom_fields attribute with just those keys for the
+    rest of this record's lifetime: any later read of a different custom
+    field on the same object (e.g. reading stack_members after an earlier
+    os_version write) would see it as missing/None even though Netbox still
+    has it. Always pass the full merged dict to device.update() instead of a
+    bare {key: value} to keep the local object's custom_fields accurate.
+    """
+    merged = dict(getattr(device, "custom_fields", {}) or {})
+    merged.update(updates)
+    return merged
+
+
 def _discovery_incomplete(nd_ports: list) -> bool:
     """
     True when every port name is a bare number — Netdisco fills in ifIndex
@@ -3063,7 +3082,7 @@ def sync_device(
                         )
                         stack_members_prune_result = {"was": current_value, "now": member_count}
                     else:
-                        if nb_device.update({"custom_fields": {cf_stack_members: member_count}}):
+                        if nb_device.update({"custom_fields": _merged_custom_fields(nb_device, {cf_stack_members: member_count})}):
                             device_changed = True
                         log.debug("  %s=%d updated", cf_stack_members, member_count)
                         if prune:
@@ -3088,7 +3107,7 @@ def sync_device(
                     )
                     stack_members_prune_result = {"was": current_value, "now": None}
                 else:
-                    if nb_device.update({"custom_fields": {cf_stack_members: None}}):
+                    if nb_device.update({"custom_fields": _merged_custom_fields(nb_device, {cf_stack_members: None})}):
                         device_changed = True
                     log.debug("  %s cleared (topology now %s)", cf_stack_members, topo)
                     stack_members_prune_result = {"was": current_value, "now": None}
@@ -3307,7 +3326,7 @@ def sync_device(
                 ver = parse_sw_ver(ch.get("sw_ver", ""))
                 if ver:
                     try:
-                        if nb_device.update({"custom_fields": {cf_os_version: ver}}):
+                        if nb_device.update({"custom_fields": _merged_custom_fields(nb_device, {cf_os_version: ver})}):
                             device_changed = True
                         log.debug("  OS version from chassis sw_ver: %s", ver)
                     except Exception as exc:
@@ -4129,7 +4148,7 @@ def sync_device(
 
     if cf_touch and device_changed:
         try:
-            nb_device.update({"custom_fields": {cf_touch: date.today().isoformat()}})
+            nb_device.update({"custom_fields": _merged_custom_fields(nb_device, {cf_touch: date.today().isoformat()})})
             log.debug("  %s updated (config changed)", cf_touch)
         except Exception as exc:
             log.error("  %s update error: %s", cf_touch, exc)

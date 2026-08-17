@@ -22,6 +22,7 @@ from discobox import (
     _fill_module_names,
     _guess_prefix_len,
     _ha_node_info,
+    _merged_custom_fields,
     _recently_touched,
     _should_update_stack_members,
     _slave_link_field,
@@ -703,6 +704,24 @@ def test_all_descriptions_missing() -> None:
     assert _all_descriptions_missing([]) is False
 
 
+def test_merged_custom_fields() -> None:
+    """pynetbox's Record.update() does a plain setattr for custom_fields (no
+    merge) — passing only the changed keys would locally wipe every other
+    custom field on the object for the rest of its lifetime. Always merge
+    before writing."""
+    from types import SimpleNamespace
+
+    device = SimpleNamespace(custom_fields={"os_version": "1.0", "stack_members": 3})
+    merged = _merged_custom_fields(device, {"os_version": "2.0"})
+    assert merged == {"os_version": "2.0", "stack_members": 3}
+    # device.custom_fields itself is untouched — merging happens on the copy
+    assert device.custom_fields == {"os_version": "1.0", "stack_members": 3}
+
+    # no custom_fields yet (new/never-fetched attribute) doesn't blow up
+    bare = SimpleNamespace()
+    assert _merged_custom_fields(bare, {"stack_members": 2}) == {"stack_members": 2}
+
+
 def test_vendor_from_chassis_over_fortinet_samples() -> None:
     """vendor_from_chassis must yield 'Fortinet' for every chassis entry in the
     fortinet/fortiproxy modules fixtures."""
@@ -738,5 +757,6 @@ if __name__ == "__main__":
     test_port_to_netbox_over_fortiproxy_sample()
     test_discovery_incomplete()
     test_all_descriptions_missing()
+    test_merged_custom_fields()
     test_vendor_from_chassis_over_fortinet_samples()
     print("OK — all tests passed")
