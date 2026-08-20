@@ -3300,12 +3300,15 @@ def sync_device(
             # stack (e.g. hardware swapped from a standalone 3850 to a 9300L
             # stack: nothing below this point would ever correct it).
             device_serial = nd_device.get("serial", "")
-            master = next((c for c in chassis if c.get("serial") == device_serial), chassis[0])
-            try:
-                _update_device_type(master)
-            except Exception as exc:
-                mod_counts["error"] += 1
-                log.error("  DeviceType update error: %s", exc)
+            master = next((c for c in chassis if c.get("serial") == device_serial), chassis[0] if chassis else None)
+            if master is None:
+                log.warning("  No chassis modules reported by Netdisco: skipping DeviceType/module sync")
+            else:
+                try:
+                    _update_device_type(master)
+                except Exception as exc:
+                    mod_counts["error"] += 1
+                    log.error("  DeviceType update error: %s", exc)
 
             # Create a module bay + module per chassis member.
             # Netdisco pos is 0-indexed; Cisco interface names are 1-indexed (Gi1/0/1 = member 1).
