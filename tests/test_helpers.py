@@ -22,7 +22,9 @@ from discobox import (
     _fill_module_names,
     _guess_prefix_len,
     _ha_node_info,
+    _is_ap_port,
     _merged_custom_fields,
+    _parse_ap_description,
     _recently_touched,
     _should_update_stack_members,
     _slave_link_field,
@@ -175,6 +177,43 @@ def test_vendor_from_chassis() -> None:
     # No type / unparseable
     assert vendor_from_chassis({"type": ""}) is None
     assert vendor_from_chassis({}) is None
+
+
+# ── _is_ap_port / _parse_ap_description (WLC → per-AP module/port junction) ────
+
+def test_is_ap_port() -> None:
+    assert _is_ap_port({"type": "dot11b"}) is True
+    assert _is_ap_port({"type": "dot11ac"}) is True
+    assert _is_ap_port({"type": "ethernetCsmacd"}) is False
+    assert _is_ap_port({"type": None}) is False
+    assert _is_ap_port({}) is False
+
+
+def test_parse_ap_description() -> None:
+    desc = (
+        "CW9166I-E: FRAHAU-W216 (C2/FRAHAU); IP 172.20.130.235; "
+        "Dot3 MAC 70:bc:48:cb:2c:e0; Ethernet MAC c4:14:a2:45:2e:60; "
+        "Connected via FRAHAU-X48.nms.admin.ch (172.28.78.53)"
+    )
+    parsed = _parse_ap_description(desc)
+    assert parsed == {
+        "hostname": "FRAHAU-W216",
+        "site": "C2/FRAHAU",
+        "ip": "172.20.130.235",
+        "dot3_mac": "70:bc:48:cb:2c:e0",
+        "ethernet_mac": "c4:14:a2:45:2e:60",
+        "uplink_name": "FRAHAU-X48.nms.admin.ch",
+        "uplink_ip": "172.28.78.53",
+    }
+
+
+def test_parse_ap_description_partial_and_unparseable() -> None:
+    # Missing fields are simply absent, not errors
+    assert _parse_ap_description("C9120AXI-E: FRAWYD18-W05 (C2/FRAWYD18)") == {
+        "hostname": "FRAWYD18-W05", "site": "C2/FRAWYD18",
+    }
+    assert _parse_ap_description("") == {}
+    assert _parse_ap_description("nonsense text with no colon-headed segment") == {}
 
 
 # ── parse_speed_kbps ───────────────────────────────────────────────────────────

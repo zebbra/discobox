@@ -1486,6 +1486,56 @@ def vendor_from_chassis(chassis: dict) -> Optional[str]:
     return None
 
 
+def _is_ap_port(port: dict) -> bool:
+    """
+    True for a WLC's per-AP virtual radio "port" (type dot11a/b/g/n/ac/ax/...).
+
+    These aren't real interfaces on the controller — Netdisco surfaces one per
+    associated access point — so they must never be synced as the WLC's own
+    interfaces (name collides with the AP's hostname, port key is a bare MAC).
+    """
+    return (port.get("type") or "").lower().startswith("dot11")
+
+
+_AP_DESC_HEAD_RE = re.compile(r"^[^:]+:\s*(\S+)\s*\(([^)]*)\)\s*$")
+_AP_DESC_FIELD_RES = {
+    "ip": re.compile(r"^IP\s+(\S+)$", re.IGNORECASE),
+    "dot3_mac": re.compile(r"^Dot3 MAC\s+([0-9a-fA-F:]+)$", re.IGNORECASE),
+    "ethernet_mac": re.compile(r"^Ethernet MAC\s+([0-9a-fA-F:]+)$", re.IGNORECASE),
+}
+_AP_DESC_UPLINK_RE = re.compile(r"^Connected via\s+(\S+)\s*\(([^)]*)\)$", re.IGNORECASE)
+
+
+def _parse_ap_description(description: str) -> dict:
+    """
+    Best-effort parse of a Netdisco ap-class module description, e.g.:
+      "CW9166I-E: FRAHAU-W216 (C2/FRAHAU); IP 172.20.130.235; Dot3 MAC ...;
+       Ethernet MAC ...; Connected via SWITCH.example.com (1.2.3.4)"
+
+    Returns {} if even the hostname can't be recovered — any other field
+    missing from the text is simply absent from the result.
+    """
+    parts = [p.strip() for p in (description or "").split(";") if p.strip()]
+    if not parts:
+        return {}
+    head = _AP_DESC_HEAD_RE.match(parts[0])
+    if not head:
+        return {}
+    result: dict = {"hostname": head.group(1), "site": head.group(2)}
+    for part in parts[1:]:
+        uplink = _AP_DESC_UPLINK_RE.match(part)
+        if uplink:
+            result["uplink_name"] = uplink.group(1)
+            result["uplink_ip"] = uplink.group(2)
+            continue
+        for key, rx in _AP_DESC_FIELD_RES.items():
+            m = rx.match(part)
+            if m:
+                result[key] = m.group(1)
+                break
+    return result
+
+
 NULL_MAC = "00:00:00:00:00:00"
 
 
@@ -2761,6 +2811,14 @@ def sync_device(
     log.info("sync start%s %s", " (rebuild)" if prune else "", nd_hostname or ip)
     log.debug("Netdisco  hostname=%r  ports=%d", nd_hostname, len(nd_ports))
 
+    ap_port_count = sum(1 for p in nd_ports if _is_ap_port(p))
+    if ap_port_count:
+        nd_ports = [p for p in nd_ports if not _is_ap_port(p)]
+        log.debug(
+            "  Filtered %d AP radio port(s) (type=dot11*) — these belong to associated "
+            "APs, not to this device's own interfaces", ap_port_count,
+        )
+
     if _discovery_incomplete(nd_ports):
         log.warning(
             "All %d interface names are bare numbers (ifIndex placeholders): "
@@ -3025,6 +3083,7 @@ def sync_device(
     ip_counts: dict[str, int] = {"created": 0, "fixed": 0, "moved": 0, "unchanged": 0, "skipped": 0, "error": 0}
     mod_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
     sfp_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
+    ap_counts: dict[str, int] = {"updated": 0, "unchanged": 0, "not_found": 0, "error": 0}
 
     # slot_to_module populated during module sync; consumed by interface→module pass.
     slot_to_module: dict[int, int] = {}  # slot key (stack pos / FEX ID) → nb module id
@@ -3332,6 +3391,74 @@ def sync_device(
             mod_counts.get("updated", 0) + mod_counts.get("created", 0),
             mod_counts["unchanged"], mod_counts["error"],
         )
+
+        # WLC junction: ap-class module entries describe *other* devices (the
+        # associated APs), each already present in Netbox under its own record.
+        # They're never module bays of this device — only used here to correct
+        # the AP's own DeviceType/serial. MVP scope: no interface/MAC/uplink
+        # data is written yet (see _parse_ap_description) — that needs a real
+        # answer on who currently owns the AP's free-text description field.
+        ap_modules = [m for m in nd_mods if m.get("class") == "ap"]
+
+        def _update_ap_device(ap_dev, ch: dict) -> str:
+            model = ch.get("model") or ""
+            serial = ch.get("serial") or ""
+            if not model:
+                return "unchanged"
+            vendor_name = vendor_from_chassis(ch)
+            mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
+            device_type = nb.get_or_create_device_type(mfr, model, part_number=model)
+            patch = {}
+            if ap_dev.device_type.id != device_type.id:
+                patch["device_type"] = device_type.id
+            if serial and (ap_dev.serial or "") != serial:
+                patch["serial"] = serial
+            if not patch:
+                return "unchanged"
+            ap_dev.update(patch)
+            return "updated"
+
+        for ap_mod in ap_modules:
+            parsed = _parse_ap_description(ap_mod.get("description") or "")
+            hostname = parsed.get("hostname")
+            if not hostname:
+                log.debug(
+                    "  AP serial=%s: description didn't parse, skipping", ap_mod.get("serial", ""),
+                )
+                ap_counts["error"] += 1
+                continue
+            try:
+                # find_device_by_ip falls back to an unfiltered device search when
+                # `ip` is empty, which is wasteful — a bogus sentinel keeps the
+                # hostname/serial fallbacks working without that full-table scan.
+                ap_dev = nb.find_device_by_ip(
+                    parsed.get("ip") or "0.0.0.0", hostname=hostname, serial=ap_mod.get("serial", ""),
+                )
+            except Exception as exc:
+                ap_counts["error"] += 1
+                log.error("  AP %-20s lookup error: %s", hostname, exc)
+                continue
+            if not ap_dev:
+                ap_counts["not_found"] += 1
+                log.debug("  AP %-20s not found in Netbox: skipping", hostname)
+                continue
+            try:
+                action = _update_ap_device(ap_dev, ap_mod)
+                ap_counts[action] += 1
+                if action == "updated":
+                    log.debug(
+                        "  AP %-20s → %s serial=%s updated (device=%s)",
+                        hostname, ap_mod.get("model", ""), ap_mod.get("serial", ""), ap_dev.name,
+                    )
+            except Exception as exc:
+                ap_counts["error"] += 1
+                log.error("  AP %-20s update error: %s", hostname, exc)
+
+        if ap_modules:
+            log.debug(
+                "APs: updated=%d unchanged=%d not_found=%d errors=%d",
+                ap_counts["updated"], ap_counts["unchanged"], ap_counts["not_found"], ap_counts["error"],
+            )
 
         # Supplement os_version from chassis sw_ver when the device field was empty
         # (e.g. Fortinet: "FortiGate-600F v7.4.8,build2795,250523 (GA.M)" → "7.4.8")
@@ -4183,13 +4310,14 @@ def sync_device(
     _stack_cable_counts = locals().get("stack_cable_counts")
     total_errors = sum(
         c.get("error", 0)
-        for c in [counts, ip_counts, mod_counts, sfp_counts, poe_counts]
+        for c in [counts, ip_counts, mod_counts, sfp_counts, poe_counts, ap_counts]
     ) + (_stack_cable_counts.get("error", 0) if _stack_cable_counts else 0)
     parts = list(filter(None, [
         _fmt("ifaces", counts),
         _fmt("ips", ip_counts),
         _fmt("mods", mod_counts) if sync_modules else None,
         _fmt("sfps", sfp_counts) if sync_sfp else None,
+        _fmt("aps", ap_counts) if sync_modules else None,
         _fmt("stackcables", _stack_cable_counts) if _stack_cable_counts else None,
     ]))
     summary = ("  " + "  ".join(parts)) if parts else "  no changes"
@@ -4204,6 +4332,7 @@ def sync_device(
         "ips": ip_counts,
         "modules": mod_counts if sync_modules else {},
         "sfps": sfp_counts if sync_sfp else {},
+        "aps": ap_counts if sync_modules else {},
         "ha_vip": vip_device is not None,
         **({"prune": prune_counts} if prune else {}),
     }
