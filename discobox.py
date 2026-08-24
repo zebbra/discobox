@@ -817,7 +817,20 @@ class NetboxClient:
         model: str,
         part_number: Optional[str] = None,
     ) -> pynetbox.core.response.Record:
-        """Return an existing DeviceType or create one under manufacturer."""
+        """
+        Return an existing DeviceType or create one under manufacturer.
+
+        Matches by part_number across ALL manufacturers first: different
+        vendors essentially never share a part number, so if this hardware
+        already has a DeviceType record, reuse it (and its manufacturer)
+        rather than risking a second copy under a wrongly-resolved vendor
+        name (e.g. Netdisco's lowercase "cisco" vs. an existing "Cisco").
+        """
+        if part_number:
+            results = list(self.nb.dcim.device_types.filter(part_number=part_number))
+            existing = next((r for r in results if getattr(r, "part_number", None) == part_number), None)
+            if existing:
+                return existing
         slug = slugify(model)
         results = list(self.nb.dcim.device_types.filter(manufacturer_id=manufacturer.id, model=model))
         existing = next((r for r in results if getattr(r, "model", None) == model), None)
@@ -846,7 +859,16 @@ class NetboxClient:
         manufacturer: pynetbox.core.response.Record,
         model: str,
     ) -> pynetbox.core.response.Record:
-        """Return an existing ModuleType or create one under manufacturer."""
+        """
+        Return an existing ModuleType or create one under manufacturer.
+
+        Matches by part_number across ALL manufacturers first — see
+        get_or_create_device_type for why.
+        """
+        results = list(self.nb.dcim.module_types.filter(part_number=model))
+        existing = next((r for r in results if getattr(r, "part_number", None) == model), None)
+        if existing:
+            return existing
         slug = slugify(model)
         results = list(self.nb.dcim.module_types.filter(manufacturer_id=manufacturer.id, model=model))
         existing = next((r for r in results if getattr(r, "model", None) == model), None)
@@ -2012,7 +2034,7 @@ def _create_device_from_nd(
 
     try:
         mfr = nb.get_or_create_manufacturer(vendor_name or "Unknown")
-        device_type = nb.get_or_create_device_type(mfr, model)
+        device_type = nb.get_or_create_device_type(mfr, model, part_number=model)
     except Exception as exc:
         log.error("Auto-create %s: device type %r/%r failed: %s", ip, vendor_name, model, exc)
         return False
