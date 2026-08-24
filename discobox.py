@@ -797,10 +797,16 @@ class NetboxClient:
         return "created"
 
     def get_or_create_manufacturer(self, name: str) -> pynetbox.core.response.Record:
-        """Return an existing Manufacturer or create one."""
-        existing = self.nb.dcim.manufacturers.get(name=name)
+        """
+        Return an existing Manufacturer or create one.
+
+        Case-insensitive lookup: Netdisco's device-level `vendor` field is
+        lowercase (e.g. "cisco"), which would otherwise create a duplicate
+        manufacturer alongside an existing properly-cased "Cisco".
+        """
+        existing = list(self.nb.dcim.manufacturers.filter(name__ie=name))
         if existing:
-            return existing
+            return existing[0]
         mfr = self.nb.dcim.manufacturers.create(name=name, slug=slugify(name))
         logger.debug("  Manufacturer created: %s", name)
         return mfr
