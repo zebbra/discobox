@@ -5,7 +5,7 @@ discobox: Netdisco → Netbox sync library.
 Imported by cli.py (one-shot CLI) and server.py (FastAPI webhook receiver).
 """
 
-__version__ = "1.3.11"
+__version__ = "1.4.0"
 
 import ipaddress
 import json
