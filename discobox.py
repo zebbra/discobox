@@ -13,7 +13,7 @@ import logging
 import re
 import sys
 from datetime import date, timedelta
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import pynetbox
 import requests
@@ -163,6 +163,69 @@ def parse_speed_kbps(speed_str: Optional[str]) -> Optional[int]:
     multipliers = {"kbps": 1, "mbps": 1_000, "gbps": 1_000_000}
     return int(value * multipliers[unit])
 
+
+
+# Raw OID fragments Netdisco reports as a model when it has no matching MIB:
+# "enterprises.2440", ".1570", ".107.1.50001", "1.3.6.1.4.1.9"
+_OID_MODEL_RE = re.compile(r"^(?:enterprises)?(?:\.\d+)+$|^\d+(?:\.\d+)+$", re.IGNORECASE)
+
+
+def is_oid_model(value: Optional[str]) -> bool:
+    """True when value is an OID fragment rather than a real model name."""
+    return bool(value) and bool(_OID_MODEL_RE.match(value.strip()))
+
+
+def _norm_vendor(value: Optional[str]) -> str:
+    """Vendor name → comparison key: "Efficient IP", "efficientip" and "EfficientIP" are equal."""
+    return re.sub(r"[^a-z0-9]", "", (value or "").lower())
+
+
+TypeAlias = tuple[Optional[str], Callable[[str], bool], str]   # (vendor key or None, matcher, target)
+
+
+def _compile_type_aliases(aliases: Optional[dict]) -> list[TypeAlias]:
+    """
+    Config alias map → [(vendor, matcher, target)], vendor-scoped entries first.
+
+    Keys match a raw SNMP model exactly (case-insensitive), or as a regex when
+    written /like this/. Targets name a Netbox part_number, model or slug.
+    A mapping as value scopes its entries to that vendor (Netdisco vendor or
+    Netbox manufacturer name): OID fragments like ".1570" are only unique
+    within one vendor's enterprise tree.
+    """
+    def _matcher(key: str) -> Callable[[str], bool]:
+        if len(key) > 2 and key.startswith("/") and key.endswith("/"):
+            rx = re.compile(key[1:-1], re.IGNORECASE)
+            return lambda s: bool(rx.search(s))
+        k = key.lower()
+        return lambda s: s.strip().lower() == k
+
+    scoped: list[TypeAlias] = []
+    unscoped: list[TypeAlias] = []
+    def _add(vendor: Optional[str], key: object, target: object) -> None:
+        if not isinstance(key, str):
+            # unquoted YAML like `.1570: X` loads as the float 0.157
+            logger.warning("Type alias key %r is not a string (quote it in YAML): ignored", key)
+            return
+        key, target = key.strip(), str(target or "").strip()
+        if key and target:
+            (scoped if vendor else unscoped).append((vendor, _matcher(key), target))
+
+    for key, value in (aliases or {}).items():
+        if isinstance(value, dict):
+            for sub_key, target in value.items():
+                _add(_norm_vendor(str(key)), sub_key, target)
+        else:
+            _add(None, key, value)
+    return scoped + unscoped
+
+
+def _split_aliases(value: object) -> list[str]:
+    """Alias custom field value → list: accepts a list, or text separated by commas/newlines."""
+    if not value:
+        return []
+    items = value if isinstance(value, (list, tuple)) else re.split(r"[,\n]", str(value))
+    return [str(i).strip() for i in items if str(i).strip()]
 
 
 def slugify(value: str) -> str:
@@ -347,6 +410,10 @@ class NetboxClient:
         token: str,
         verify_tls: bool = True,
         on_request: Optional[Callable[[str], None]] = None,
+        type_alias_cf: Optional[str] = "snmp_models",
+        device_type_aliases: Optional[dict] = None,
+        module_type_aliases: Optional[dict] = None,
+        create_missing_types: bool = True,
     ):
         session = _ChangelogSession(on_request=on_request)
         if not verify_tls:
@@ -354,6 +421,13 @@ class NetboxClient:
             session.verify = False
         self.nb = pynetbox.api(url, token=token)
         self.nb.http_session = session
+        self.type_alias_cf = type_alias_cf
+        self.device_type_aliases = _compile_type_aliases(device_type_aliases)
+        self.module_type_aliases = _compile_type_aliases(module_type_aliases)
+        self.create_missing_types = create_missing_types
+        # object type ("dcim.devicetype") → whether type_alias_cf exists on it;
+        # only cached after a successful lookup
+        self._alias_cf_enabled: dict[str, bool] = {}
 
     def find_device_by_ip(self, ip: str, hostname: str = "", serial: str = "") -> Optional[pynetbox.core.response.Record]:
         """
@@ -811,26 +885,150 @@ class NetboxClient:
         logger.debug("  Manufacturer created: %s", name)
         return mfr
 
+    def _alias_cf_active(self, object_type: str) -> bool:
+        """True when type_alias_cf is configured and exists on object_type (e.g. "dcim.devicetype")."""
+        if not self.type_alias_cf:
+            return False
+        if object_type not in self._alias_cf_enabled:
+            try:
+                assigned: set[str] = set()
+                for cf in self.nb.extras.custom_fields.filter(name=self.type_alias_cf):
+                    # NetBox 4.x: object_types; 3.x: content_types
+                    assigned.update(getattr(cf, "object_types", None) or getattr(cf, "content_types", None) or [])
+            except Exception as exc:
+                logger.warning("Type alias custom field %r lookup failed: %s", self.type_alias_cf, exc)
+                return False
+            enabled = object_type in assigned
+            self._alias_cf_enabled[object_type] = enabled
+            if not enabled:
+                logger.info(
+                    "Type alias custom field %r not assigned to %s: alias lookup via Netbox disabled",
+                    self.type_alias_cf, object_type,
+                )
+        return self._alias_cf_enabled[object_type]
+
+    def _find_type_by_ref(self, endpoint, ref: str) -> Optional[pynetbox.core.response.Record]:
+        """Exact part_number, then model, then slug match across all manufacturers."""
+        for field in ("part_number", "model", "slug"):
+            for r in endpoint.filter(**{field: ref}):
+                if getattr(r, field, None) == ref:
+                    return r
+        return None
+
+    def _lookup_type_alias(
+        self,
+        endpoint,
+        object_type: str,
+        aliases: list[TypeAlias],
+        raws: list[Optional[str]],
+        vendors: tuple[Optional[str], ...] = (),
+    ) -> tuple[Optional[pynetbox.core.response.Record], bool]:
+        """
+        Translate raw SNMP model strings to an existing DeviceType/ModuleType.
+
+        Config aliases are tried first (they override Netbox; entries scoped
+        to one of vendors before unscoped ones), then the type_alias_cf custom
+        field on the types themselves. Returns (record, matched): matched with
+        record None means an alias exists but its target type doesn't: the
+        caller must not create a type from the raw string.
+        """
+        candidates = [r for r in dict.fromkeys(raws) if r]
+        vendor_keys = {_norm_vendor(v) for v in vendors if v}
+        for vendor, matches, target in aliases:
+            if vendor and vendor not in vendor_keys:
+                continue
+            raw = next((r for r in candidates if matches(r)), None)
+            if raw is None:
+                continue
+            found = self._find_type_by_ref(endpoint, target)
+            if found:
+                logger.debug("  Type alias %r → %r (config)", raw, target)
+            else:
+                logger.warning(
+                    "  Type alias %r → %r: no such %s in Netbox, create it or fix the alias",
+                    raw, target, object_type,
+                )
+            return found, True
+        if self._alias_cf_active(object_type):
+            cf = self.type_alias_cf
+            for raw in candidates:
+                wanted = raw.strip().lower()
+                hits = [
+                    r for r in endpoint.filter(**{f"cf_{cf}__ic": raw})
+                    if wanted in {a.lower() for a in _split_aliases((getattr(r, "custom_fields", {}) or {}).get(cf))}
+                ]
+                if hits:
+                    # the same OID fragment may be listed on types of several vendors
+                    hit = next(
+                        (r for r in hits if _norm_vendor(getattr(getattr(r, "manufacturer", None), "name", None)) in vendor_keys),
+                        hits[0],
+                    )
+                    logger.debug("  Type alias %r → %r (custom field %s)", raw, getattr(hit, "model", hit), cf)
+                    return hit, True
+        return None, False
+
+    def resolve_device_type_alias(
+        self, *raws: Optional[str], vendor: Optional[str] = None,
+    ) -> Optional[pynetbox.core.response.Record]:
+        """DeviceType a type alias maps any of raws to, or None: never falls back or creates."""
+        found, _ = self._lookup_type_alias(
+            self.nb.dcim.device_types, "dcim.devicetype", self.device_type_aliases, list(raws), (vendor,),
+        )
+        return found
+
     def get_or_create_device_type(
         self,
-        manufacturer: pynetbox.core.response.Record,
+        manufacturer: Union[pynetbox.core.response.Record, str],
         model: str,
         part_number: Optional[str] = None,
-    ) -> pynetbox.core.response.Record:
+        vendor: Optional[str] = None,
+    ) -> Optional[pynetbox.core.response.Record]:
         """
         Return an existing DeviceType or create one under manufacturer.
 
-        Matches by part_number across ALL manufacturers first: different
+        Type aliases (see _lookup_type_alias) win over everything else, so a
+        raw SNMP model like "enterprises.2440" can be pointed at a curated type.
+
+        Then matches by part_number across ALL manufacturers: different
         vendors essentially never share a part number, so if this hardware
         already has a DeviceType record, reuse it (and its manufacturer)
         rather than risking a second copy under a wrongly-resolved vendor
         name (e.g. Netdisco's lowercase "cisco" vs. an existing "Cisco").
+
+        OID fragments (see is_oid_model) are only ever resolved via an alias,
+        never matched or created as-is.
+
+        manufacturer may be a name, resolved (and created) only when needed.
+        vendor (Netdisco's device vendor) selects vendor-scoped aliases, as
+        does the manufacturer name. Returns None when nothing matches and
+        create_missing_types is off, when an alias points at a type that
+        doesn't exist, or when only OID fragments are known.
         """
+        mfr_name = manufacturer if isinstance(manufacturer, str) else getattr(manufacturer, "name", None)
+        found, matched = self._lookup_type_alias(
+            self.nb.dcim.device_types, "dcim.devicetype", self.device_type_aliases,
+            [part_number, model], (vendor, mfr_name),
+        )
+        if matched:
+            return found
+        raw_model = model
+        if is_oid_model(part_number):
+            part_number = None
+        if is_oid_model(model):
+            model = part_number or ""
+        if not model:
+            logger.warning(
+                "  DeviceType skipped: Netdisco model %r is an OID fragment, add a type alias (vendor %r)",
+                raw_model, vendor or mfr_name,
+            )
+            return None
         if part_number:
             results = list(self.nb.dcim.device_types.filter(part_number=part_number))
             existing = next((r for r in results if getattr(r, "part_number", None) == part_number), None)
             if existing:
                 return existing
+        if isinstance(manufacturer, str):
+            manufacturer = self.get_or_create_manufacturer(manufacturer)
         slug = slugify(model)
         results = list(self.nb.dcim.device_types.filter(manufacturer_id=manufacturer.id, model=model))
         existing = next((r for r in results if getattr(r, "model", None) == model), None)
@@ -844,6 +1042,12 @@ class NetboxClient:
             if not getattr(existing, "part_number", None):
                 existing.update({"part_number": part_number or model})
             return existing
+        if not self.create_missing_types:
+            logger.warning(
+                "  DeviceType %s / %s not in Netbox and types.create_missing is off: skipped",
+                manufacturer.name, model,
+            )
+            return None
         dt = self.nb.dcim.device_types.create(
             manufacturer=manufacturer.id,
             model=model,
@@ -858,13 +1062,26 @@ class NetboxClient:
         self,
         manufacturer: pynetbox.core.response.Record,
         model: str,
-    ) -> pynetbox.core.response.Record:
+        vendor: Optional[str] = None,
+    ) -> Optional[pynetbox.core.response.Record]:
         """
         Return an existing ModuleType or create one under manufacturer.
 
-        Matches by part_number across ALL manufacturers first — see
-        get_or_create_device_type for why.
+        Type aliases first, then part_number across ALL manufacturers — see
+        get_or_create_device_type for why, and for when None is returned.
         """
+        found, matched = self._lookup_type_alias(
+            self.nb.dcim.module_types, "dcim.moduletype", self.module_type_aliases,
+            [model], (vendor, getattr(manufacturer, "name", None)),
+        )
+        if matched:
+            return found
+        if is_oid_model(model):
+            logger.warning(
+                "  ModuleType skipped: Netdisco model %r is an OID fragment, add a type alias (vendor %r)",
+                model, vendor or getattr(manufacturer, "name", None),
+            )
+            return None
         results = list(self.nb.dcim.module_types.filter(part_number=model))
         existing = next((r for r in results if getattr(r, "part_number", None) == model), None)
         if existing:
@@ -882,6 +1099,12 @@ class NetboxClient:
             if not getattr(existing, "part_number", None):
                 existing.update({"part_number": model})
             return existing
+        if not self.create_missing_types:
+            logger.warning(
+                "  ModuleType %s / %s not in Netbox and types.create_missing is off: skipped",
+                manufacturer.name, model,
+            )
+            return None
         mt = self.nb.dcim.module_types.create(
             manufacturer=manufacturer.id,
             model=model,
@@ -2033,10 +2256,16 @@ def _create_device_from_nd(
     serial = primary_ch.get("serial") or nd_device.get("serial") or ""
 
     try:
-        mfr = nb.get_or_create_manufacturer(vendor_name or "Unknown")
-        device_type = nb.get_or_create_device_type(mfr, model, part_number=model)
+        # Name, not Record: an aliased type brings its own manufacturer, so
+        # "Unknown" is only created if a new type actually needs it
+        device_type = nb.get_or_create_device_type(
+            vendor_name or "Unknown", model, part_number=model, vendor=nd_device.get("vendor"),
+        )
     except Exception as exc:
         log.error("Auto-create %s: device type %r/%r failed: %s", ip, vendor_name, model, exc)
+        return False
+    if not device_type:
+        log.warning("Auto-create %s: no DeviceType for %r/%r, device not created", ip, vendor_name, model)
         return False
 
     resolved_site_id = sites[0].id
@@ -3216,10 +3445,11 @@ def sync_device(
             """Update DeviceType (and serial) on nb_device from a chassis entry."""
             part_number = ch.get("model", "") or ""
             serial = ch.get("serial") or ""
-            # Skip device type update when model looks like a raw OID fragment
-            # (e.g. ".112.100.1003"): keep whatever is already set in Netbox.
+            # An OID fragment model (e.g. ".112.100.1003") still goes through
+            # get_or_create_device_type: a type alias may resolve it, and
+            # otherwise it returns None and the current DeviceType stays.
             model = parse_sw_model(ch.get("sw_ver", "")) or part_number
-            if not model or model.startswith("."):
+            if not model:
                 if serial and (nb_device.serial or "") != serial:
                     nb_device.update({"serial": serial})
                     log.debug("  serial=%s updated (no valid model from Netdisco)", serial)
@@ -3229,17 +3459,18 @@ def sync_device(
                 return
             vendor_name = vendor_from_chassis(ch)
             mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
-            device_type = nb.get_or_create_device_type(mfr, model, part_number=part_number)
+            device_type = nb.get_or_create_device_type(mfr, model, part_number=part_number, vendor=nd_device.get("vendor"))
             patch = {}
-            if nb_device.device_type.id != device_type.id:
+            if device_type and nb_device.device_type.id != device_type.id:
                 patch["device_type"] = device_type.id
             if serial and (nb_device.serial or "") != serial:
                 patch["serial"] = serial
             if patch:
                 nb_device.update(patch)
                 # pynetbox replaces device_type with a plain int after update: restore the object
-                nb_device.device_type = device_type
-                log.debug("  DeviceType → %s / %s  serial=%s  updated", mfr.name, model, serial)
+                if device_type:
+                    nb_device.device_type = device_type
+                log.debug("  DeviceType → %s  serial=%s  updated", getattr(device_type, "model", model), serial)
                 mod_counts["updated"] += 1
             else:
                 log.debug("  DeviceType unchanged")
@@ -3253,7 +3484,10 @@ def sync_device(
             position = str(ch.get("pos", ""))
             vendor_name = vendor_from_chassis(ch)
             mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
-            module_type = nb.get_or_create_module_type(mfr, model)
+            module_type = nb.get_or_create_module_type(mfr, model, vendor=nd_device.get("vendor"))
+            if not module_type:
+                mod_counts["unchanged"] += 1
+                return
             bay = nb.upsert_module_bay(nb_device, name, position)
             action, module = nb.upsert_module(nb_device, bay, module_type, serial, batch=module_patch_batch)
             mod_counts[action] += 1
@@ -3344,9 +3578,11 @@ def sync_device(
                     mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
                     partner_part_number = partner_model
                     partner_model = parse_sw_model(partner_ch.get("sw_ver", "")) or partner_part_number
-                    partner_dt = nb.get_or_create_device_type(mfr, partner_model, part_number=partner_part_number)
+                    partner_dt = nb.get_or_create_device_type(
+                        mfr, partner_model, part_number=partner_part_number, vendor=nd_device.get("vendor"),
+                    )
                     patch: dict = {}
-                    if partner_dev.device_type.id != partner_dt.id:
+                    if partner_dt and partner_dev.device_type.id != partner_dt.id:
                         patch["device_type"] = partner_dt.id
                     if partner_serial and (partner_dev.serial or "") != partner_serial:
                         patch["serial"] = partner_serial
@@ -3389,7 +3625,23 @@ def sync_device(
             device_serial = nd_device.get("serial", "")
             master = next((c for c in chassis if c.get("serial") == device_serial), chassis[0] if chassis else None)
             if master is None:
-                log.warning("  No chassis modules reported by Netdisco: skipping DeviceType/module sync")
+                # No ENTITY-MIB chassis: Netdisco's device model is then often just
+                # the sysObjectID (e.g. "enterprises.2440"), so only an explicit
+                # type alias may move the DeviceType, never the raw string itself
+                current_dt = nb_device.device_type
+                aliased = nb.resolve_device_type_alias(
+                    nd_device.get("model"),
+                    getattr(current_dt, "part_number", None),
+                    getattr(current_dt, "model", None),
+                    vendor=nd_device.get("vendor"),
+                )
+                if aliased and aliased.id != current_dt.id:
+                    nb_device.update({"device_type": aliased.id})
+                    nb_device.device_type = aliased
+                    log.info("  DeviceType → %s (type alias, no chassis modules)", aliased.model)
+                    mod_counts["updated"] += 1
+                else:
+                    log.warning("  No chassis modules reported by Netdisco: skipping DeviceType/module sync")
             else:
                 try:
                     _update_device_type(master)
@@ -3435,9 +3687,9 @@ def sync_device(
                 return "unchanged"
             vendor_name = vendor_from_chassis(ch)
             mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
-            device_type = nb.get_or_create_device_type(mfr, model, part_number=model)
+            device_type = nb.get_or_create_device_type(mfr, model, part_number=model, vendor=nd_device.get("vendor"))
             patch = {}
-            if ap_dev.device_type.id != device_type.id:
+            if device_type and ap_dev.device_type.id != device_type.id:
                 patch["device_type"] = device_type.id
             if serial and (ap_dev.serial or "") != serial:
                 patch["serial"] = serial
@@ -3746,7 +3998,10 @@ def sync_device(
             try:
                 vendor_name = vendor_from_chassis(blade)
                 mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
-                module_type = nb.get_or_create_module_type(mfr, blade_model)
+                module_type = nb.get_or_create_module_type(mfr, blade_model, vendor=nd_device.get("vendor"))
+                if not module_type:
+                    blade_counts["unchanged"] += 1
+                    continue
                 bay = nb.upsert_module_bay(target_device, blade_name, position)
                 action, blade_module = nb.upsert_module(
                     target_device, bay, module_type, blade_serial, batch=blade_patch_batch,

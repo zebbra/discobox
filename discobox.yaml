@@ -41,8 +41,27 @@ sync:
   # no_sfp: false
   # no_poe: false
 
+types:                      # DeviceType/ModuleType resolution for raw SNMP model strings
+  create_missing: true      # false = never create a type from a raw model: log and leave
+                            # the device's type alone (auto-create skips the device)
+  alias_cf: snmp_models     # text custom field on DeviceType/ModuleType holding the raw
+                            # models (comma- or newline-separated) that map to it; ignored
+                            # unless the field exists in Netbox. null to disable
+  device_aliases:           # raw model → Netbox part_number (or model/slug); exact match
+                            # (case-insensitive) or /regex/. Tried before alias_cf and
+                            # before any other matching. OID-fragment models (".1570",
+                            # "enterprises.2440") are never created as types: they only
+                            # resolve through an alias. QUOTE keys: unquoted .1570 is a float
+    "enterprises.2440": efficientip-generic   # 2440 = EfficientIP's enterprise number
+    cisco:                  # nested = vendor-scoped (Netdisco vendor or manufacturer name):
+      ".1570": N9K-C9332D-GX2B  # a bare product OID suffix is only unique per vendor
+    fortinet:
+      ".107.1.50001": FWB_VM
+  # module_aliases:
+  #   "/^GLC-SX-MMD?$/": GLC-SX-MM
+
 cabling:
-  scope: site               # site = same-site pairs only; null/empty to disable
+  scope: site              # site = same-site pairs only; null/empty to disable
   source_cf: source
   source_value: netdisco
 

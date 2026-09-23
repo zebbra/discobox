@@ -83,7 +83,7 @@ python cli.py --host 10.0.0.1
 - **IP addresses** — assigns interface IPs; fixes prefix mismatches (e.g. `/32` → `/26`); moves IPs from dummy placeholder interfaces to the correct one
 - **Module bays & modules** — models physical chassis members as module bays with installed modules; assigns interfaces to their parent module
 - **Blades** — models linecards, supervisors, and fabric modules as module bays on the device they belong to (routed per VSS member for split chassis)
-- **Device type auto-creation** — creates manufacturer, device type (with part number and slug) if not present in Netbox
+- **Device type auto-creation** — creates manufacturer, device type (with part number and slug) if not present in Netbox; raw SNMP models can be translated to curated types first (see [Type aliases](#type-aliases))
 - **SFP / transceiver inventory** — creates inventory items for transceivers with serial numbers, linked to their interface
 - **PSU inventory** — creates inventory items for power supplies
 - **HA / VIP detection** — detects cluster VIPs by hostname mismatch; redirects sync to the real active node; creates a Virtual Chassis linking both HA members; optionally deletes the VIP device (housekeeping)
@@ -272,6 +272,43 @@ These fields are optional. If set on a Device they are passed to the Netdisco di
 | `snmp_auth_profile` | Select | SNMP credential tag in Netdisco (maps to `snmp_tag`) |
 | `snmp_polling_timeout` | Select | Discovery timeout, e.g. `30s`, `3m` (default: `3s` if unset) |
 
+| `snmp_models` | Text | Set on **DeviceType** / **ModuleType**: raw SNMP model strings (comma- or newline-separated) that map to this type, e.g. `enterprises.2440`. See [Type aliases](#type-aliases) |
+
+### Type aliases
+
+SNMP often reports a model that isn't what the type should be called in Netbox, e.g. `enterprises.2440`
+(a sysObjectID left over when Netdisco has no matching MIB). Before its usual matching (part number,
+model, slug), discobox translates the raw model string through:
+
+1. `types.device_aliases` / `types.module_aliases` in `discobox.yaml`: exact (case-insensitive) or `/regex/` keys → Netbox part number (or model/slug) of an existing type; vendor-scoped entries win over unscoped ones
+2. the `snmp_models` custom field (`types.alias_cf`) on DeviceType/ModuleType, if it exists in Netbox
+
+```yaml
+types:
+  create_missing: true
+  alias_cf: snmp_models
+  device_aliases:
+    "enterprises.2440": efficientip-generic
+    cisco:                        # vendor-scoped: Netdisco vendor or Netbox manufacturer name
+      ".1570": N9K-C9332D-GX2B
+    fortinet:
+      ".107.1.50001": FWB_VM
+```
+
+Models that are just OID fragments (`enterprises.2440`, `.1570`, `.107.1.50001`) are never trusted.
+They resolve only through an alias, and are never matched or created as a type themselves. Such a
+fragment is only unique within its vendor's enterprise tree, so scope it under the vendor (nested
+mapping, vendor compared ignoring case and punctuation). `enterprises.<n>` already names the vendor and
+can stay unscoped. Quote the keys: YAML reads an unquoted `.1570` as the number `0.157`.
+
+An alias whose target type doesn't exist in Netbox is logged and skipped. discobox never falls back to
+creating a type from the raw string. For devices without ENTITY-MIB chassis modules, the alias is
+checked against Netdisco's device model and the device's current Netbox type. So a device already on a
+wrongly auto-created `enterprises.2440` type moves to the aliased type on its next sync, and the old type
+can then be deleted. With
+`types.create_missing: false`, discobox never creates types. An unmatched model is logged and the device
+keeps its current type (auto-create skips the device instead).
+
 ### Written by discobox on Interfaces (Netdisco → Netbox)
 
 CDP/LLDP neighbor data from Netdisco, written on every interface sync. Text fields — no dependency on the neighbor existing in Netbox.
@@ -417,7 +454,7 @@ INFO     discobox    stack (root)  'Virtual Stack'  model=  serial=
 INFO     discobox    ├── chassis  'Switch 2 Chassis'  model=C9500-24Y4C  serial=FDO25031B4R
 INFO     discobox    └── chassis  'Switch 1 Chassis'  model=C9500-24Y4C  serial=FDO25031N7Q
 INFO     discobox  Modules   chassis=2  topology=vss
-INFO     discobox    DeviceType → Cisco / C9500-24Y4C  serial=FDO25031N7Q  updated
+INFO     discobox    DeviceType → C9500-24Y4C  serial=FDO25031N7Q  updated
 INFO     discobox    VSS partner found by hostname 'swdist01-vss2.corp.example.com'
 INFO     discobox    VSS partner DeviceType → C9500-24Y4C  serial=FDO25031B4R  updated
 INFO     discobox    VirtualChassis 'SWDIST01-VSS1' — created
@@ -444,7 +481,7 @@ INFO     discobox  Housekeeping — deleted 0 stale device bay(s), 0 empty dummy
 INFO     discobox    chassis (root)  'Nexus9000 C9508 (8 Slot) Chassis'  type=cevChassisN9Kc9508  model=N9K-C9508  serial=FGE22124W6T
 INFO     discobox    └── chassis  'Nexus9000 C9508 (8 Slot) Chassis'  model=N9K-C9508  serial=FGE22124W6T
 INFO     discobox  Modules   chassis=1  topology=standalone
-INFO     discobox    DeviceType → Cisco / N9K-C9508  serial=FGE22124W6T  updated
+INFO     discobox    DeviceType → N9K-C9508  serial=FGE22124W6T  updated
 INFO     discobox  Modules — updated=1 unchanged=0 errors=0
 INFO     discobox  PSUs      entries: 6
 INFO     discobox    PSU PSU 1  model=N9K-PAC-3000W-B  serial=ART2216B3QN  created

@@ -422,6 +422,11 @@ _STACK_MEMBERS_ONLY_INCREASE: bool  = _cbool(_CFG, "custom_fields", "stack_membe
 _CF_TOUCH:           Optional[str]  = _cstr(_CFG, "custom_fields", "touch", default="netdisco_last_update")
 _TOUCH_COOLDOWN_DAYS: int           = int(_c(_CFG, "sync", "touch_cooldown_days", default=1))
 
+_TYPES_CREATE_MISSING: bool          = _cbool(_CFG, "types", "create_missing", default=True)
+_TYPES_ALIAS_CF:      Optional[str]  = _cstr(_CFG, "types", "alias_cf", default="snmp_models")
+_TYPES_DEVICE_ALIASES: dict          = _c(_CFG, "types", "device_aliases", default={}) or {}
+_TYPES_MODULE_ALIASES: dict          = _c(_CFG, "types", "module_aliases", default={}) or {}
+
 
 async def require_auth(authorization: Annotated[str, Header()] = "") -> None:
     """Bearer token auth. Disabled if DISCOBOX_AUTH_TOKEN is not set."""
@@ -544,6 +549,10 @@ def _get_netbox_client() -> NetboxClient:
                     token=os.environ["NETBOX_TOKEN"],
                     verify_tls=os.getenv("NETBOX_TLS_VERIFY", "true").lower() != "false",
                     on_request=_count_netbox_request,
+                    type_alias_cf=_TYPES_ALIAS_CF,
+                    device_type_aliases=_TYPES_DEVICE_ALIASES,
+                    module_type_aliases=_TYPES_MODULE_ALIASES,
+                    create_missing_types=_TYPES_CREATE_MISSING,
                 )
     return _netbox_client
 
