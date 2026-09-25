@@ -2934,11 +2934,14 @@ def reconcile_devices(
         for d in nd_all_devices
         if d.get("ip") and d["ip"] not in nb_all_ips
     ]
-    counts["not_in_netdisco"] = len(not_in_netdisco)
+    # Devices liveness reports down are expected to be missing from Netdisco
+    # (discovery can't reach them): keep them in the list, not in the count.
+    counts["not_in_netdisco"] = sum(1 for e in not_in_netdisco if e.get("status") != "down")
     counts["not_in_netbox"] = len(not_in_netbox)
     counts["tag_mismatches"] = len(tag_mismatches)
     if not_in_netdisco or not_in_netbox:
-        log.info("Gaps: not_in_netdisco=%d  not_in_netbox=%d", len(not_in_netdisco), len(not_in_netbox))
+        log.info("Gaps: not_in_netdisco=%d (+%d offline)  not_in_netbox=%d",
+                 counts["not_in_netdisco"], counts["skipped_offline"], len(not_in_netbox))
     if tag_mismatches:
         log.info("Auth tag mismatches: %d", len(tag_mismatches))
 

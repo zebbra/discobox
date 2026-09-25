@@ -208,8 +208,9 @@ def test_reconcile_skips_down_enqueues_up_and_unknown() -> None:
     assert counts["skipped_offline"] == 1
     statuses = {e["ip"]: e["status"] for e in counts["not_in_netdisco_list"]}
     assert statuses == {"10.0.0.1": "up", "10.0.0.2": "down", "10.0.0.3": "unknown"}
-    # down devices stay visible in the gap list/count
-    assert counts["not_in_netdisco"] == 3
+    # down devices stay in the gap list but are excluded from the count
+    assert len(counts["not_in_netdisco_list"]) == 3
+    assert counts["not_in_netdisco"] == 2
 
 
 def test_reconcile_default_status_filter_is_active_only() -> None:
