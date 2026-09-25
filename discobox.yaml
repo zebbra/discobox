@@ -53,9 +53,9 @@ types:                      # DeviceType/ModuleType resolution for raw SNMP mode
                             # "enterprises.2440") are never created as types: they only
                             # resolve through an alias. QUOTE keys: unquoted .1570 is a float
     "enterprises.2440": efficientip-generic   # 2440 = EfficientIP's enterprise number
-    cisco:                  # nested = vendor-scoped (Netdisco vendor or manufacturer name):
-      ".1570": N9K-C9332D-GX2B  # a bare product OID suffix is only unique per vendor
-    fortinet:
+    cisco:                  # nested = vendor-scoped (Netdisco vendor or manufacturer name)
+      "N9KC93180YCFX3": N9K-C93180YC-FX3  # placeholder chassis (no ENTITY-MIB, e.g. NX-OS 10.4)
+    fortinet:               # a bare product OID suffix is only unique per vendor
       ".107.1.50001": FWB_VM
   # module_aliases:
   #   "/^GLC-SX-MMD?$/": GLC-SX-MM
@@ -88,6 +88,15 @@ custom_fields:
   neighbor_iface: neighbor_iface
   controller: controller    # object CF (type Object → Device) on Device: set to the WLC on
                             # every AP it reports; skipped unless the field exists — null to disable
+
+library:                    # DeviceType enrichment from the devicetype-library (/types/library)
+  path: /opt/devicetype-library  # device-types/ checkout; the image bakes a pinned copy in
+  overlay: null             # extra dir, same layout, wins over the library: fills its gaps
+  roles: []                 # default role slugs when a request names neither role= nor type=
+  device_types: {}          # Netbox DeviceType (model/part_number/slug) → library
+                            # part_number/model/slug, same vendor, e.g.
+                            #   "9120AX": C9120AXI-E
+                            # without a mapping: exact part_number, then exact model (same manufacturer)
 
 aps:                        # access points reported by a WLC (updated during the WLC's sync)
   dummy_interfaces: [main, vlan2]  # placeholder interfaces deleted from APs (housekeeping only,

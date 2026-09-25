@@ -12,6 +12,7 @@ Endpoints:
   GET/POST /rebuild          Rebuild one device's inventory to exactly match Netdisco (deletes stale entries)
   GET/POST /sync/pause       Hold queued syncs from starting
   GET/POST /sync/resume      Release the pause gate
+  GET/POST /types/library    Enrich DeviceTypes from the devicetype-library (dry-run unless POST apply=true)
   GET      /metrics          Prometheus metrics
   GET      /health           Liveness check
   GET      /stats            Aggregated operational status as JSON
@@ -28,6 +29,7 @@ from collections import deque
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from functools import partial
+from pathlib import Path
 from typing import Annotated, Any, Optional
 
 import uvicorn
@@ -57,6 +59,7 @@ from discobox import (
     sync_device,
     validate_ip,
 )
+from typesync import Library, sync_types
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
@@ -428,6 +431,25 @@ _TYPES_CREATE_MISSING: bool          = _cbool(_CFG, "types", "create_missing", d
 _TYPES_ALIAS_CF:      Optional[str]  = _cstr(_CFG, "types", "alias_cf", default="snmp_models")
 _TYPES_DEVICE_ALIASES: dict          = _c(_CFG, "types", "device_aliases", default={}) or {}
 _TYPES_MODULE_ALIASES: dict          = _c(_CFG, "types", "module_aliases", default={}) or {}
+
+# DeviceType enrichment from the devicetype-library (typesync.py, /types/library)
+_LIBRARY_PATH:    Optional[str] = _cstr(_CFG, "library", "path", default="/opt/devicetype-library")
+_LIBRARY_OVERLAY: Optional[str] = _cstr(_CFG, "library", "overlay")
+_LIBRARY_ROLES:   list          = list(_c(_CFG, "library", "roles", default=[]) or [])
+_LIBRARY_MAPPING: dict          = _c(_CFG, "library", "device_types", default={}) or {}
+_library: Optional[Library] = None
+_library_lock = threading.Lock()
+
+
+def _get_library() -> Library:
+    global _library
+    with _library_lock:
+        if _library is None:
+            if not _LIBRARY_PATH or not os.path.isdir(os.path.join(_LIBRARY_PATH, "device-types")):
+                raise HTTPException(503, f"devicetype-library not found at {_LIBRARY_PATH!r} (library.path)")
+            roots = [_LIBRARY_PATH] + ([_LIBRARY_OVERLAY] if _LIBRARY_OVERLAY else [])
+            _library = Library([Path(r) for r in roots])
+        return _library
 
 
 async def require_auth(authorization: Annotated[str, Header()] = "") -> None:
@@ -1640,6 +1662,7 @@ async def index() -> str:
   <tr><td>GET/POST</td><td><a href=/reconcile/fix-tags>/reconcile/fix-tags</a></td><td>Re-enqueue discovery (with Netbox's expected auth tag as a hint) for the last reconcile's tag mismatches</td></tr>
   <tr><td>GET</td><td><a href=/unknown-devices>/unknown-devices</a></td><td>Devices seen via LLDP but not found in Netbox (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/not-in-netdisco>/not-in-netdisco</a></td><td>Active Netbox devices not in Netdisco (JSON)</td></tr>
+  <tr><td>GET/POST</td><td>/types/library?role=…</td><td>DeviceType enrichment from the devicetype-library (dry-run; POST apply=true writes)</td></tr>
   <tr><td>GET</td><td><a href=/not-in-netbox>/not-in-netbox</a></td><td>Netdisco devices not in Netbox (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/tag-mismatches>/tag-mismatches</a></td><td>Devices with a missing or Netbox-mismatched auth tag (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/metrics>/metrics</a></td><td>Prometheus metrics</td></tr>
@@ -1708,6 +1731,28 @@ async def trigger_fix_tags(
         pending = len(_load_gap(_TAG_MISMATCHES_FILE))
     background_tasks.add_task(_run_fix_tag_mismatches, max_enqueue=max_enqueue)
     return {"status": "fix-tags queued", "max_enqueue": max_enqueue, "pending": pending}
+
+
+@app.api_route(
+    "/types/library",
+    methods=["GET", "POST"],
+    dependencies=[Depends(require_auth)],
+    summary="Enrich DeviceTypes from the devicetype-library (fill-blank; dry-run unless POST apply=true)",
+)
+def types_library(
+    request: Request,
+    role: Annotated[Optional[list[str]], Query(description="Device role slug(s) whose DeviceTypes to include (default: library.roles)")] = None,
+    type: Annotated[Optional[list[str]], Query(description="DeviceType model/slug/part_number(s) to include")] = None,
+    apply: Annotated[bool, Query(description="Write the changes (POST only)")] = False,
+) -> dict:
+    # Plain def: FastAPI runs it in its threadpool, the Netbox calls don't block the event loop.
+    if apply and request.method != "POST":
+        raise HTTPException(405, "apply=true needs POST")
+    roles = role if role is not None else _LIBRARY_ROLES
+    types = type or []
+    if not roles and not types:
+        raise HTTPException(400, "Nothing selected: pass role= and/or type= (or set library.roles)")
+    return sync_types(_get_netbox_client(), _get_library(), _LIBRARY_MAPPING, roles, types, apply=apply)
 
 
 @app.get("/unknown-devices", summary="Devices seen in Netdisco webhooks but not found in Netbox")

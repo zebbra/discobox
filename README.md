@@ -87,7 +87,8 @@ python cli.py --host 10.0.0.1
 - **SFP / transceiver inventory** — creates inventory items for transceivers with serial numbers, linked to their interface
 - **PSU inventory** — creates inventory items for power supplies
 - **HA / VIP detection** — detects cluster VIPs by hostname mismatch; redirects sync to the real active node; creates a Virtual Chassis linking both HA members; optionally deletes the VIP device (housekeeping)
-- **Wireless APs** — during a WLC's sync, updates each AP it reports (found by serial, then name): DeviceType, serial, `os_version`, an optional `controller` link to the WLC, a `## Wireless (discobox)` block in the comments (controller, site tag / tag, IP, uplink, MACs, radios; text outside its markers is never touched), and a `GigabitEthernet0` interface with the Ethernet MAC. The WLC's per-AP radio "ports" are not synced as its own interfaces. With housekeeping, empty placeholder interfaces (`aps.dummy_interfaces`, default `main`, `vlan2`) are removed from the AP
+- **Wireless APs** — during a WLC's sync, updates each AP it reports (found by serial, then name): DeviceType, serial, `os_version`, an optional `controller` link to the WLC, a `## Wireless (discobox)` block in the comments (controller, location, IP, uplink, MACs, radios; text outside its markers is never touched), a `GigabitEthernet0` interface with the Ethernet MAC, and a `Dot11Radio<slot>` per reported radio (devicetype-library names, so template interfaces are adopted), the radio base MAC on the first radio only (the WLC reports the same one for every slot). The WLC's per-AP radio "ports" are not synced as its own interfaces. With housekeeping, empty placeholder interfaces (`aps.dummy_interfaces`, default `main`, `vlan2`) are removed from the AP
+- **DeviceType enrichment** — `GET /types/library?role=…|type=…` reports what the [devicetype-library](https://github.com/netbox-community/devicetype-library) would add to existing DeviceTypes; `POST …&apply=true` writes it. Fill-blank only (weight, airflow, description, datasheet comment; `u_height` only while no device of the type is racked) plus missing interface/console/power templates. Never renames types, never imports bays, front/rear ports or images. Templates only affect devices created afterwards. A pinned copy (Cisco, Fortinet; build args `DEVICETYPE_LIBRARY_REF` / `DEVICETYPE_LIBRARY_VENDORS`) is baked into the image, and `library.device_types` maps Netbox types to library entries. Also runs standalone: `python typesync.py --library ../devicetype-library --role lwapp-ap`
 - **Housekeeping** — removes stale device bays auto-created from DeviceType templates (e.g. `PS-A`, `Fan 1`, `Slot 1`) and deletes empty dummy interfaces
 
 ---
@@ -292,7 +293,7 @@ types:
   device_aliases:
     "enterprises.2440": efficientip-generic
     cisco:                        # vendor-scoped: Netdisco vendor or Netbox manufacturer name
-      ".1570": N9K-C9332D-GX2B
+      "N9KC93180YCFX3": N9K-C93180YC-FX3   # Netdisco placeholder chassis (no ENTITY-MIB data)
     fortinet:
       ".107.1.50001": FWB_VM
 ```
