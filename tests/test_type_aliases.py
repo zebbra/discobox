@@ -132,6 +132,24 @@ def test_create_missing_off_returns_none():
     assert nb.nb.dcim.module_types.created == []
 
 
+def test_create_false_is_lookup_only():
+    nb = _client([])
+    assert nb.get_or_create_device_type("Unknown", "C9120AXE-E", part_number="C9120AXE-E", create=False) is None
+    assert nb.nb.dcim.device_types.created == []
+
+
+def test_alias_to_model_of_type_without_part_number():
+    # prod AP types: model "9120AX" / "Catalyst 9120AXI-E", part_number null
+    cisco = SimpleNamespace(id=1, name="Cisco")
+    axe = FakeType(id=131, model="9120AX", part_number=None, slug="9120ax", manufacturer=cisco, custom_fields={})
+    axi = FakeType(id=132, model="Catalyst 9120AXI-E", part_number=None, slug="catalyst-9120axi-e",
+                   manufacturer=cisco, custom_fields={})
+    nb = _client([axe, axi], device_type_aliases={"C9120AXE-E": "9120AX", "C9120AXI-E": "Catalyst 9120AXI-E"})
+    assert nb.get_or_create_device_type("Cisco", "C9120AXE-E", part_number="C9120AXE-E", create=False) is axe
+    assert nb.get_or_create_device_type("Cisco", "C9120AXI-E", part_number="C9120AXI-E", create=False) is axi
+    assert nb.nb.dcim.device_types.created == []
+
+
 def test_default_behaviour_still_creates():
     nb = _client([])
     dt = nb.get_or_create_device_type("Unknown", "WS-C9999", part_number="WS-C9999")

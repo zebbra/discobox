@@ -18,6 +18,8 @@ from discobox import (
     NetboxClient,
     _all_descriptions_missing,
     _ap_note_block,
+    _ap_radio_iface_type,
+    _ap_radio_slots,
     _ap_radios,
     _ap_wired_iface_type,
     _cf_record_id,
@@ -277,7 +279,7 @@ def test_ap_note_block_from_sample() -> None:
     assert block.startswith("<!-- discobox:ap -->\n## Wireless (discobox)\n")
     assert block.endswith("_Updated by discobox 2026-09-24_\n<!-- /discobox:ap -->")
     assert " - Controller: wlc-1.example.com" in block
-    assert f" - Site tag / tag: {parsed['site_tag']} / dot1x" in block
+    assert f" - Location: {parsed['site_tag']}/dot1x" in block
     assert f" - Ethernet MAC: {parsed['ethernet_mac']}" in block
     assert " - Radios: 0 (2.4 GHz)" in block
 
@@ -314,8 +316,29 @@ def test_merge_ap_note_empty_comments() -> None:
     assert _merge_ap_note(None, "B") == "B"
 
 
+def test_ap_radio_slots_and_type() -> None:
+    ports = [
+        {"port": "02:00:00:00:00:01.10", "mac": "02:00:00:00:00:01", "type": "dot11a"},
+        {"port": "02:00:00:00:00:01.2", "mac": "02:00:00:00:00:01", "type": "3"},
+        {"port": "02:00:00:00:00:01.0", "mac": "02:00:00:00:00:01", "type": "dot11b"},
+        {"port": "02:00:00:00:00:02.1", "mac": "02:00:00:00:00:02", "type": "dot11a"},
+    ]
+    # numeric slot order (10 after 2), only this AP's radios
+    assert _ap_radio_slots(ports, "02:00:00:00:00:01") == [("0", "dot11b"), ("2", "3"), ("10", "dot11a")]
+    assert _ap_radio_slots(ports, "") == []
+    assert _ap_radio_iface_type("C9120AXE-E") == "ieee802.11ax"
+    assert _ap_radio_iface_type("CW9166I-E") == "ieee802.11ax"
+    assert _ap_radio_iface_type("CW9176I") == "ieee802.11be"
+    assert _ap_radio_iface_type("C9124AXE-E") == "ieee802.11ax"
+    assert _ap_radio_iface_type("ISR-AP1101AX-E") == "ieee802.11ax"
+    assert _ap_radio_iface_type("AIR-AP2802I-E-K9") == "ieee802.11ac"
+    assert _ap_radio_iface_type("WP-WIFI6-E") == "other"
+
+
 def test_ap_wired_iface_type() -> None:
     assert _ap_wired_iface_type("CW9166I-E") == "5gbase-t"
+    assert _ap_wired_iface_type("CW9162I-E") == "2.5gbase-t"      # not 5G like the 9166
+    assert _ap_wired_iface_type("C9124AXE-E") == "2.5gbase-t"
     assert _ap_wired_iface_type("C9120AXE-E") == "2.5gbase-t"
     assert _ap_wired_iface_type("AIR-AP1832I-E-K9") == "1000base-t"
     assert _ap_wired_iface_type("") == "1000base-t"

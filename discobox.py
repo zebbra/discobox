@@ -982,6 +982,7 @@ class NetboxClient:
         model: str,
         part_number: Optional[str] = None,
         vendor: Optional[str] = None,
+        create: bool = True,
     ) -> Optional[pynetbox.core.response.Record]:
         """
         Return an existing DeviceType or create one under manufacturer.
@@ -1001,8 +1002,9 @@ class NetboxClient:
         manufacturer may be a name, resolved (and created) only when needed.
         vendor (Netdisco's device vendor) selects vendor-scoped aliases, as
         does the manufacturer name. Returns None when nothing matches and
-        create_missing_types is off, when an alias points at a type that
-        doesn't exist, or when only OID fragments are known.
+        create_missing_types is off (or create=False: a lookup that must never
+        mint a type), when an alias points at a type that doesn't exist, or
+        when only OID fragments are known.
         """
         mfr_name = manufacturer if isinstance(manufacturer, str) else getattr(manufacturer, "name", None)
         found, matched = self._lookup_type_alias(
@@ -1042,6 +1044,9 @@ class NetboxClient:
             if not getattr(existing, "part_number", None):
                 existing.update({"part_number": part_number or model})
             return existing
+        if not create:
+            logger.debug("  DeviceType %s / %s not in Netbox: lookup only, not created", manufacturer.name, model)
+            return None
         if not self.create_missing_types:
             logger.warning(
                 "  DeviceType %s / %s not in Netbox and types.create_missing is off: skipped",
@@ -1468,7 +1473,7 @@ class NetboxClient:
                 )
                 continue
             iface.delete()
-            logger.info("  Deleted empty dummy interface %r", iface.name)
+            logger.info("  Deleted empty dummy interface %r on %s", iface.name, device.name)
             deleted += 1
         return deleted
 
@@ -1834,35 +1839,57 @@ _AP_RADIO_BANDS = {"dot11b": "2.4 GHz", "dot11g": "2.4 GHz", "dot11a": "5 GHz"}
 
 
 def _ap_wired_iface_type(model: str) -> str:
+    """Speed type for a new GigabitEthernet0 (datasheet uplinks; a template's own type is kept)."""
     m = (model or "").upper()
-    if m.startswith("CW916"):
+    if m.startswith("CW9166"):
         return "5gbase-t"
-    if m.startswith("C9120"):
+    if m.startswith(("C9120", "C9124", "CW9162")):
         return "2.5gbase-t"
     return "1000base-t"
 
 
-def _ap_radios(radio_ports: list[dict], radio_mac: str) -> list[str]:
-    """ "slot (band)" labels of the WLC radio ports whose MAC is the AP's radio base MAC."""
+def _ap_radio_iface_type(model: str) -> str:
+    """Netbox wireless type for a new Dot11Radio<slot> (a template's own type is kept)."""
+    m = (model or "").upper()
+    if m.startswith("CW917"):
+        return "ieee802.11be"
+    if m.startswith(("C9120", "C9124", "C9130", "C9136", "CW916", "ISR-AP1101AX")):
+        return "ieee802.11ax"
+    if m.startswith("AIR-"):        # Aironet wave 1/2
+        return "ieee802.11ac"
+    return "other"
+
+
+def _ap_radio_slots(radio_ports: list[dict], radio_mac: str) -> list[tuple[str, str]]:
+    """(slot, Netdisco port type) of the WLC radio ports carrying the AP's radio base MAC, by slot."""
     out = []
     for p in radio_ports:
-        if (p.get("mac") or "").lower() != (radio_mac or "").lower():
+        if not radio_mac or (p.get("mac") or "").lower() != radio_mac.lower():
             continue
         slot = (p.get("port") or "").rsplit(".", 1)[-1]
-        rtype = p.get("type") or "?"
-        out.append((slot, f"{slot} ({_AP_RADIO_BANDS.get(rtype.lower(), rtype)})"))
-    return [label for _, label in sorted(out)]
+        if slot.isdigit():
+            out.append((slot, p.get("type") or "?"))
+    return sorted(out, key=lambda st: int(st[0]))
+
+
+def _ap_radios(radio_ports: list[dict], radio_mac: str) -> list[str]:
+    """ "slot (band)" labels of the WLC radio ports whose MAC is the AP's radio base MAC."""
+    return [
+        f"{slot} ({_AP_RADIO_BANDS.get(rtype.lower(), rtype)})"
+        for slot, rtype in _ap_radio_slots(radio_ports, radio_mac)
+    ]
 
 
 def _ap_note_block(parsed: dict, controller_name: str, radios: list[str], today: str) -> str:
     """The discobox-owned part of an AP's comments (Markdown, marker-delimited)."""
-    tag = " / ".join(x for x in (parsed.get("site_tag"), parsed.get("tag")) if x)
+    # as the WLC shows it ("show ap summary" Location column): "<site tag>/<tag>"
+    tag = "/".join(x for x in (parsed.get("site_tag"), parsed.get("tag")) if x)
     uplink = parsed.get("uplink_name")
     if uplink and parsed.get("uplink_ip"):
         uplink += f" ({parsed['uplink_ip']})"
     rows = [
         ("Controller", controller_name),
-        ("Site tag / tag", tag),
+        ("Location", tag),
         ("IP (DHCP)", parsed.get("ip")),
         ("Uplink", uplink),
         ("Ethernet MAC", parsed.get("ethernet_mac")),
@@ -3797,11 +3824,12 @@ def sync_device(
         # associated APs), each already present in Netbox under its own record.
         # They're never module bays of this device — they update the AP's own
         # record: DeviceType/serial, OS version, controller link, a marker-
-        # delimited comments block, and its wired interface + MAC.
+        # delimited comments block, its wired interface and radios + MACs.
         ap_modules = [m for m in nd_mods if m.get("class") == "ap"]
         ap_dummy_names = set(["main", "vlan2"] if ap_dummy_interfaces is None else ap_dummy_interfaces)
         ap_dummy_lower = {n.lower() for n in ap_dummy_names}
         today_str = date.today().isoformat()
+        ap_untyped: dict[str, int] = {}   # AP model → count of APs no existing DeviceType matched
 
         def _update_ap_device(ap_dev, ch: dict, parsed: dict) -> str:
             model = ch.get("model") or ""
@@ -3810,8 +3838,15 @@ def sync_device(
             if model:
                 vendor_name = vendor_from_chassis(ch)
                 mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
-                device_type = nb.get_or_create_device_type(mfr, model, part_number=model, vendor=nd_device.get("vendor"))
-                if device_type and ap_dev.device_type.id != device_type.id:
+                # Lookup only: an AP model without a matching type (no alias,
+                # part_number, model or slug hit) keeps its current type. Minting
+                # a bare type here would move every AP of that model onto it.
+                device_type = nb.get_or_create_device_type(
+                    mfr, model, part_number=model, vendor=nd_device.get("vendor"), create=False,
+                )
+                if device_type is None:
+                    ap_untyped[model] = ap_untyped.get(model, 0) + 1
+                elif ap_dev.device_type.id != device_type.id:
                     patch["device_type"] = device_type.id
             if serial and (ap_dev.serial or "") != serial:
                 patch["serial"] = serial
@@ -3858,6 +3893,27 @@ def sync_device(
                 )
                 if action in ("created", "updated") or (action == "unchanged" and old_mac.lower() != eth_mac.lower()):
                     changed = True
+            # One Dot11Radio<slot> per radio the WLC reports (devicetype-library
+            # naming, so template interfaces are adopted). The WLC only exposes
+            # the radio base MAC, the same on every slot (per-slot BSSIDs aren't
+            # known): it goes on the first radio only, so a MAC search finds one
+            # interface; the comments block lists it too.
+            radio_mac = parsed.get("dot3_mac") or ""
+            for n_radio, (slot, _) in enumerate(_ap_radio_slots(ap_radio_ports, radio_mac)):
+                name = f"Dot11Radio{slot}"
+                existing = next((i for n, i in ifaces.items() if n.lower() == name.lower()), None)
+                data: dict = {"name": name}
+                mac = radio_mac if n_radio == 0 else ""
+                old_mac = str(getattr(getattr(existing, "primary_mac_address", None), "mac_address", "") or "")
+                if mac:
+                    data["mac_address"] = mac
+                if existing is None:
+                    data["type"] = _ap_radio_iface_type(model)
+                action, _ = nb.upsert_interface(
+                    ap_dev.id, data, existing, source_cf=iface_source_cf, source_value=iface_source_value,
+                )
+                if action in ("created", "updated") or (mac and old_mac.lower() != mac.lower()):
+                    changed = True
             if housekeeping and any(n.lower() in ap_dummy_lower for n in ifaces):
                 if nb.remove_empty_dummy_interfaces(ap_dev, ap_dummy_names):
                     changed = True
@@ -3900,6 +3956,12 @@ def sync_device(
             log.debug(
                 "APs: updated=%d unchanged=%d not_found=%d errors=%d",
                 ap_counts["updated"], ap_counts["unchanged"], ap_counts["not_found"], ap_counts["error"],
+            )
+        if ap_untyped:
+            log.info(
+                "APs: no DeviceType for model(s) %s: kept their current type; set the part_number on the "
+                "right DeviceType in Netbox (or add a types.device_aliases entry)",
+                ", ".join(f"{m} ({n})" for m, n in sorted(ap_untyped.items())),
             )
 
         # Supplement os_version from chassis sw_ver when the device field was empty
