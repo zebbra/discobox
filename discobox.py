@@ -2096,18 +2096,59 @@ def clean_mac(raw: Optional[str]) -> Optional[str]:
         return None
     return mac
 
+_MAC_RE = re.compile(r"^(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}$", re.IGNORECASE)
+
+
+def _resolve_neighbor_by_mac(nb: "NetboxClient", remote_id: str) -> tuple[Optional[int], Optional[int]]:
+    """
+    (device_id, interface_id) of the one Netbox interface carrying remote_id as
+    a MAC address, else (None, None). LLDP neighbors whose chassis ID is a MAC
+    (e.g. Cisco APs: their Ethernet MAC, which the WLC sync puts on
+    GigabitEthernet0) resolve this way even without any IP in Netbox, and
+    without matching their abbreviated port name ("Gi0").
+    """
+    mac = clean_mac(remote_id) if remote_id and _MAC_RE.match(remote_id.strip()) else None
+    if not mac:
+        return None, None
+    hits = [
+        m for m in nb.nb.dcim.mac_addresses.filter(mac_address=mac)
+        if getattr(m, "assigned_object_type", None) == "dcim.interface" and getattr(m, "assigned_object", None)
+    ]
+    if len(hits) != 1:
+        logging.getLogger("discobox.sync").debug("  neighbor resolve  mac=%s  interface hits=%d", mac, len(hits))
+        return None, None
+    iface = hits[0].assigned_object
+    device_id = getattr(getattr(iface, "device", None), "id", None)
+    return (device_id, iface.id) if device_id else (None, None)
+
+
 def _resolve_neighbor(
-    nb: "NetboxClient", remote_ip: str, remote_port: str
+    nb: "NetboxClient", remote_ip: str, remote_port: str, remote_id: str = "",
 ) -> tuple[Optional[int], Optional[int]]:
     """
-    Resolve a (remote_ip, remote_port) pair to (device_id, interface_id).
+    Resolve a neighbor (remote_ip, remote_port, remote_id) to (device_id, interface_id).
 
     Strategy:
     1. Find device by primary_ip4 match (common case).
     2. Fall back to any IP address assignment (covers VLAN/loopback IPs on L3 devices).
     Once the device is found, look up the interface by name.
+    3. When that yields no interface, the LLDP chassis ID (remote_id) as a MAC
+       on exactly one Netbox interface (see _resolve_neighbor_by_mac); it only
+       replaces an IP hit when it lands on the same device.
     Either value may be None independently.
     """
+    dev_id, iface_id = _resolve_neighbor_by_ip(nb, remote_ip, remote_port)
+    if iface_id is None and remote_id:
+        mac_dev, mac_iface = _resolve_neighbor_by_mac(nb, remote_id)
+        if mac_iface is not None and dev_id in (None, mac_dev):
+            return mac_dev, mac_iface
+    return dev_id, iface_id
+
+
+def _resolve_neighbor_by_ip(
+    nb: "NetboxClient", remote_ip: str, remote_port: str
+) -> tuple[Optional[int], Optional[int]]:
+    """Passes 1 and 2 of _resolve_neighbor."""
     log = logging.getLogger("discobox.sync")
     if not remote_ip:
         return None, None
@@ -4369,8 +4410,8 @@ def sync_device(
             continue
         try:
             nb_device_id, nb_iface_id = (
-                _resolve_neighbor(nb, port.get("remote_ip", ""), port.get("remote_port", ""))
-                if (cf_neighbor_device or cf_neighbor_iface or cable_scope) and port.get("remote_ip")
+                _resolve_neighbor(nb, port.get("remote_ip", ""), port.get("remote_port", ""), port.get("remote_id") or "")
+                if (cf_neighbor_device or cf_neighbor_iface or cable_scope) and (port.get("remote_ip") or port.get("remote_id"))
                 else (None, None)
             )
             # For cabling, gate nb_iface_id on same-site check
