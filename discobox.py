@@ -700,8 +700,16 @@ class NetboxClient:
     ) -> str:
         """
         Create a cable between two dcim.interface endpoints if none exists.
-        If a cable already exists on either termination and is NOT tagged with
-        source_value, log an error and skip (don't touch manually maintained cables).
+
+        An existing cable on either termination is checked against the wanted
+        link, not just its presence:
+          - it connects exactly iface_a ↔ iface_b: "exists" (an unowned one is
+            claimed by setting source_cf; another source's one is a "conflict")
+          - it is dangling (one end gone, e.g. the peer device was deleted and
+            Netbox kept the cable) or discobox owns it and it leads elsewhere
+            (re-patched link): deleted, then the right cable is created
+          - otherwise it leads elsewhere and isn't discobox's (manually
+            maintained, or another source's): "conflict", left alone
         Returns one of: "created", "exists", "conflict", "skipped".
         """
         iface_a = self.nb.dcim.interfaces.get(iface_a_id)
@@ -709,24 +717,40 @@ class NetboxClient:
         if not iface_a or not iface_b:
             return "skipped"
 
-        cable_a = getattr(iface_a, "cable", None)
-        cable_b = getattr(iface_b, "cable", None)
-        existing_cable = cable_a or cable_b
-
-        if existing_cable:
-            if source_cf:
-                cf = dict(getattr(existing_cable, "custom_fields", {}) or {})
-                owner = cf.get(source_cf) or ""
+        wanted = {iface_a_id, iface_b_id}
+        cable_ids = {c.id for c in (getattr(iface_a, "cable", None), getattr(iface_b, "cable", None)) if c}
+        for cable_id in sorted(cable_ids):
+            # the nested .cable on an interface is brief: fetch terminations + custom fields
+            cable = self.nb.dcim.cables.get(cable_id)
+            if not cable:
+                continue
+            a_ends = list(getattr(cable, "a_terminations", None) or [])
+            b_ends = list(getattr(cable, "b_terminations", None) or [])
+            ends = {getattr(t, "id", None) for t in a_ends + b_ends}
+            owner = (dict(getattr(cable, "custom_fields", {}) or {}).get(source_cf) or "") if source_cf else ""
+            dangling = not a_ends or not b_ends
+            if ends == wanted and not dangling:
                 if owner and owner != source_value:
                     logger.error(
                         "Cable conflict: iface %s ↔ %s: existing cable %s not owned by discobox, skipping",
-                        iface_a_id, iface_b_id, existing_cable.id,
+                        iface_a_id, iface_b_id, cable_id,
                     )
                     return "conflict"
-                # Unowned cable: claim it
-                if not owner and source_value:
-                    existing_cable.update({"custom_fields": {source_cf: source_value}})
-            return "exists"
+                if source_cf and source_value and not owner:
+                    cable.update({"custom_fields": {source_cf: source_value}})   # unowned: claim it
+                return "exists"
+            if dangling or (source_value and owner == source_value):
+                logger.info(
+                    "Cable %s on iface %s ↔ %s replaced (%s)", cable_id, iface_a_id, iface_b_id,
+                    "dangling" if dangling else f"led to interface(s) {sorted(e for e in ends if e not in wanted)}",
+                )
+                cable.delete()
+                continue
+            logger.error(
+                "Cable conflict: iface %s ↔ %s: existing cable %s leads elsewhere and isn't discobox's, skipping",
+                iface_a_id, iface_b_id, cable_id,
+            )
+            return "conflict"
 
         try:
             cable = self.nb.dcim.cables.create(
