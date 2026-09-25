@@ -17,12 +17,17 @@ from datetime import date
 from discobox import (
     NetboxClient,
     _all_descriptions_missing,
+    _ap_note_block,
+    _ap_radios,
+    _ap_wired_iface_type,
+    _cf_record_id,
     _counts_changed,
     _discovery_incomplete,
     _fill_module_names,
     _guess_prefix_len,
     _ha_node_info,
     _is_ap_port,
+    _merge_ap_note,
     _merged_custom_fields,
     _parse_ap_description,
     _recently_touched,
@@ -187,33 +192,143 @@ def test_is_ap_port() -> None:
     assert _is_ap_port({"type": "ethernetCsmacd"}) is False
     assert _is_ap_port({"type": None}) is False
     assert _is_ap_port({}) is False
+    # radio "<MAC>.<slot>" names count even without a dot11 type
+    assert _is_ap_port({"port": "02:00:00:aa:bb:cc.0", "type": "propVirtual"}) is True
+    assert _is_ap_port({"port": "02:00:00:DD:EE:F0.2"}) is True
+    assert _is_ap_port({"port": "Te1/1/8.2802"}) is False
+    assert _is_ap_port({"port": "02:00:00:aa:bb:cc"}) is False
 
 
 def test_parse_ap_description() -> None:
     desc = (
-        "CW9166I-E: FRAHAU-W216 (C2/FRAHAU); IP 172.20.130.235; "
-        "Dot3 MAC 70:bc:48:cb:2c:e0; Ethernet MAC c4:14:a2:45:2e:60; "
-        "Connected via FRAHAU-X48.nms.admin.ch (172.28.78.53)"
+        "CW9166I-E: SITE1-W216 (C2/SITE1); IP 192.0.2.10; "
+        "Dot3 MAC 02:00:00:cb:2c:e0; Ethernet MAC 02:00:00:45:2e:60; "
+        "Connected via SITE1-X48.example.com (192.0.2.1)"
     )
     parsed = _parse_ap_description(desc)
     assert parsed == {
-        "hostname": "FRAHAU-W216",
-        "site": "C2/FRAHAU",
-        "ip": "172.20.130.235",
-        "dot3_mac": "70:bc:48:cb:2c:e0",
-        "ethernet_mac": "c4:14:a2:45:2e:60",
-        "uplink_name": "FRAHAU-X48.nms.admin.ch",
-        "uplink_ip": "172.28.78.53",
+        "hostname": "SITE1-W216",
+        "site_tag": "C2",
+        "tag": "SITE1",
+        "ip": "192.0.2.10",
+        "dot3_mac": "02:00:00:cb:2c:e0",
+        "ethernet_mac": "02:00:00:45:2e:60",
+        "uplink_name": "SITE1-X48.example.com",
+        "uplink_ip": "192.0.2.1",
     }
+
+
+def test_parse_ap_description_wlc9800_sample() -> None:
+    # 9800 WLC: uplink has no "(ip)" suffix
+    with open(SAMPLES / "wlc9800-modules.json") as f:
+        aps = [m for m in json.load(f) if m.get("class") == "ap"]
+    assert aps
+    for ap in aps:
+        parsed = _parse_ap_description(ap["description"])
+        assert parsed["hostname"] and parsed["ip"]
+        assert parsed["site_tag"].startswith("Site-") and parsed["tag"] in ("wrong", "dot1x")
+        assert parsed["dot3_mac"] and parsed["ethernet_mac"]
+        assert parsed["uplink_name"].endswith(".example.com")
+        assert "uplink_ip" not in parsed
+
+
+def test_is_ap_port_wlc9800_sample() -> None:
+    # every radio entry is filtered, including the one with numeric type "3"
+    with open(SAMPLES / "wlc9800-ports.json") as f:
+        ports = json.load(f)
+    assert any(p["type"] == "3" for p in ports)
+    assert all(_is_ap_port(p) for p in ports)
 
 
 def test_parse_ap_description_partial_and_unparseable() -> None:
     # Missing fields are simply absent, not errors
-    assert _parse_ap_description("C9120AXI-E: FRAWYD18-W05 (C2/FRAWYD18)") == {
-        "hostname": "FRAWYD18-W05", "site": "C2/FRAWYD18",
+    assert _parse_ap_description("C9120AXI-E: SITE2-W05 (C2/SITE2)") == {
+        "hostname": "SITE2-W05", "site_tag": "C2", "tag": "SITE2",
     }
     assert _parse_ap_description("") == {}
     assert _parse_ap_description("nonsense text with no colon-headed segment") == {}
+
+
+# ── AP comments block / radios / wired interface ───────────────────────────────
+
+# Shape of the neops/bossy block real APs carry (anonymized)
+NEOPS_COMMENTS = (
+    "<!--- DO NOT EDIT BELOW -->\n"
+    "<!--- neops added Sync infos, can be removed if fixed or project is accomplished  --->\n"
+    "## Sync Infos\n - Room: -2.256 ROOM id:1\n"
+    " - [BOSSY device](https://oss.example.com/elements/form/device-001.example.com)\n"
+    "<!--- DO NOT EDIT ABOVE -->"
+)
+
+
+def _wlc9800_ap(i: int = 0) -> tuple[dict, dict, list[dict]]:
+    with open(SAMPLES / "wlc9800-modules.json") as f:
+        mod = [m for m in json.load(f) if m.get("class") == "ap"][i]
+    with open(SAMPLES / "wlc9800-ports.json") as f:
+        ports = json.load(f)
+    return mod, _parse_ap_description(mod["description"]), ports
+
+
+def test_ap_note_block_from_sample() -> None:
+    mod, parsed, ports = _wlc9800_ap(1)     # the AP that also has radio ports in the sample
+    radios = _ap_radios(ports, parsed["dot3_mac"])
+    assert radios == ["0 (2.4 GHz)"]
+    block = _ap_note_block(parsed, "wlc-1.example.com", radios, "2026-09-24")
+    assert block.startswith("<!-- discobox:ap -->\n## Wireless (discobox)\n")
+    assert block.endswith("_Updated by discobox 2026-09-24_\n<!-- /discobox:ap -->")
+    assert " - Controller: wlc-1.example.com" in block
+    assert f" - Site tag / tag: {parsed['site_tag']} / dot1x" in block
+    assert f" - Ethernet MAC: {parsed['ethernet_mac']}" in block
+    assert " - Radios: 0 (2.4 GHz)" in block
+
+
+def test_ap_radios_sorted_and_raw_type_kept() -> None:
+    ports = [
+        {"port": "02:00:00:00:00:01.1", "mac": "02:00:00:00:00:01", "type": "dot11a"},
+        {"port": "02:00:00:00:00:01.0", "mac": "02:00:00:00:00:01", "type": "dot11b"},
+        {"port": "02:00:00:00:00:01.2", "mac": "02:00:00:00:00:01", "type": "3"},
+        {"port": "02:00:00:00:00:02.0", "mac": "02:00:00:00:00:02", "type": "dot11b"},
+    ]
+    assert _ap_radios(ports, "02:00:00:00:00:01") == ["0 (2.4 GHz)", "1 (5 GHz)", "2 (3)"]
+
+
+def test_merge_ap_note_appends_after_foreign_block_and_is_idempotent() -> None:
+    _, parsed, _ = _wlc9800_ap()
+    block = _ap_note_block(parsed, "wlc-1", [], "2026-09-24")
+    merged = _merge_ap_note(NEOPS_COMMENTS, block)
+    assert merged == NEOPS_COMMENTS + "\n\n" + block
+    # same content, later date → no rewrite (no changelog churn)
+    assert _merge_ap_note(merged, _ap_note_block(parsed, "wlc-1", [], "2026-10-01")) is None
+    # changed content → only our block replaced, foreign text untouched
+    updated = _merge_ap_note(merged, _ap_note_block(parsed, "wlc-2", [], "2026-10-01"))
+    assert updated.startswith(NEOPS_COMMENTS + "\n\n")
+    assert " - Controller: wlc-2" in updated and "wlc-1" not in updated
+    assert updated.count("<!-- discobox:ap -->") == 1
+    # manual text written after our block survives too
+    tail = merged + "\n\nmanual note"
+    assert _merge_ap_note(tail, _ap_note_block(parsed, "wlc-2", [], "2026-10-01")).endswith("\n\nmanual note")
+
+
+def test_merge_ap_note_empty_comments() -> None:
+    assert _merge_ap_note("", "B") == "B"
+    assert _merge_ap_note(None, "B") == "B"
+
+
+def test_ap_wired_iface_type() -> None:
+    assert _ap_wired_iface_type("CW9166I-E") == "5gbase-t"
+    assert _ap_wired_iface_type("C9120AXE-E") == "2.5gbase-t"
+    assert _ap_wired_iface_type("AIR-AP1832I-E-K9") == "1000base-t"
+    assert _ap_wired_iface_type("") == "1000base-t"
+
+
+def test_cf_record_id() -> None:
+    assert _cf_record_id(None) is None
+    assert _cf_record_id({"id": 7, "name": "wlc"}) == 7
+    assert _cf_record_id(7) == 7
+
+    class R:
+        id = 9
+    assert _cf_record_id(R()) == 9
 
 
 # ── parse_speed_kbps ───────────────────────────────────────────────────────────

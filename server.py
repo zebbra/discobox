@@ -420,6 +420,8 @@ _CF_OS_RELEASE:      Optional[str]  = _cstr(_CFG, "custom_fields", "os_release",
 _CF_STACK_MEMBERS:   Optional[str]  = _cstr(_CFG, "custom_fields", "stack_members", default="stack_members")
 _STACK_MEMBERS_ONLY_INCREASE: bool  = _cbool(_CFG, "custom_fields", "stack_members_only_increase", default=True)
 _CF_TOUCH:           Optional[str]  = _cstr(_CFG, "custom_fields", "touch", default="netdisco_last_update")
+_CF_CONTROLLER:      Optional[str]  = _cstr(_CFG, "custom_fields", "controller", default="controller")
+_AP_DUMMY_INTERFACES: list          = list(_c(_CFG, "aps", "dummy_interfaces", default=["main", "vlan2"]) or [])
 _TOUCH_COOLDOWN_DAYS: int           = int(_c(_CFG, "sync", "touch_cooldown_days", default=1))
 
 _TYPES_CREATE_MISSING: bool          = _cbool(_CFG, "types", "create_missing", default=True)
@@ -1069,6 +1071,8 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             ha_metrics_tls_verify=ha_metrics_tls_verify,
             ha_metrics_instance_label=ha_metrics_instance_label,
             ha_mgmt_iface_name=ha_mgmt_iface_name,
+            cf_controller=_CF_CONTROLLER,
+            ap_dummy_interfaces=_AP_DUMMY_INTERFACES,
         )
         status = "success" if result.get("ok") else "error"
         if result.get("reason") == "discovery_incomplete":
@@ -1324,6 +1328,8 @@ async def rebuild(
                 ha_metrics_target_label=_HA_METRICS_TARGET_LABEL,
                 ha_metrics_timeout=_HA_METRICS_TIMEOUT, ha_metrics_tls_verify=_LIVENESS_TLS_VERIFY,
                 ha_metrics_instance_label=_HA_METRICS_INSTANCE_LABEL, ha_mgmt_iface_name=_HA_MGMT_IFACE_NAME,
+                cf_controller=_CF_CONTROLLER,
+                ap_dummy_interfaces=_AP_DUMMY_INTERFACES,
                 prune=True, dry_run=dry_run,
             )
         finally:

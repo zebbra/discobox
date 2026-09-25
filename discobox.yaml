@@ -86,6 +86,12 @@ custom_fields:
   neighbor_port: neighbor_port
   neighbor_device: neighbor_device
   neighbor_iface: neighbor_iface
+  controller: controller    # object CF (type Object → Device) on Device: set to the WLC on
+                            # every AP it reports; skipped unless the field exists — null to disable
+
+aps:                        # access points reported by a WLC (updated during the WLC's sync)
+  dummy_interfaces: [main, vlan2]  # placeholder interfaces deleted from APs (housekeeping only,
+                                   # never while they hold an IP); [] to keep them
 
 reconcile:
   interval: 86400           # seconds

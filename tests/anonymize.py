@@ -38,6 +38,13 @@ RENAME = {
 
 NULL_MAC = "00:00:00:00:00:00"
 IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+MAC_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b")
+# WLC AP radio port id: "<radio MAC>.<slot>"
+AP_PORT_RE = re.compile(r"^((?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})\.(\d+)$")
+# WLC AP description: "<model>: <AP host> (<tag>/<policy>); ...; Connected via <uplink host>"
+# (port descr lacks the "<model>: <host>" head and starts with "<tag>/<policy>;")
+AP_DESC_HOST_RE = re.compile(r"^[^:;]+:\s*(\S+)\s*\(|Connected via\s+(\S+)")
+AP_DESC_TAG_RE = re.compile(r"(^|\()([^;()/:]+)/([^;()]+)(\)|;)")
 
 
 # ── deterministic fake generators ──────────────────────────────────────────────
@@ -138,9 +145,23 @@ def scrub_text(text: str) -> str:
         for real, fake in sorted(cache.items(), key=lambda kv: -len(kv[0])):
             if real:
                 text = text.replace(real, fake)
-    # Catch-all: rewrite any remaining IP-shaped token.
+    # Catch-all: rewrite any remaining IP- or MAC-shaped token.
     text = IP_RE.sub(lambda m: map_ip(m.group(0)), text)
+    text = MAC_RE.sub(lambda m: map_mac(m.group(0).lower()), text)
     return text
+
+
+def register_ap_desc(text: str) -> str:
+    """Register AP/uplink hostnames from a WLC AP description and fake its tag."""
+    if not text or "MAC" not in text:
+        return text
+    for m in AP_DESC_HOST_RE.finditer(text):
+        map_host(m.group(1) or m.group(2))
+    # "(SITE-A/policy)" / "SITE-A/policy;" → "(Site-NN/policy)": site part faked,
+    # the generic policy suffix kept so the shape stays realistic
+    return AP_DESC_TAG_RE.sub(
+        lambda m: f"{m.group(1)}{map_location(m.group(2))}/{m.group(3)}{m.group(4)}", text, count=1,
+    )
 
 
 # ── shape transformers ─────────────────────────────────────────────────────────
@@ -165,7 +186,7 @@ def transform_module(m: dict) -> dict:
     out = dict(m)
     if out.get("ip"):           out["ip"] = map_ip(out["ip"])
     if out.get("serial"):       out["serial"] = map_serial(out["serial"])
-    if out.get("description"):  out["description"] = scrub_text(out["description"])
+    if out.get("description"):  out["description"] = scrub_text(register_ap_desc(out["description"]))
     return out
 
 
@@ -177,10 +198,16 @@ def transform_port(p: dict) -> dict:
     # (Equality with port id is just the trivial label, safe to keep.)
     port_id = (out.get("port") or "").lower()
     name = out.get("name")
-    if name and isinstance(name, str) and name.lower() != port_id:
+    ap_port = AP_PORT_RE.match(out.get("port") or "")
+    if ap_port:
+        # WLC AP radio: port id carries the radio MAC, name is the AP hostname
+        out["port"] = f"{map_mac(ap_port.group(1).lower())}.{ap_port.group(2)}"
+        if name:
+            out["name"] = map_host(name)
+    elif name and isinstance(name, str) and name.lower() != port_id:
         n = int(_h(name, 4), 16) % 1000
         out["name"] = f"iface-{n:03d}"
-    if out.get("descr"): out["descr"] = scrub_text(out["descr"])
+    if out.get("descr"): out["descr"] = scrub_text(register_ap_desc(out["descr"]))
     return out
 
 

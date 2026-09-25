@@ -87,6 +87,7 @@ python cli.py --host 10.0.0.1
 - **SFP / transceiver inventory** — creates inventory items for transceivers with serial numbers, linked to their interface
 - **PSU inventory** — creates inventory items for power supplies
 - **HA / VIP detection** — detects cluster VIPs by hostname mismatch; redirects sync to the real active node; creates a Virtual Chassis linking both HA members; optionally deletes the VIP device (housekeeping)
+- **Wireless APs** — during a WLC's sync, updates each AP it reports (found by serial, then name): DeviceType, serial, `os_version`, an optional `controller` link to the WLC, a `## Wireless (discobox)` block in the comments (controller, site tag / tag, IP, uplink, MACs, radios; text outside its markers is never touched), and a `GigabitEthernet0` interface with the Ethernet MAC. The WLC's per-AP radio "ports" are not synced as its own interfaces. With housekeeping, empty placeholder interfaces (`aps.dummy_interfaces`, default `main`, `vlan2`) are removed from the AP
 - **Housekeeping** — removes stale device bays auto-created from DeviceType templates (e.g. `PS-A`, `Fan 1`, `Slot 1`) and deletes empty dummy interfaces
 
 ---
@@ -261,6 +262,7 @@ These fields are updated on every sync. Create them on the **Device** object in 
 | `os_version` | Text | OS version string (e.g. `17.3.4`) |
 | `os_name` | Text | OS platform name (e.g. `ios-xe`, `fortios`, `nx-os`) |
 | `os_release` | Text | IOS release name parsed from device description (e.g. `Gibraltar`) |
+| `controller` | Object → Device | Set on an AP to the WLC reporting it (`custom_fields.controller`; skipped unless the field exists, `null` disables). Generic name so other controller-managed devices can use it later |
 | `stack_members` | Integer | Total physical units in a traditional stack with more than one member. Unset for standalone, a degraded 1-member stack (a count of `1` adds no signal), VSS (split across two Netbox devices), and FEX (satellites aren't stack members). By default (`custom_fields.stack_members_only_increase: true`, yaml-only) the recorded value never decreases — a dead member won't silently reduce it |
 
 ### Read by discobox (Netbox → Netdisco, reconcile loop)

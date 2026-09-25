@@ -1245,6 +1245,28 @@ class NetboxClient:
                 logger.warning("  Module %r: could not delete colliding interface %r: %s", bay.name, name, exc)
         return cleared
 
+    def find_ap_device(self, hostname: str, serial: str = "", ip: str = "") -> Optional[pynetbox.core.response.Record]:
+        """
+        Find a WLC-reported access point: serial first (exact, and APs are
+        usually on DHCP so the IP rarely matches Netbox), then hostname, then
+        short hostname. ip is only used for the log line.
+        """
+        ip_str = ip or "none"
+        if serial:
+            dev = self.find_device_by_serial(serial)
+            if dev:
+                logger.debug("  Found AP by serial %r → %s (ip %s)", serial, dev.name, ip_str)
+                return dev
+        short = hostname.lower().split(".")[0]
+        for dev in self.nb.dcim.devices.filter(name__ie=hostname):
+            logger.info("Found AP by name %r (ip %s, serial %r not in Netbox)", dev.name, ip_str, serial)
+            return dev
+        for dev in self.nb.dcim.devices.filter(name__ic=short):
+            if dev.name and dev.name.lower().split(".")[0] == short:
+                logger.info("Found AP by short name %r (ip %s, serial %r not in Netbox)", dev.name, ip_str, serial)
+                return dev
+        return None
+
     def find_device_by_serial(self, serial: str) -> Optional[pynetbox.core.response.Record]:
         results = list(self.nb.dcim.devices.filter(serial=serial))
         return results[0] if results else None
@@ -1737,6 +1759,9 @@ def vendor_from_chassis(chassis: dict) -> Optional[str]:
     return None
 
 
+_AP_RADIO_PORT_RE = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\.\d+$", re.IGNORECASE)
+
+
 def _is_ap_port(port: dict) -> bool:
     """
     True for a WLC's per-AP virtual radio "port" (type dot11a/b/g/n/ac/ax/...).
@@ -1744,8 +1769,12 @@ def _is_ap_port(port: dict) -> bool:
     These aren't real interfaces on the controller — Netdisco surfaces one per
     associated access point — so they must never be synced as the WLC's own
     interfaces (name collides with the AP's hostname, port key is a bare MAC).
+    Some WLCs don't report a dot11 type, so the "<radio MAC>.<slot>" port name
+    (e.g. "02:00:00:aa:bb:cc.0") counts too.
     """
-    return (port.get("type") or "").lower().startswith("dot11")
+    if (port.get("type") or "").lower().startswith("dot11"):
+        return True
+    return bool(_AP_RADIO_PORT_RE.match(port.get("port") or ""))
 
 
 _AP_DESC_HEAD_RE = re.compile(r"^[^:]+:\s*(\S+)\s*\(([^)]*)\)\s*$")
@@ -1754,14 +1783,17 @@ _AP_DESC_FIELD_RES = {
     "dot3_mac": re.compile(r"^Dot3 MAC\s+([0-9a-fA-F:]+)$", re.IGNORECASE),
     "ethernet_mac": re.compile(r"^Ethernet MAC\s+([0-9a-fA-F:]+)$", re.IGNORECASE),
 }
-_AP_DESC_UPLINK_RE = re.compile(r"^Connected via\s+(\S+)\s*\(([^)]*)\)$", re.IGNORECASE)
+_AP_DESC_UPLINK_RE = re.compile(r"^Connected via\s+(\S+)(?:\s*\(([^)]*)\))?$", re.IGNORECASE)
 
 
 def _parse_ap_description(description: str) -> dict:
     """
     Best-effort parse of a Netdisco ap-class module description, e.g.:
-      "CW9166I-E: FRAHAU-W216 (C2/FRAHAU); IP 172.20.130.235; Dot3 MAC ...;
-       Ethernet MAC ...; Connected via SWITCH.example.com (1.2.3.4)"
+      "CW9166I-E: SITE1-W216 (C2/SITE1); IP 192.0.2.10; Dot3 MAC ...;
+       Ethernet MAC ...; Connected via SWITCH.example.com[ (192.0.2.1)]"
+
+    The "(<site tag>/<tag>)" part is split into site_tag/tag (site_tag alone
+    when there's no "/"); the uplink IP is optional.
 
     Returns {} if even the hostname can't be recovered — any other field
     missing from the text is simply absent from the result.
@@ -1772,12 +1804,16 @@ def _parse_ap_description(description: str) -> dict:
     head = _AP_DESC_HEAD_RE.match(parts[0])
     if not head:
         return {}
-    result: dict = {"hostname": head.group(1), "site": head.group(2)}
+    site_tag, _, tag = head.group(2).partition("/")
+    result: dict = {"hostname": head.group(1), "site_tag": site_tag.strip()}
+    if tag.strip():
+        result["tag"] = tag.strip()
     for part in parts[1:]:
         uplink = _AP_DESC_UPLINK_RE.match(part)
         if uplink:
             result["uplink_name"] = uplink.group(1)
-            result["uplink_ip"] = uplink.group(2)
+            if uplink.group(2):
+                result["uplink_ip"] = uplink.group(2)
             continue
         for key, rx in _AP_DESC_FIELD_RES.items():
             m = rx.match(part)
@@ -1785,6 +1821,83 @@ def _parse_ap_description(description: str) -> dict:
                 result[key] = m.group(1)
                 break
     return result
+
+
+# Wired uplink as Cisco APs report it via CDP/LLDP, so the switch-side
+# neighbor pass can cable to it.
+AP_WIRED_IFACE = "GigabitEthernet0"
+AP_NOTE_BEGIN = "<!-- discobox:ap -->"
+AP_NOTE_END = "<!-- /discobox:ap -->"
+_AP_NOTE_RE = re.compile(re.escape(AP_NOTE_BEGIN) + r".*?" + re.escape(AP_NOTE_END), re.DOTALL)
+_AP_NOTE_STAMP_RE = re.compile(r"^_Updated by discobox .*_$\n?", re.MULTILINE)
+_AP_RADIO_BANDS = {"dot11b": "2.4 GHz", "dot11g": "2.4 GHz", "dot11a": "5 GHz"}
+
+
+def _ap_wired_iface_type(model: str) -> str:
+    m = (model or "").upper()
+    if m.startswith("CW916"):
+        return "5gbase-t"
+    if m.startswith("C9120"):
+        return "2.5gbase-t"
+    return "1000base-t"
+
+
+def _ap_radios(radio_ports: list[dict], radio_mac: str) -> list[str]:
+    """ "slot (band)" labels of the WLC radio ports whose MAC is the AP's radio base MAC."""
+    out = []
+    for p in radio_ports:
+        if (p.get("mac") or "").lower() != (radio_mac or "").lower():
+            continue
+        slot = (p.get("port") or "").rsplit(".", 1)[-1]
+        rtype = p.get("type") or "?"
+        out.append((slot, f"{slot} ({_AP_RADIO_BANDS.get(rtype.lower(), rtype)})"))
+    return [label for _, label in sorted(out)]
+
+
+def _ap_note_block(parsed: dict, controller_name: str, radios: list[str], today: str) -> str:
+    """The discobox-owned part of an AP's comments (Markdown, marker-delimited)."""
+    tag = " / ".join(x for x in (parsed.get("site_tag"), parsed.get("tag")) if x)
+    uplink = parsed.get("uplink_name")
+    if uplink and parsed.get("uplink_ip"):
+        uplink += f" ({parsed['uplink_ip']})"
+    rows = [
+        ("Controller", controller_name),
+        ("Site tag / tag", tag),
+        ("IP (DHCP)", parsed.get("ip")),
+        ("Uplink", uplink),
+        ("Ethernet MAC", parsed.get("ethernet_mac")),
+        ("Radio MAC", parsed.get("dot3_mac")),
+        ("Radios", ", ".join(radios)),
+    ]
+    lines = [AP_NOTE_BEGIN, "## Wireless (discobox)"]
+    lines += [f" - {k}: {v}" for k, v in rows if v]
+    lines += [f"_Updated by discobox {today}_", AP_NOTE_END]
+    return "\n".join(lines)
+
+
+def _merge_ap_note(comments: str, block: str) -> Optional[str]:
+    """
+    comments with the discobox block replaced (or appended), or None when the
+    block's content is unchanged — the "Updated" stamp alone never counts, so
+    an unchanged AP doesn't get a changelog entry every sync. Text outside the
+    markers (e.g. other tools' blocks, manual notes) is never touched.
+    """
+    comments = comments or ""
+    current = _AP_NOTE_RE.search(comments)
+    if current:
+        if _AP_NOTE_STAMP_RE.sub("", current.group(0)) == _AP_NOTE_STAMP_RE.sub("", block):
+            return None
+        return comments[:current.start()] + block + comments[current.end():]
+    return f"{comments.rstrip()}\n\n{block}" if comments.strip() else block
+
+
+def _cf_record_id(value) -> Optional[int]:
+    """Id of an object-type custom field value (dict, Record, or bare id)."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get("id")
+    return getattr(value, "id", value)
 
 
 NULL_MAC = "00:00:00:00:00:00"
@@ -3018,6 +3131,10 @@ def sync_device(
     ha_metrics_tls_verify: bool = True,
     ha_metrics_instance_label: str = "instance",
     ha_mgmt_iface_name: str = "mgmt1",
+    cf_controller: Optional[str] = "controller",  # object CF (→ Device) set on devices a
+                                                   # controller reports, e.g. WLC → AP
+    ap_dummy_interfaces: Optional[list[str]] = None,  # placeholder AP interfaces to delete
+                                                       # (housekeeping); None = ["main", "vlan2"]
     prune: bool = False,
     dry_run: bool = True,
 ) -> dict:
@@ -3071,11 +3188,12 @@ def sync_device(
     log.info("sync start%s %s", " (rebuild)" if prune else "", nd_hostname or ip)
     log.debug("Netdisco  hostname=%r  ports=%d", nd_hostname, len(nd_ports))
 
-    ap_port_count = sum(1 for p in nd_ports if _is_ap_port(p))
+    ap_radio_ports = [p for p in nd_ports if _is_ap_port(p)]
+    ap_port_count = len(ap_radio_ports)
     if ap_port_count:
         nd_ports = [p for p in nd_ports if not _is_ap_port(p)]
         log.debug(
-            "  Filtered %d AP radio port(s) (type=dot11*) — these belong to associated "
+            "  Filtered %d AP radio port(s) (type=dot11* or <MAC>.<slot>) — these belong to associated "
             "APs, not to this device's own interfaces", ap_port_count,
         )
 
@@ -3677,29 +3795,73 @@ def sync_device(
 
         # WLC junction: ap-class module entries describe *other* devices (the
         # associated APs), each already present in Netbox under its own record.
-        # They're never module bays of this device — only used here to correct
-        # the AP's own DeviceType/serial. MVP scope: no interface/MAC/uplink
-        # data is written yet (see _parse_ap_description) — that needs a real
-        # answer on who currently owns the AP's free-text description field.
+        # They're never module bays of this device — they update the AP's own
+        # record: DeviceType/serial, OS version, controller link, a marker-
+        # delimited comments block, and its wired interface + MAC.
         ap_modules = [m for m in nd_mods if m.get("class") == "ap"]
+        ap_dummy_names = set(["main", "vlan2"] if ap_dummy_interfaces is None else ap_dummy_interfaces)
+        ap_dummy_lower = {n.lower() for n in ap_dummy_names}
+        today_str = date.today().isoformat()
 
-        def _update_ap_device(ap_dev, ch: dict) -> str:
+        def _update_ap_device(ap_dev, ch: dict, parsed: dict) -> str:
             model = ch.get("model") or ""
             serial = ch.get("serial") or ""
-            if not model:
-                return "unchanged"
-            vendor_name = vendor_from_chassis(ch)
-            mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
-            device_type = nb.get_or_create_device_type(mfr, model, part_number=model, vendor=nd_device.get("vendor"))
-            patch = {}
-            if device_type and ap_dev.device_type.id != device_type.id:
-                patch["device_type"] = device_type.id
+            patch: dict = {}
+            if model:
+                vendor_name = vendor_from_chassis(ch)
+                mfr = nb.get_or_create_manufacturer(vendor_name) if vendor_name else manufacturer
+                device_type = nb.get_or_create_device_type(mfr, model, part_number=model, vendor=nd_device.get("vendor"))
+                if device_type and ap_dev.device_type.id != device_type.id:
+                    patch["device_type"] = device_type.id
             if serial and (ap_dev.serial or "") != serial:
                 patch["serial"] = serial
-            if not patch:
-                return "unchanged"
-            ap_dev.update(patch)
-            return "updated"
+
+            # Only fields that exist on Device are written (Netbox lists every
+            # defined custom field, null or not); others are silently skipped.
+            cf = dict(getattr(ap_dev, "custom_fields", {}) or {})
+            cf_updates: dict = {}
+            sw_ver = ch.get("sw_ver") or ""
+            if sw_ver and cf_os_version and cf_os_version in cf and cf.get(cf_os_version) != sw_ver:
+                cf_updates[cf_os_version] = sw_ver
+            # Netdisco has no AP OS name/release: clear imported (switch) values
+            # rather than keep a wrong one next to the AP's real version.
+            for name in (cf_os_name, cf_os_release):
+                if name and name in cf and cf.get(name):
+                    cf_updates[name] = None
+            if cf_controller and cf_controller in cf and _cf_record_id(cf.get(cf_controller)) != nb_device.id:
+                cf_updates[cf_controller] = nb_device.id
+            if cf_updates:
+                patch["custom_fields"] = cf_updates
+
+            radios = _ap_radios(ap_radio_ports, parsed.get("dot3_mac") or "")
+            new_comments = _merge_ap_note(
+                getattr(ap_dev, "comments", "") or "",
+                _ap_note_block(parsed, nb_device.name, radios, today_str),
+            )
+            if new_comments is not None:
+                patch["comments"] = new_comments
+
+            changed = False
+            if patch:
+                ap_dev.update(patch)
+                changed = True
+
+            ifaces = nb.fetch_interfaces(ap_dev.id)
+            eth_mac = parsed.get("ethernet_mac")
+            if eth_mac:
+                existing = next((i for n, i in ifaces.items() if n.lower() == AP_WIRED_IFACE.lower()), None)
+                old_mac = str(getattr(getattr(existing, "primary_mac_address", None), "mac_address", "") or "")
+                action, _ = nb.upsert_interface(
+                    ap_dev.id,
+                    {"name": AP_WIRED_IFACE, "type": _ap_wired_iface_type(model), "mac_address": eth_mac},
+                    existing, source_cf=iface_source_cf, source_value=iface_source_value,
+                )
+                if action in ("created", "updated") or (action == "unchanged" and old_mac.lower() != eth_mac.lower()):
+                    changed = True
+            if housekeeping and any(n.lower() in ap_dummy_lower for n in ifaces):
+                if nb.remove_empty_dummy_interfaces(ap_dev, ap_dummy_names):
+                    changed = True
+            return "updated" if changed else "unchanged"
 
         for ap_mod in ap_modules:
             parsed = _parse_ap_description(ap_mod.get("description") or "")
@@ -3711,11 +3873,8 @@ def sync_device(
                 ap_counts["error"] += 1
                 continue
             try:
-                # find_device_by_ip falls back to an unfiltered device search when
-                # `ip` is empty, which is wasteful — a bogus sentinel keeps the
-                # hostname/serial fallbacks working without that full-table scan.
-                ap_dev = nb.find_device_by_ip(
-                    parsed.get("ip") or "0.0.0.0", hostname=hostname, serial=ap_mod.get("serial", ""),
+                ap_dev = nb.find_ap_device(
+                    hostname, serial=ap_mod.get("serial", ""), ip=parsed.get("ip") or "",
                 )
             except Exception as exc:
                 ap_counts["error"] += 1
@@ -3726,7 +3885,7 @@ def sync_device(
                 log.debug("  AP %-20s not found in Netbox: skipping", hostname)
                 continue
             try:
-                action = _update_ap_device(ap_dev, ap_mod)
+                action = _update_ap_device(ap_dev, ap_mod, parsed)
                 ap_counts[action] += 1
                 if action == "updated":
                     log.debug(
@@ -4598,12 +4757,24 @@ def sync_device(
         c.get("error", 0)
         for c in [counts, ip_counts, mod_counts, sfp_counts, poe_counts, ap_counts]
     ) + (_stack_cable_counts.get("error", 0) if _stack_cable_counts else 0)
+    def _fmt_aps(c: dict) -> Optional[str]:
+        # Always shown for a WLC: an all-unchanged AP run is still worth seeing.
+        total = sum(c.values())
+        if not total:
+            return None
+        s = f"aps={total}/~{c['updated']}"
+        if c["not_found"]:
+            s += f"/?{c['not_found']}"
+        if c["error"]:
+            s += f"/!{c['error']}"
+        return s
+
     parts = list(filter(None, [
         _fmt("ifaces", counts),
         _fmt("ips", ip_counts),
         _fmt("mods", mod_counts) if sync_modules else None,
         _fmt("sfps", sfp_counts) if sync_sfp else None,
-        _fmt("aps", ap_counts) if sync_modules else None,
+        _fmt_aps(ap_counts) if sync_modules else None,
         _fmt("stackcables", _stack_cable_counts) if _stack_cable_counts else None,
     ]))
     summary = ("  " + "  ".join(parts)) if parts else "  no changes"
