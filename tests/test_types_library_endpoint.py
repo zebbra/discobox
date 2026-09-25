@@ -62,6 +62,12 @@ def test_library_roles_default(calls, monkeypatch) -> None:
     assert calls[-1]["roles"] == ["lwapp-ap"]
 
 
+def test_type_only_request_ignores_default_roles(calls, monkeypatch) -> None:
+    monkeypatch.setattr(server, "_LIBRARY_ROLES", ["lwapp-ap"])
+    server.types_library(GET, role=None, type=["WS-C3560CG-8TC-S"], apply=False)
+    assert calls[-1] == {"roles": [], "types": ["WS-C3560CG-8TC-S"], "apply": False}
+
+
 def test_missing_library_is_503(monkeypatch) -> None:
     monkeypatch.setattr(server, "_library", None)
     monkeypatch.setattr(server, "_LIBRARY_PATH", "/nonexistent")

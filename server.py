@@ -1748,8 +1748,9 @@ def types_library(
     # Plain def: FastAPI runs it in its threadpool, the Netbox calls don't block the event loop.
     if apply and request.method != "POST":
         raise HTTPException(405, "apply=true needs POST")
-    roles = role if role is not None else _LIBRARY_ROLES
     types = type or []
+    # library.roles is only the default selection: an explicit type= alone must not pull it in
+    roles = role if role is not None else ([] if types else _LIBRARY_ROLES)
     if not roles and not types:
         raise HTTPException(400, "Nothing selected: pass role= and/or type= (or set library.roles)")
     return sync_types(_get_netbox_client(), _get_library(), _LIBRARY_MAPPING, roles, types, apply=apply)
