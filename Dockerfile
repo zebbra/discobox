@@ -19,14 +19,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 # so enrichment results are reproducible. VENDORS = vendor directories to keep
 # (comma-separated, as named in the library); empty keeps all (~11 MB).
 # TEMPORARY: the user's fork, branch "prerelease" = upstream master plus our
-# pending PRs (netbox-community/devicetype-library#4637-#4644: APs, WP-WIFI6-E,
-# Cisco/Fortinet switches, routers, appliances).
+# pending PRs (netbox-community/devicetype-library#4637-#4644; #4638, #4642 merged),
+# APs, Cisco/Fortinet switches, routers, appliances.
 # Pin its head SHA, not the branch name: an unchanged build arg would keep the
 # cached layer forever. The branch gets rebuilt when upstream merges, so bump
 # to the new head deliberately. Back to upstream once everything is merged:
 # ARG DEVICETYPE_LIBRARY_REPO=netbox-community/devicetype-library
 ARG DEVICETYPE_LIBRARY_REPO=Bierchermuesli/devicetype-library
-ARG DEVICETYPE_LIBRARY_REF=32d5159497d32b8e50e416e55ca1d012363407f9
+ARG DEVICETYPE_LIBRARY_REF=54a45bc39159259dbf6dd2ae1401772d3569e127
 ARG DEVICETYPE_LIBRARY_VENDORS=Cisco,Fortinet
 RUN python - <<'PY'
 import os, tarfile, urllib.request
