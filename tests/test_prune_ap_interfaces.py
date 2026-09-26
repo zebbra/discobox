@@ -80,3 +80,12 @@ def test_prune_ap_bays_only_empty_and_only_when_counted() -> None:
     assert _prune_ap_bays(nb, SimpleNamespace(name="ap", id=1, device_bay_count=0, module_bay_count=0),
                           logging.getLogger()) == 0
     assert queried == []                                      # no bays counted → no queries
+
+
+def test_tags_without() -> None:
+    from discobox import _tags_without
+    t = [SimpleNamespace(id=1, slug="fixme-model"), SimpleNamespace(id=2, slug="wifi")]
+    assert _tags_without(t, {"fixme-model"}) == [2]
+    assert _tags_without([SimpleNamespace(id=2, slug="wifi")], {"fixme-model"}) is None    # nothing to do
+    assert _tags_without(None, {"fixme-model"}) is None
+    assert _tags_without([SimpleNamespace(id=1, slug="FIXME-Model")], {"fixme-model"}) == []

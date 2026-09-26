@@ -1903,6 +1903,13 @@ def _prune_ap_interfaces(nb, ap_dev, ifaces: dict, source_cf: Optional[str], sou
     return len(removed)
 
 
+def _tags_without(tags, slugs: set[str]) -> Optional[list[int]]:
+    """Tag ids of tags minus those whose slug is in slugs, or None when none of them is present."""
+    tags = list(tags or [])
+    keep = [t for t in tags if (getattr(t, "slug", None) or "").lower() not in slugs]
+    return None if len(keep) == len(tags) else [t.id for t in keep]
+
+
 def _prune_ap_bays(nb, ap_dev, log) -> int:
     """
     Delete an AP's empty device bays and module bays: an AP has neither, so
@@ -2015,6 +2022,21 @@ def _merge_note_block(comments: str, block: str, block_re: re.Pattern) -> Option
 
 def _merge_ap_note(comments: str, block: str) -> Optional[str]:
     return _merge_note_block(comments, block, _AP_NOTE_RE)
+
+
+WLC_NOTE_BEGIN = "<!-- discobox:wlc -->"
+WLC_NOTE_END = "<!-- /discobox:wlc -->"
+_WLC_NOTE_RE = re.compile(re.escape(WLC_NOTE_BEGIN) + r".*?" + re.escape(WLC_NOTE_END), re.DOTALL)
+
+
+def _wlc_note_block(cf_controller: str, device_id: int) -> str:
+    """Controller comments block: a Netbox-relative link listing every device whose controller CF points here."""
+    return "\n".join([
+        WLC_NOTE_BEGIN,
+        "## Wireless controller",
+        f" - [List all APs of this controller](/dcim/devices/?cf_{cf_controller}={device_id})",
+        WLC_NOTE_END,
+    ])
 
 
 HA_NOTE_BEGIN = "<!-- discobox:ha -->"
@@ -3407,6 +3429,8 @@ def sync_device(
     cf_controller: Optional[str] = "controller",  # object CF (→ Device) set on devices a
                                                    # controller reports, e.g. WLC → AP
     ap_prune_interfaces: bool = True,  # APs keep only GigabitEthernet0 + Dot11Radio<n>, no empty bays
+    ap_type_confirmed_untag: Optional[list[str]] = None,  # tag slugs removed once an AP's model
+                                                           # resolves to a type; None = ["fixme-model"]
     prune: bool = False,
     dry_run: bool = True,
 ) -> dict:
@@ -4114,6 +4138,7 @@ def sync_device(
         # delimited comments block, its wired interface and radios + MACs.
         ap_modules = [m for m in nd_mods if m.get("class") == "ap"]
         ap_untyped: dict[str, int] = {}   # AP model → count of APs no existing DeviceType matched
+        ap_untag = {t.lower() for t in (["fixme-model"] if ap_type_confirmed_untag is None else ap_type_confirmed_untag)}
 
         def _update_ap_device(ap_dev, ch: dict, parsed: dict) -> str:
             model = ch.get("model") or ""
@@ -4130,8 +4155,14 @@ def sync_device(
                 )
                 if device_type is None:
                     ap_untyped[model] = ap_untyped.get(model, 0) + 1
-                elif ap_dev.device_type.id != device_type.id:
-                    patch["device_type"] = device_type.id
+                else:
+                    if ap_dev.device_type.id != device_type.id:
+                        patch["device_type"] = device_type.id
+                    # the WLC-reported model resolved to a type: the model is confirmed,
+                    # so a "model needs fixing" tag no longer applies
+                    kept_tags = _tags_without(getattr(ap_dev, "tags", None), ap_untag)
+                    if kept_tags is not None:
+                        patch["tags"] = kept_tags
             if serial and (ap_dev.serial or "") != serial:
                 patch["serial"] = serial
 
@@ -4243,6 +4274,18 @@ def sync_device(
                 "APs: updated=%d unchanged=%d not_found=%d errors=%d",
                 ap_counts["updated"], ap_counts["unchanged"], ap_counts["not_found"], ap_counts["error"],
             )
+        # Controller side of the link: only when the controller CF exists on Device
+        # (Netbox lists every defined custom field), otherwise the link would be empty.
+        if ap_modules and cf_controller and cf_controller in (getattr(nb_device, "custom_fields", {}) or {}):
+            new_comments = _merge_note_block(
+                getattr(nb_device, "comments", "") or "", _wlc_note_block(cf_controller, nb_device.id), _WLC_NOTE_RE,
+            )
+            if new_comments is not None:
+                try:
+                    nb_device.update({"comments": new_comments})
+                    device_changed = True
+                except Exception as exc:
+                    log.error("  WLC note update error: %s", exc)
         if ap_untyped:
             log.info(
                 "APs: no DeviceType for model(s) %s: kept their current type; set the part_number on the "

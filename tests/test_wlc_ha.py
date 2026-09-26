@@ -80,3 +80,13 @@ def test_entity_ancestry_routes_components_to_their_unit() -> None:
     # a parent chain that never reaches a chassis (trimmed containers) → unknown
     assert _chassis_pos_of(by_name["Chassis 1 Power Supply Module 0"], by_index) is None
     assert _chassis_pos_of({"index": 1, "parent": 1, "class": "x"}, {1: {"index": 1, "parent": 1}}) is None
+
+
+def test_wlc_note_links_to_the_controller_filter() -> None:
+    from discobox import _WLC_NOTE_RE, _wlc_note_block
+    block = _wlc_note_block("controller", 189)
+    assert block.startswith("<!-- discobox:wlc -->\n## Wireless controller\n")
+    assert "[List all APs of this controller](/dcim/devices/?cf_controller=189)" in block
+    bossy = "<!--- DO NOT EDIT BELOW -->\nremarks\n<!--- DO NOT EDIT ABOVE -->"
+    merged = _merge_note_block(bossy, block, _WLC_NOTE_RE)
+    assert merged.startswith(bossy) and _merge_note_block(merged, block, _WLC_NOTE_RE) is None

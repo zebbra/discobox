@@ -103,6 +103,8 @@ aps:                        # access points reported by a WLC (updated during th
                             # placeholders like main/Vlan2, wrong-template ports) are deleted on
                             # every WLC sync, never with a cable or IP or another source's;
                             # empty device/module bays too
+  type_confirmed_untag: [fixme-model]  # tag slugs removed from an AP once its WLC-reported model
+                                       # resolves to a DeviceType (alias/part_number); [] to keep
 
 reconcile:
   interval: 86400           # seconds
