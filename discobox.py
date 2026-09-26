@@ -1858,7 +1858,6 @@ AP_WIRED_IFACE = "GigabitEthernet0"
 AP_NOTE_BEGIN = "<!-- discobox:ap -->"
 AP_NOTE_END = "<!-- /discobox:ap -->"
 _AP_NOTE_RE = re.compile(re.escape(AP_NOTE_BEGIN) + r".*?" + re.escape(AP_NOTE_END), re.DOTALL)
-_AP_NOTE_STAMP_RE = re.compile(r"^_Updated by discobox .*_$\n?", re.MULTILINE)
 _AP_RADIO_BANDS = {"dot11b": "2.4 GHz", "dot11g": "2.4 GHz", "dot11a": "5 GHz"}
 
 
@@ -1904,8 +1903,12 @@ def _ap_radios(radio_ports: list[dict], radio_mac: str) -> list[str]:
     ]
 
 
-def _ap_note_block(parsed: dict, controller_name: str, radios: list[str], today: str) -> str:
-    """The discobox-owned part of an AP's comments (Markdown, marker-delimited)."""
+def _ap_note_block(parsed: dict, controller_name: str, radios: list[str]) -> str:
+    """
+    The discobox-owned part of an AP's comments (Markdown, marker-delimited).
+    Only slow-changing facts: no DHCP IP and no timestamp, so the block (and
+    the AP's changelog) only changes when something real does.
+    """
     # as the WLC shows it ("show ap summary" Location column): "<site tag>/<tag>"
     tag = "/".join(x for x in (parsed.get("site_tag"), parsed.get("tag")) if x)
     uplink = parsed.get("uplink_name")
@@ -1914,7 +1917,6 @@ def _ap_note_block(parsed: dict, controller_name: str, radios: list[str], today:
     rows = [
         ("Controller", controller_name),
         ("Location", tag),
-        ("IP (DHCP)", parsed.get("ip")),
         ("Uplink", uplink),
         ("Ethernet MAC", parsed.get("ethernet_mac")),
         ("Radio MAC", parsed.get("dot3_mac")),
@@ -1922,21 +1924,21 @@ def _ap_note_block(parsed: dict, controller_name: str, radios: list[str], today:
     ]
     lines = [AP_NOTE_BEGIN, "## Wireless (discobox)"]
     lines += [f" - {k}: {v}" for k, v in rows if v]
-    lines += [f"_Updated by discobox {today}_", AP_NOTE_END]
+    lines.append(AP_NOTE_END)
     return "\n".join(lines)
 
 
 def _merge_ap_note(comments: str, block: str) -> Optional[str]:
     """
     comments with the discobox block replaced (or appended), or None when the
-    block's content is unchanged — the "Updated" stamp alone never counts, so
-    an unchanged AP doesn't get a changelog entry every sync. Text outside the
-    markers (e.g. other tools' blocks, manual notes) is never touched.
+    block is unchanged, so an unchanged AP gets no changelog entry. Text
+    outside the markers (e.g. other tools' blocks, manual notes) is never
+    touched.
     """
     comments = comments or ""
     current = _AP_NOTE_RE.search(comments)
     if current:
-        if _AP_NOTE_STAMP_RE.sub("", current.group(0)) == _AP_NOTE_STAMP_RE.sub("", block):
+        if current.group(0) == block:
             return None
         return comments[:current.start()] + block + comments[current.end():]
     return f"{comments.rstrip()}\n\n{block}" if comments.strip() else block
@@ -3893,7 +3895,6 @@ def sync_device(
         ap_modules = [m for m in nd_mods if m.get("class") == "ap"]
         ap_dummy_names = set(["main", "vlan2"] if ap_dummy_interfaces is None else ap_dummy_interfaces)
         ap_dummy_lower = {n.lower() for n in ap_dummy_names}
-        today_str = date.today().isoformat()
         ap_untyped: dict[str, int] = {}   # AP model → count of APs no existing DeviceType matched
 
         def _update_ap_device(ap_dev, ch: dict, parsed: dict) -> str:
@@ -3936,7 +3937,7 @@ def sync_device(
             radios = _ap_radios(ap_radio_ports, parsed.get("dot3_mac") or "")
             new_comments = _merge_ap_note(
                 getattr(ap_dev, "comments", "") or "",
-                _ap_note_block(parsed, nb_device.name, radios, today_str),
+                _ap_note_block(parsed, nb_device.name, radios),
             )
             if new_comments is not None:
                 patch["comments"] = new_comments

@@ -275,9 +275,11 @@ def test_ap_note_block_from_sample() -> None:
     mod, parsed, ports = _wlc9800_ap(1)     # the AP that also has radio ports in the sample
     radios = _ap_radios(ports, parsed["dot3_mac"])
     assert radios == ["0 (2.4 GHz)"]
-    block = _ap_note_block(parsed, "wlc-1.example.com", radios, "2026-09-24")
+    block = _ap_note_block(parsed, "wlc-1.example.com", radios)
     assert block.startswith("<!-- discobox:ap -->\n## Wireless (discobox)\n")
-    assert block.endswith("_Updated by discobox 2026-09-24_\n<!-- /discobox:ap -->")
+    assert block.endswith(" - Radios: 0 (2.4 GHz)\n<!-- /discobox:ap -->")
+    # nothing that changes on its own: no DHCP IP, no timestamp
+    assert parsed["ip"] not in block and "Updated" not in block
     assert " - Controller: wlc-1.example.com" in block
     assert f" - Location: {parsed['site_tag']}/dot1x" in block
     assert f" - Ethernet MAC: {parsed['ethernet_mac']}" in block
@@ -296,19 +298,19 @@ def test_ap_radios_sorted_and_raw_type_kept() -> None:
 
 def test_merge_ap_note_appends_after_foreign_block_and_is_idempotent() -> None:
     _, parsed, _ = _wlc9800_ap()
-    block = _ap_note_block(parsed, "wlc-1", [], "2026-09-24")
+    block = _ap_note_block(parsed, "wlc-1", [])
     merged = _merge_ap_note(NEOPS_COMMENTS, block)
     assert merged == NEOPS_COMMENTS + "\n\n" + block
-    # same content, later date → no rewrite (no changelog churn)
-    assert _merge_ap_note(merged, _ap_note_block(parsed, "wlc-1", [], "2026-10-01")) is None
+    # same content → no rewrite (no changelog churn), even after the AP's DHCP IP changed
+    assert _merge_ap_note(merged, _ap_note_block({**parsed, "ip": "192.0.2.254"}, "wlc-1", [])) is None
     # changed content → only our block replaced, foreign text untouched
-    updated = _merge_ap_note(merged, _ap_note_block(parsed, "wlc-2", [], "2026-10-01"))
+    updated = _merge_ap_note(merged, _ap_note_block(parsed, "wlc-2", []))
     assert updated.startswith(NEOPS_COMMENTS + "\n\n")
     assert " - Controller: wlc-2" in updated and "wlc-1" not in updated
     assert updated.count("<!-- discobox:ap -->") == 1
     # manual text written after our block survives too
     tail = merged + "\n\nmanual note"
-    assert _merge_ap_note(tail, _ap_note_block(parsed, "wlc-2", [], "2026-10-01")).endswith("\n\nmanual note")
+    assert _merge_ap_note(tail, _ap_note_block(parsed, "wlc-2", [])).endswith("\n\nmanual note")
 
 
 def test_merge_ap_note_empty_comments() -> None:
