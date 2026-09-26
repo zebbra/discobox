@@ -99,8 +99,8 @@ library:                    # DeviceType enrichment from the devicetype-library 
                             # without a mapping: exact part_number, then exact model (same manufacturer)
 
 aps:                        # access points reported by a WLC (updated during the WLC's sync)
-  dummy_interfaces: [main, vlan2]  # placeholder interfaces deleted from APs (housekeeping only,
-                                   # never while they hold an IP); [] to keep them
+  dummy_interfaces: [main, vlan2]  # placeholder interfaces deleted from APs on every WLC sync
+                                   # (never while they hold an IP); [] to keep them
 
 reconcile:
   interval: 86400           # seconds

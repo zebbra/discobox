@@ -1926,7 +1926,7 @@ def _ap_note_block(parsed: dict, controller_name: str, radios: list[str]) -> str
         ("Radio MAC", parsed.get("dot3_mac")),
         ("Radios", ", ".join(radios)),
     ]
-    lines = [AP_NOTE_BEGIN, "## Wireless (discobox)"]
+    lines = [AP_NOTE_BEGIN, "## Wireless"]
     lines += [f" - {k}: {v}" for k, v in rows if v]
     lines.append(AP_NOTE_END)
     return "\n".join(lines)
@@ -1960,7 +1960,7 @@ _HA_CREATED_LINE = " - Created by discobox from the controller's ENTITY-MIB chas
 
 def _ha_note_block(primary_name: str, pos: int, created: bool, location_missing: bool) -> str:
     """discobox-owned comments block on an HA peer device (chassis <pos> of primary_name)."""
-    lines = [HA_NOTE_BEGIN, "## HA peer (discobox)", f" - Chassis {pos} of {primary_name} (HA pair, Virtual Chassis)"]
+    lines = [HA_NOTE_BEGIN, "## HA peer", f" - Chassis {pos} of {primary_name} (HA pair, Virtual Chassis)"]
     if created:
         lines.append(_HA_CREATED_LINE)
     if location_missing:
@@ -4118,7 +4118,8 @@ def sync_device(
                 )
                 if action in ("created", "updated") or (mac and old_mac.lower() != mac.lower()):
                     changed = True
-            if housekeeping and any(n.lower() in ap_dummy_lower for n in ifaces):
+            # aps.dummy_interfaces is its own opt-in ([] disables): not gated on housekeeping
+            if any(n.lower() in ap_dummy_lower for n in ifaces):
                 if nb.remove_empty_dummy_interfaces(ap_dev, ap_dummy_names):
                     changed = True
             return "updated" if changed else "unchanged"

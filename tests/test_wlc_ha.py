@@ -56,7 +56,7 @@ def test_peer_name() -> None:
 
 def test_ha_note_block_and_location_hint_lifecycle() -> None:
     created = _ha_note_block("wlc1.example.com", 2, created=True, location_missing=True)
-    assert created.startswith("<!-- discobox:ha -->\n## HA peer (discobox)\n")
+    assert created.startswith("<!-- discobox:ha -->\n## HA peer\n")
     assert " - Chassis 2 of wlc1.example.com" in created
     assert "Created by discobox" in created and "set them manually" in created
     comments = _merge_note_block("", created, _HA_NOTE_RE)
