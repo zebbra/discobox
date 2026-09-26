@@ -1865,6 +1865,44 @@ _AP_NOTE_RE = re.compile(re.escape(AP_NOTE_BEGIN) + r".*?" + re.escape(AP_NOTE_E
 _AP_RADIO_BANDS = {"dot11b": "2.4 GHz", "dot11g": "2.4 GHz", "dot11a": "5 GHz"}
 
 
+_AP_IFACE_RE = re.compile(r"^(?:gigabitethernet0|dot11radio\d+)$", re.IGNORECASE)
+
+
+def _is_ap_managed_iface(name: str) -> bool:
+    """The only interfaces an AP has in Netbox: its wired uplink and its radios."""
+    return bool(_AP_IFACE_RE.match(name or ""))
+
+
+def _prune_ap_interfaces(nb, ap_dev, ifaces: dict, source_cf: Optional[str], source_value: str, log) -> int:
+    """
+    Delete an AP's interfaces other than GigabitEthernet0 / Dot11Radio<n>:
+    import placeholders (main, Vlan2) and ports from a wrong DeviceType
+    template (e.g. GigabitEthernet1/0/x). Never one that carries a cable or
+    an IP, or that another source owns. Every Dot11Radio<n> is kept, even
+    when the WLC currently reports fewer radios. Returns the number deleted.
+    """
+    removed: list[str] = []
+    for name, iface in ifaces.items():
+        if _is_ap_managed_iface(name) or getattr(iface, "cable", None):
+            continue
+        if source_cf:
+            owner = dict(getattr(iface, "custom_fields", {}) or {}).get(source_cf) or ""
+            if owner and owner != source_value:
+                continue
+        if list(nb.nb.ipam.ip_addresses.filter(assigned_object_type="dcim.interface", assigned_object_id=iface.id)):
+            log.debug("  AP %s: %s has IP(s), kept", ap_dev.name, name)
+            continue
+        try:
+            iface.delete()
+            removed.append(name)
+        except Exception as exc:
+            log.error("  AP %s: could not delete stale interface %s: %s", ap_dev.name, name, exc)
+    if removed:
+        log.info("  AP %s: removed %d stale interface(s)", ap_dev.name, len(removed))
+        log.debug("  AP %s: removed %s", ap_dev.name, ", ".join(sorted(removed)))
+    return len(removed)
+
+
 def _ap_wired_iface_type(model: str) -> str:
     """Speed type for a new GigabitEthernet0 (datasheet uplinks; a template's own type is kept)."""
     m = (model or "").upper()
@@ -3329,8 +3367,7 @@ def sync_device(
     ha_mgmt_iface_name: str = "mgmt1",
     cf_controller: Optional[str] = "controller",  # object CF (→ Device) set on devices a
                                                    # controller reports, e.g. WLC → AP
-    ap_dummy_interfaces: Optional[list[str]] = None,  # placeholder AP interfaces to delete
-                                                       # (housekeeping); None = ["main", "vlan2"]
+    ap_prune_interfaces: bool = True,  # APs keep only GigabitEthernet0 + Dot11Radio<n>
     prune: bool = False,
     dry_run: bool = True,
 ) -> dict:
@@ -4031,8 +4068,6 @@ def sync_device(
         # record: DeviceType/serial, OS version, controller link, a marker-
         # delimited comments block, its wired interface and radios + MACs.
         ap_modules = [m for m in nd_mods if m.get("class") == "ap"]
-        ap_dummy_names = set(["main", "vlan2"] if ap_dummy_interfaces is None else ap_dummy_interfaces)
-        ap_dummy_lower = {n.lower() for n in ap_dummy_names}
         ap_untyped: dict[str, int] = {}   # AP model → count of APs no existing DeviceType matched
 
         def _update_ap_device(ap_dev, ch: dict, parsed: dict) -> str:
@@ -4118,9 +4153,9 @@ def sync_device(
                 )
                 if action in ("created", "updated") or (mac and old_mac.lower() != mac.lower()):
                     changed = True
-            # aps.dummy_interfaces is its own opt-in ([] disables): not gated on housekeeping
-            if any(n.lower() in ap_dummy_lower for n in ifaces):
-                if nb.remove_empty_dummy_interfaces(ap_dev, ap_dummy_names):
+            if ap_prune_interfaces:
+                removed = _prune_ap_interfaces(nb, ap_dev, ifaces, iface_source_cf, iface_source_value, log)
+                if removed:
                     changed = True
             return "updated" if changed else "unchanged"
 
