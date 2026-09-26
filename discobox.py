@@ -2007,6 +2007,18 @@ def _ha_note_block(primary_name: str, pos: int, created: bool, location_missing:
     return "\n".join(lines)
 
 
+def _chassis_pos_of(entry: dict, by_index: dict) -> Optional[int]:
+    """Position of the chassis an ENTITY-MIB entry sits under (walking parents), or None."""
+    seen: set = set()
+    cur: Optional[dict] = entry
+    while cur is not None and cur.get("index") not in seen:
+        if cur.get("class") == "chassis":
+            return cur.get("pos")
+        seen.add(cur.get("index"))
+        cur = by_index.get(cur.get("parent"))
+    return None
+
+
 def _ha_peer_name(primary_name: str, pos: int) -> str:
     """ "wlc1.example.com", 2 → "wlc1-2.example.com" (the "-<pos>" peer naming convention)."""
     short, dot, domain = primary_name.partition(".")
@@ -3732,6 +3744,12 @@ def sync_device(
         # chassis per unit; modelled like StackWise Virtual (one Netbox device
         # per unit, joined in a Virtual Chassis), peers created when missing
         is_ha_pair = has_stack and "multi chassis system" in (stack_root.get("name") or "").lower()
+        _mods_by_index = {m.get("index"): m for m in nd_mods if m.get("index") is not None}
+
+        def _ha_member(entry: dict):
+            """HA pair: the member device owning entry, by its ENTITY chassis ancestor (None = unknown)."""
+            pos = _chassis_pos_of(entry, _mods_by_index)
+            return slot_to_device.get(pos) if pos is not None else None
         is_vss = has_stack and (
             "virtualstack" in (stack_root.get("type") or "").lower()
             or "virtual stack" in (stack_root.get("name") or "").lower()
@@ -4232,7 +4250,9 @@ def sync_device(
                 fan_model = fan.get("model", "")
                 fan_serial = fan.get("serial", "")
                 fan_target = nb_device
-                if slot_to_device:
+                if slot_to_device and is_ha_pair:
+                    fan_target = _ha_member(fan) or nb_device
+                elif slot_to_device:
                     sw_match = re.match(r"Switch\s+(\d+)", fan_name, re.IGNORECASE)
                     if sw_match:
                         fan_target = slot_to_device.get(int(sw_match.group(1)), nb_device)
@@ -4272,7 +4292,9 @@ def sync_device(
             psu_serial = psu.get("serial", "")
             # For VSS route to the correct member device via "Switch N" prefix
             psu_target = nb_device
-            if slot_to_device:
+            if slot_to_device and is_ha_pair:
+                psu_target = _ha_member(psu) or nb_device
+            elif slot_to_device:
                 sw_match = re.match(r"Switch\s+(\d+)", psu_name, re.IGNORECASE)
                 if sw_match:
                     psu_target = slot_to_device.get(int(sw_match.group(1)), nb_device)
@@ -4448,7 +4470,11 @@ def sync_device(
             # template generates distinct interface names (Te2/1/8 for Switch 2, etc.).
             target_device = nb_device
             sw_match = re.match(r"Switch\s+(\d+)", blade_name, re.IGNORECASE)
-            if sw_match and slot_to_device:
+            if slot_to_device and is_ha_pair:
+                # HA pair: the unit the blade sits in, from the ENTITY tree
+                target_device = _ha_member(blade) or nb_device
+                sw_match = None
+            elif sw_match and slot_to_device:
                 # VSS: route blade to the right member device; position within that device
                 target_device = slot_to_device.get(int(sw_match.group(1)), nb_device)
                 sw_match = None  # fall through to Slot/Module extraction below

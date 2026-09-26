@@ -66,3 +66,17 @@ def test_ha_note_block_and_location_hint_lifecycle() -> None:
     merged = _merge_note_block("manual text\n\n" + comments, located, _HA_NOTE_RE)
     assert merged.startswith("manual text\n\n") and "set them manually" not in merged
     assert _merge_note_block(merged, located, _HA_NOTE_RE) is None     # idempotent
+
+
+def test_entity_ancestry_routes_components_to_their_unit() -> None:
+    from discobox import _chassis_pos_of
+    _, mods = _load()
+    by_index = {m["index"]: m for m in mods}
+    by_name = {m["name"]: m for m in mods}
+    assert _chassis_pos_of(by_name["module R0"], by_index) == 2
+    assert _chassis_pos_of(by_name["SPA subslot 0/0"], by_index) == 2        # via "module 0"
+    assert _chassis_pos_of(by_name["Chassis 2 Fan Tray"], by_index) == 2
+    assert _chassis_pos_of(by_name["Chassis 1 Fan Tray"], by_index) == 1
+    # a parent chain that never reaches a chassis (trimmed containers) → unknown
+    assert _chassis_pos_of(by_name["Chassis 1 Power Supply Module 0"], by_index) is None
+    assert _chassis_pos_of({"index": 1, "parent": 1, "class": "x"}, {1: {"index": 1, "parent": 1}}) is None
