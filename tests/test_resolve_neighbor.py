@@ -96,3 +96,23 @@ def test_mac_on_another_device_does_not_replace_ip_device() -> None:
     _, _, mac = _ap()          # IP found device 9 but not the port; MAC says device 52
     nb = _nb(devices=[sw], macs=[mac])
     assert _resolve_neighbor(nb, "192.0.2.9", "Gi0", AP_MAC) == (9, None)
+
+
+def test_fdb_resolves_ap_by_learned_mac() -> None:
+    from discobox import _resolve_neighbor_by_fdb
+    dev, iface, mac = _ap()
+    nb = _nb(devices=[dev], ifaces=[iface], macs=[mac])
+    # the AP's Ethernet MAC learned on the port, plus a client MAC unknown to Netbox
+    assert _resolve_neighbor_by_fdb(nb, [AP_MAC.lower(), "02:00:00:aa:aa:aa"]) == (52, 520)
+    assert _resolve_neighbor_by_fdb(nb, []) == (None, None)
+    assert _resolve_neighbor_by_fdb(nb, ["02:00:00:aa:aa:aa"]) == (None, None)
+
+
+def test_fdb_ignores_busy_ports_and_ambiguity() -> None:
+    from discobox import FDB_MAX_MACS_PER_PORT, _resolve_neighbor_by_fdb
+    dev, iface, mac = _ap()
+    dev2, iface2, mac2 = _ap(53, 530, mac="02:00:00:00:53:01")
+    nb = _nb(devices=[dev, dev2], ifaces=[iface, iface2], macs=[mac, mac2])
+    many = [AP_MAC] + [f"02:00:00:bb:bb:{i:02x}" for i in range(FDB_MAX_MACS_PER_PORT)]
+    assert _resolve_neighbor_by_fdb(nb, many) == (None, None)                          # uplink-ish port
+    assert _resolve_neighbor_by_fdb(nb, [AP_MAC, "02:00:00:00:53:01"]) == (None, None)   # two known devices

@@ -358,6 +358,10 @@ class NetdiscoClient:
     def get_powered_ports(self, ip: str) -> list[dict]:
         return self._get(f"/api/v1/object/device/{ip}/powered_ports")
 
+    def get_nodes(self, ip: str) -> list[dict]:
+        """The device's forwarding table as Netdisco macsucked it: {mac, port, vlan, active, ...}."""
+        return self._get(f"/api/v1/object/device/{ip}/nodes")
+
     def get_all_devices(self) -> list[dict]:
         """
         Full device inventory via /api/v1/search/device. That endpoint requires
@@ -2265,19 +2269,11 @@ def _resolve_neighbor_by_mac(nb: "NetboxClient", remote_id: str) -> tuple[Option
     GigabitEthernet0) resolve this way even without any IP in Netbox, and
     without matching their abbreviated port name ("Gi0").
     """
-    mac = clean_mac(remote_id) if remote_id and _MAC_RE.match(remote_id.strip()) else None
-    if not mac:
-        return None, None
-    hits = [
-        m for m in nb.nb.dcim.mac_addresses.filter(mac_address=mac)
-        if getattr(m, "assigned_object_type", None) == "dcim.interface" and getattr(m, "assigned_object", None)
-    ]
+    hits = _resolve_mac_hits(nb, remote_id)
     if len(hits) != 1:
-        logging.getLogger("discobox.sync").debug("  neighbor resolve  mac=%s  interface hits=%d", mac, len(hits))
+        logging.getLogger("discobox.sync").debug("  neighbor resolve  mac=%s  interface hits=%d", remote_id, len(hits))
         return None, None
-    iface = hits[0].assigned_object
-    device_id = getattr(getattr(iface, "device", None), "id", None)
-    return (device_id, iface.id) if device_id else (None, None)
+    return hits[0]
 
 
 def _resolve_neighbor(
@@ -2309,6 +2305,43 @@ def _resolve_neighbor(
             if name_dev is not None and dev_id in (None, name_dev):
                 return name_dev, name_iface
     return dev_id, iface_id
+
+
+FDB_MAX_MACS_PER_PORT = 4
+
+
+def _resolve_neighbor_by_fdb(nb: "NetboxClient", macs: list[str]) -> tuple[Optional[int], Optional[int]]:
+    """
+    (device_id, interface_id) from the MACs a switch learned on a port: exactly
+    one of them must sit on exactly one Netbox interface (an AP's Ethernet MAC
+    on its GigabitEthernet0). Ports with more than FDB_MAX_MACS_PER_PORT MACs
+    (uplinks, hosts behind a switch) are never used.
+    """
+    macs = list(dict.fromkeys(m for m in macs if m))
+    if not macs or len(macs) > FDB_MAX_MACS_PER_PORT:
+        return None, None
+    found: dict[int, int] = {}      # interface id → device id
+    for mac in macs:
+        for hit in _resolve_mac_hits(nb, mac):
+            found[hit[1]] = hit[0]
+    if len(found) != 1:
+        return None, None
+    iface_id, dev_id = next(iter(found.items()))
+    return dev_id, iface_id
+
+
+def _resolve_mac_hits(nb: "NetboxClient", mac: str) -> list[tuple[int, int]]:
+    """(device_id, interface_id) of every Netbox interface carrying mac."""
+    mac = clean_mac(mac) if mac and _MAC_RE.match(mac.strip()) else None
+    if not mac:
+        return []
+    out = []
+    for m in nb.nb.dcim.mac_addresses.filter(mac_address=mac):
+        iface = getattr(m, "assigned_object", None)
+        dev_id = getattr(getattr(iface, "device", None), "id", None)
+        if getattr(m, "assigned_object_type", None) == "dcim.interface" and iface and dev_id:
+            out.append((dev_id, iface.id))
+    return out
 
 
 def _neighbor_iface_on_device(nb: "NetboxClient", device_id: int, remote_port: str) -> Optional[int]:
@@ -4722,17 +4755,41 @@ def sync_device(
     cable_counts: dict[str, int] = {"created": 0, "conflict": 0, "deleted": 0, "error": 0}
     iface_patch_batch: list = []
     iface_names_by_id: dict[int, str] = {}
+    _fdb_cache: dict = {}
+
+    def _port_fdb() -> dict:
+        """port → active MACs from Netdisco's FDB, fetched once, only when a port needs it."""
+        if "ports" not in _fdb_cache:
+            by_port: dict[str, list[str]] = {}
+            try:
+                for node in nd.get_nodes(nd_ip) or []:
+                    if node.get("active") and node.get("port") and node.get("mac"):
+                        by_port.setdefault(node["port"], []).append(node["mac"])
+            except Exception as exc:
+                log.debug("  FDB fetch failed: %s", exc)
+            _fdb_cache["ports"] = by_port
+        return _fdb_cache["ports"]
+
     for port in nd_ports_sorted:
         iface_name = port.get("port") or port.get("descr") or "?"
         if iface_name.lower().startswith(PORT_BLACKLIST_PREFIXES):
             log.debug("  %-40s blacklisted: skipping", iface_name)
             continue
         try:
+            has_neighbor = bool(port.get("remote_ip") or port.get("remote_id"))
             nb_device_id, nb_iface_id = (
                 _resolve_neighbor(nb, port.get("remote_ip", ""), port.get("remote_port", ""), port.get("remote_id") or "")
-                if (cf_neighbor_device or cf_neighbor_iface or cable_scope) and (port.get("remote_ip") or port.get("remote_id"))
+                if (cf_neighbor_device or cf_neighbor_iface or cable_scope) and has_neighbor
                 else (None, None)
             )
+            # A neighbor whose port couldn't be resolved (e.g. an AP on DHCP announcing
+            # only its name via CDP): the switch's own FDB for this port may hold the
+            # neighbor's MAC, which Netbox knows (an AP's Ethernet MAC on GigabitEthernet0).
+            if nb_iface_id is None and has_neighbor and (cable_scope or cf_neighbor_iface):
+                f_dev, f_iface = _resolve_neighbor_by_fdb(nb, _port_fdb().get(iface_name, []))
+                if f_iface is not None and nb_device_id in (None, f_dev):
+                    nb_device_id, nb_iface_id = f_dev, f_iface
+                    log.debug("  %-40s neighbor resolved via FDB MAC", iface_name)
             # For cabling, gate nb_iface_id on same-site check
             cable_iface_id = nb_iface_id
             if cable_scope == "site" and cable_iface_id and nb_device_id:
@@ -5196,6 +5253,14 @@ def sync_device(
             s += f"/!{errors}"
         return s
 
+    def _fmt_cables(c: dict) -> Optional[str]:
+        # neighbor cables (created incl. replaced stale ones, deleted, conflicts left alone);
+        # cable errors stay out of errors= (logged as "not counted in errors")
+        if not (c["created"] or c["deleted"] or c["conflict"]):
+            return None
+        s = f"cables=+{c['created']}/-{c['deleted']}"
+        return s + (f"/conflict={c['conflict']}" if c["conflict"] else "")
+
     # stack_cable_counts only exists in locals() when this run's chassis data
     # actually included any (gated behind `if stack_cables:` above).
     _stack_cable_counts = locals().get("stack_cable_counts")
@@ -5222,6 +5287,7 @@ def sync_device(
         _fmt("sfps", sfp_counts) if sync_sfp else None,
         _fmt_aps(ap_counts) if sync_modules else None,
         _fmt("stackcables", _stack_cable_counts) if _stack_cable_counts else None,
+        _fmt_cables(cable_counts),
     ]))
     summary = ("  " + "  ".join(parts)) if parts else "  no changes"
     errors_suffix = f"  errors={total_errors}" if total_errors else ""
