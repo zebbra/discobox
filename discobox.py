@@ -14,6 +14,7 @@ import re
 import sys
 from datetime import date, timedelta
 from typing import Callable, Optional, Union
+from urllib.parse import quote
 
 import pynetbox
 import requests
@@ -1979,19 +1980,25 @@ def _ap_radios(radio_ports: list[dict], radio_mac: str) -> list[str]:
     ]
 
 
-def _ap_note_block(parsed: dict, controller_name: str, radios: list[str]) -> str:
+def _ap_note_block(parsed: dict, controller_name: str, radios: list[str], controller_id: Optional[int] = None) -> str:
     """
     The discobox-owned part of an AP's comments (Markdown, marker-delimited).
     Only slow-changing facts: no DHCP IP and no timestamp, so the block (and
-    the AP's changelog) only changes when something real does.
+    the AP's changelog) only changes when something real does. Links are
+    Netbox-relative: the controller by id, the uplink switch (known only by
+    the name the WLC reports) as a device search on its short name.
     """
     # as the WLC shows it ("show ap summary" Location column): "<site tag>/<tag>"
     tag = "/".join(x for x in (parsed.get("site_tag"), parsed.get("tag")) if x)
     uplink = parsed.get("uplink_name")
-    if uplink and parsed.get("uplink_ip"):
-        uplink += f" ({parsed['uplink_ip']})"
+    if uplink:
+        short = uplink.split(".", 1)[0]
+        uplink = f"[{uplink}](/dcim/devices/?q={quote(short)})"
+        if parsed.get("uplink_ip"):
+            uplink += f" ({parsed['uplink_ip']})"
+    controller = f"[{controller_name}](/dcim/devices/{controller_id}/)" if controller_id else controller_name
     rows = [
-        ("Controller", controller_name),
+        ("Controller", controller),
         ("Location", tag),
         ("Uplink", uplink),
         ("Ethernet MAC", parsed.get("ethernet_mac")),
@@ -4186,7 +4193,7 @@ def sync_device(
             radios = _ap_radios(ap_radio_ports, parsed.get("dot3_mac") or "")
             new_comments = _merge_ap_note(
                 getattr(ap_dev, "comments", "") or "",
-                _ap_note_block(parsed, nb_device.name, radios),
+                _ap_note_block(parsed, nb_device.name, radios, controller_id=nb_device.id),
             )
             if new_comments is not None:
                 patch["comments"] = new_comments

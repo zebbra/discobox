@@ -284,6 +284,11 @@ def test_ap_note_block_from_sample() -> None:
     assert f" - Location: {parsed['site_tag']}/dot1x" in block
     assert f" - Ethernet MAC: {parsed['ethernet_mac']}" in block
     assert " - Radios: 0 (2.4 GHz)" in block
+    # links: controller by id when known, uplink as a Netbox device search on its short name
+    short = parsed["uplink_name"].split(".")[0]
+    assert f" - Uplink: [{parsed['uplink_name']}](/dcim/devices/?q={short})" in block
+    linked = _ap_note_block(parsed, "wlc-1.example.com", radios, controller_id=189)
+    assert " - Controller: [wlc-1.example.com](/dcim/devices/189/)" in linked
 
 
 def test_ap_radios_sorted_and_raw_type_kept() -> None:
