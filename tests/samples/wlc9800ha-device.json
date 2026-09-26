@@ -1,0 +1,9 @@
+{
+  "ip": "192.0.2.8",
+  "name": "device-515",
+  "dns": "device-298.example.com",
+  "vendor": "cisco",
+  "model": "C980080K9",
+  "serial": "AFK1831J9TY AFB9852J4T5",
+  "os_ver": "17.15.5"
+}

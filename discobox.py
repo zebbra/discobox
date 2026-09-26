@@ -488,8 +488,12 @@ class NetboxClient:
         _log = log or logger
         patch: dict = {}
 
-        if nd_device.get("serial"):
-            patch["serial"] = nd_device["serial"]
+        # A multi-unit system (e.g. a 9800 HA pair) reports every unit's serial
+        # ("A B"): that's no single device's serial. The chassis pass sets each
+        # unit's own one instead of fighting it every sync.
+        nd_serial = (nd_device.get("serial") or "").strip()
+        if nd_serial and len(nd_serial.split()) == 1:
+            patch["serial"] = nd_serial
 
         custom: dict = {}
         if cf_os_version and nd_device.get("os_ver"):
@@ -1928,20 +1932,61 @@ def _ap_note_block(parsed: dict, controller_name: str, radios: list[str]) -> str
     return "\n".join(lines)
 
 
-def _merge_ap_note(comments: str, block: str) -> Optional[str]:
+def _merge_note_block(comments: str, block: str, block_re: re.Pattern) -> Optional[str]:
     """
-    comments with the discobox block replaced (or appended), or None when the
-    block is unchanged, so an unchanged AP gets no changelog entry. Text
-    outside the markers (e.g. other tools' blocks, manual notes) is never
-    touched.
+    comments with the marker-delimited block (matched by block_re) replaced or
+    appended, or None when it is unchanged, so an unchanged device gets no
+    changelog entry. Text outside the markers (other tools' blocks, manual
+    notes) is never touched.
     """
     comments = comments or ""
-    current = _AP_NOTE_RE.search(comments)
+    current = block_re.search(comments)
     if current:
         if current.group(0) == block:
             return None
         return comments[:current.start()] + block + comments[current.end():]
     return f"{comments.rstrip()}\n\n{block}" if comments.strip() else block
+
+
+def _merge_ap_note(comments: str, block: str) -> Optional[str]:
+    return _merge_note_block(comments, block, _AP_NOTE_RE)
+
+
+HA_NOTE_BEGIN = "<!-- discobox:ha -->"
+HA_NOTE_END = "<!-- /discobox:ha -->"
+_HA_NOTE_RE = re.compile(re.escape(HA_NOTE_BEGIN) + r".*?" + re.escape(HA_NOTE_END), re.DOTALL)
+_HA_CREATED_LINE = " - Created by discobox from the controller's ENTITY-MIB chassis list"
+
+
+def _ha_note_block(primary_name: str, pos: int, created: bool, location_missing: bool) -> str:
+    """discobox-owned comments block on an HA peer device (chassis <pos> of primary_name)."""
+    lines = [HA_NOTE_BEGIN, "## HA peer (discobox)", f" - Chassis {pos} of {primary_name} (HA pair, Virtual Chassis)"]
+    if created:
+        lines.append(_HA_CREATED_LINE)
+    if location_missing:
+        lines.append(" - ⚠ Location/rack not known to discobox: set them manually")
+    lines.append(HA_NOTE_END)
+    return "\n".join(lines)
+
+
+def _ha_peer_name(primary_name: str, pos: int) -> str:
+    """ "wlc1.example.com", 2 → "wlc1-2.example.com" (the "-<pos>" peer naming convention)."""
+    short, dot, domain = primary_name.partition(".")
+    return f"{short}-{pos}{dot}{domain}"
+
+
+def _pick_primary_chassis(chassis: list[dict], device_serial: str) -> dict:
+    """
+    The chassis entry that is the synced device itself. A single matching serial
+    decides; an HA pair's logical device reports every member's serial ("A B"),
+    so then the lowest position wins: chassis 1 stays the same Netbox device
+    across switchovers (roles move, positions don't).
+    """
+    wanted = set((device_serial or "").split())
+    own = [c for c in chassis if c.get("serial") and c.get("serial") in wanted]
+    if len(own) == 1:
+        return own[0]
+    return min(chassis, key=lambda c: c.get("pos") if isinstance(c.get("pos"), int) else 1 << 30)
 
 
 def _cf_record_id(value) -> Optional[int]:
@@ -3186,6 +3231,63 @@ def reconcile_devices(
     return counts
 
 
+def _create_ha_peer(
+    nb: "NetboxClient", primary, name: str, serial: str,
+    source_cf: Optional[str], source_value: str,
+):
+    """
+    Create the Netbox device for another unit of an HA pair, copying role,
+    site, tenant, status and DeviceType from the primary. Location and rack
+    stay empty: discobox can't know them (the HA note says so).
+    """
+    payload: dict = {
+        "name": name,
+        "device_type": primary.device_type.id,
+        "role": primary.role.id,
+        "site": primary.site.id,
+        "status": getattr(getattr(primary, "status", None), "value", None) or "active",
+        "serial": serial or "",
+    }
+    tenant = getattr(primary, "tenant", None)
+    if tenant:
+        payload["tenant"] = tenant.id
+    cf = dict(getattr(primary, "custom_fields", {}) or {})
+    if source_cf and source_cf in cf:
+        payload["custom_fields"] = {source_cf: source_value}
+    return nb.nb.dcim.devices.create(**payload)
+
+
+def _remove_legacy_chassis_modules(nb: "NetboxClient", device, chassis: list[dict], log) -> int:
+    """
+    Before HA pairs were modelled as a Virtual Chassis, each unit became a
+    module bay + module on the controller device ("Chassis 1", "Chassis 2").
+    Remove those, but only a bay named after a chassis whose module is empty
+    or carries that chassis' serial. Interfaces still assigned to the module
+    are detached first: deleting a module cascades to its components.
+    """
+    removed = 0
+    for ch in chassis:
+        bay_name = ch.get("name")
+        if not bay_name:
+            continue
+        for bay in nb.nb.dcim.module_bays.filter(device_id=device.id, name=bay_name):
+            installed = getattr(bay, "installed_module", None)
+            if installed:
+                module = nb.nb.dcim.modules.get(installed.id)
+                if module and (module.serial or "") not in ("", ch.get("serial") or ""):
+                    log.warning("  %s: module serial %r isn't chassis %r: left alone",
+                                bay_name, module.serial, ch.get("serial"))
+                    continue
+                if module:
+                    for iface in nb.nb.dcim.interfaces.filter(module_id=module.id):
+                        iface.update({"module": None})
+                    module.delete()
+            bay.delete()
+            removed += 1
+            log.info("  Removed legacy chassis module bay %r (HA pair is a Virtual Chassis now)", bay_name)
+    return removed
+
+
 def sync_device(
     ip: str,
     nd: NetdiscoClient,
@@ -3589,9 +3691,14 @@ def sync_device(
         # Nexus FEX topology: stack root is a logical fabric, not a real member stack.
         # The primary N9K chassis + satellite FEX units all appear as chassis entries.
         is_fex = has_stack and ((stack_root.get("type") or "").lower() == "cevcontainernexuslogicalfabric")
+        # Cisco 9800 HA SSO pairs: ENTITY-MIB root "Multi Chassis System" with a
+        # chassis per unit; modelled like StackWise Virtual (one Netbox device
+        # per unit, joined in a Virtual Chassis), peers created when missing
+        is_ha_pair = has_stack and "multi chassis system" in (stack_root.get("name") or "").lower()
         is_vss = has_stack and (
             "virtualstack" in (stack_root.get("type") or "").lower()
             or "virtual stack" in (stack_root.get("name") or "").lower()
+            or is_ha_pair
         )
         is_standalone = not has_stack and len(chassis) == 1
 
@@ -3745,8 +3852,10 @@ def sync_device(
             # Cat9500 StackWise Virtual: two physical devices in separate Netbox records.
             # Create/update a Virtual Chassis to link them; no module bays on either device.
             device_serial = nd_device.get("serial", "")
-            primary_ch = next((c for c in chassis if c.get("serial") == device_serial), chassis[0])
+            primary_ch = _pick_primary_chassis(chassis, device_serial)
             partner_chs = [c for c in chassis if c is not primary_ch]
+            if is_ha_pair:
+                _remove_legacy_chassis_modules(nb, nb_device, chassis, log)
 
             # Update DeviceType for the primary (the device we're syncing right now)
             try:
@@ -3778,6 +3887,35 @@ def sync_device(
                     if results:
                         partner_dev = results[0]
                         log.info("  VSS partner found by hostname %r", partner_dev.name)
+
+                partner_created = False
+                if is_ha_pair:
+                    peer_name = _ha_peer_name(nb_device.name, partner_pos)
+                    if not partner_dev:
+                        results = list(nb.nb.dcim.devices.filter(name__ie=peer_name))
+                        partner_dev = results[0] if results else None
+                    if not partner_dev:
+                        try:
+                            partner_dev = _create_ha_peer(nb, nb_device, peer_name, partner_serial,
+                                                          iface_source_cf, iface_source_value)
+                            partner_created = True
+                            log.info("  HA peer %r created (chassis %s, serial %s)", peer_name, partner_pos, partner_serial)
+                        except Exception as exc:
+                            log.error("  HA peer %r could not be created: %s", peer_name, exc)
+                    if partner_dev:
+                        existing = getattr(partner_dev, "comments", "") or ""
+                        new_comments = _merge_note_block(
+                            existing,
+                            _ha_note_block(nb_device.name, partner_pos,
+                                           created=partner_created or _HA_CREATED_LINE in existing,
+                                           location_missing=not getattr(partner_dev, "location", None)),
+                            _HA_NOTE_RE,
+                        )
+                        if new_comments is not None:
+                            try:
+                                partner_dev.update({"comments": new_comments})
+                            except Exception as exc:
+                                log.error("  HA peer %r note update error: %s", partner_dev.name, exc)
 
                 if not partner_dev:
                     log.warning(

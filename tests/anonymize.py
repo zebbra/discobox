@@ -23,7 +23,8 @@ SRC = ROOT / "samples"
 DST = ROOT / "tests" / "samples"
 
 # Search-shape dumps are not consumed by the sync code — drop.
-SKIP = {"fortigate-device.json", "nexus93180lcex-devices.json"}
+SKIP = {"fortigate-device.json", "nexus93180lcex-devices.json",
+        "nb-ap-device.json"}   # last: a NetBox export (reference only), not a Netdisco dump
 
 # Filename rewrites: raw → fixture name.
 RENAME = {
@@ -170,7 +171,8 @@ def transform_device(d: dict) -> dict:
     out = dict(d)
     if out.get("ip"):           out["ip"] = map_ip(out["ip"])
     if out.get("mac"):          out["mac"] = map_mac(out["mac"])
-    if out.get("serial"):       out["serial"] = map_serial(out["serial"])
+    # an HA pair's logical device lists every unit's serial ("A B"): map each
+    if out.get("serial"):       out["serial"] = " ".join(map_serial(x) for x in out["serial"].split())
     if out.get("dns"):          out["dns"] = map_host(out["dns"])
     if out.get("name"):         out["name"] = map_host(out["name"]).split(".")[0]
     if out.get("location"):     out["location"] = map_location(out["location"])

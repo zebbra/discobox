@@ -1,0 +1,167 @@
+[
+  {
+    "ip": "192.0.2.8",
+    "index": 1,
+    "parent": 0,
+    "class": "stack",
+    "name": "Multi Chassis System",
+    "model": "",
+    "serial": "",
+    "pos": -1,
+    "type": null
+  },
+  {
+    "ip": "192.0.2.8",
+    "index": 2,
+    "parent": 1,
+    "class": "chassis",
+    "name": "Chassis 1",
+    "model": "C9800-80-K9",
+    "serial": "AFK1831J9TY",
+    "pos": 1,
+    "type": null
+  },
+  {
+    "ip": "192.0.2.8",
+    "index": 500,
+    "parent": 1,
+    "class": "chassis",
+    "name": "Chassis 2",
+    "model": "C9800-80-K9",
+    "serial": "AFB9852J4T5",
+    "pos": 2,
+    "type": null
+  },
+  {
+    "ip": "192.0.2.8",
+    "index": 2000,
+    "parent": 500,
+    "class": "module",
+    "name": "module R0",
+    "model": "C9800-80-K9",
+    "serial": "AFB9852J4T5",
+    "pos": 1,
+    "type": null
+  },
+  {
+    "ip": "192.0.2.8",
+    "index": 1000,
+    "parent": 500,
+    "class": "module",
+    "name": "module 0",
+    "model": "C9800-80-K9",
+    "serial": "",
+    "pos": 0,
+    "type": null
+  },
+  {
+    "ip": "192.0.2.8",
+    "index": 3000,
+    "parent": 500,
+    "class": "module",
+    "name": "module F0",
+    "model": "C9800-80-K9",
+    "serial": "",
+    "pos": 2,
+    "type": null
+  },
+  {
+    "ip": "192.0.2.8",
+    "index": 1040,
+    "parent": 1000,
+    "class": "module",
+    "name": "SPA subslot 0/0",
+    "model": "BUILT-IN-6X10G/2X1G",
+    "serial": "AFK13018156",
+    "pos": 0,
+    "type": null
+  },
+  {
+    "ip": "192.0.2.8",
+    "index": 1092,
+    "parent": 1091,
+    "class": "module",
+    "name": "subslot 0/0 transceiver 0",
+    "model": "SFP-10G-SR",
+    "serial": "DCK0865JB33",
+    "pos": 0,
+    "type": null
+  },
+  {
+    "ip": "192.0.2.8",
+    "index": 1104,
+    "parent": 1103,
+    "class": "module",
+    "name": "subslot 0/0 transceiver 1",
+    "model": "SFP-10G-SR",
+    "serial": "AFK28200CEY",
+    "pos": 0,
+    "type": null
+  },
+  {
+    "ip": "192.0.2.8",
+    "index": 4,
+    "parent": 3,
+    "class": "powerSupply",
+    "name": "Chassis 1 Power Supply Module 0",
+    "model": "C9800-AC-1100W",
+    "serial": "AFE0833J6T0",
+    "pos": 0,
+    "type": null
+  },
+  {
+    "ip": "192.0.2.8",
+    "index": 24,
+    "parent": 23,
+    "class": "powerSupply",
+    "name": "Chassis 1 Power Supply Module 1",
+    "model": "C9800-AC-1100W",
+    "serial": "AFD1182J3EA",
+    "pos": 0,
+    "type": null
+  },
+  {
+    "ip": "192.0.2.8",
+    "index": 502,
+    "parent": 501,
+    "class": "powerSupply",
+    "name": "Chassis 2 Power Supply Module 0",
+    "model": "C9800-AC-1100W",
+    "serial": "AFE9722J1TF",
+    "pos": 0,
+    "type": null
+  },
+  {
+    "ip": "192.0.2.8",
+    "index": 522,
+    "parent": 521,
+    "class": "powerSupply",
+    "name": "Chassis 2 Power Supply Module 1",
+    "model": "C9800-AC-1100W",
+    "serial": "ADK5835J8TY",
+    "pos": 0,
+    "type": null
+  },
+  {
+    "ip": "192.0.2.8",
+    "index": 44,
+    "parent": 2,
+    "class": "fan",
+    "name": "Chassis 1 Fan Tray",
+    "model": "C9800-80-K9-FAN",
+    "serial": "",
+    "pos": 0,
+    "type": null
+  },
+  {
+    "ip": "192.0.2.8",
+    "index": 542,
+    "parent": 500,
+    "class": "fan",
+    "name": "Chassis 2 Fan Tray",
+    "model": "C9800-80-K9-FAN",
+    "serial": "",
+    "pos": 0,
+    "type": null
+  }
+]
