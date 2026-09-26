@@ -2001,12 +2001,17 @@ def _ap_note_block(parsed: dict, controller_name: str, radios: list[str], contro
         ("Controller", controller),
         ("Location", tag),
         ("Uplink", uplink),
-        ("Ethernet MAC", parsed.get("ethernet_mac")),
-        ("Radio MAC", parsed.get("dot3_mac")),
-        ("Radios", ", ".join(radios)),
     ]
     lines = [AP_NOTE_BEGIN, "## Wireless"]
     lines += [f" - {k}: {v}" for k, v in rows if v]
+    # nested lists: Python-Markdown (Netbox) needs a 4-space indent
+    macs = [(k, v) for k, v in (("Ethernet", parsed.get("ethernet_mac")), ("Radio", parsed.get("dot3_mac"))) if v]
+    if macs:
+        lines.append(" - MAC:")
+        lines += [f"     - {k}: {v}" for k, v in macs]
+    if radios:
+        lines.append(" - Radios:")
+        lines += [f"     - {r}" for r in radios]
     lines.append(AP_NOTE_END)
     return "\n".join(lines)
 

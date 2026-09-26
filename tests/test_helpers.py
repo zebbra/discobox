@@ -277,13 +277,13 @@ def test_ap_note_block_from_sample() -> None:
     assert radios == ["0 (2.4 GHz)"]
     block = _ap_note_block(parsed, "wlc-1.example.com", radios)
     assert block.startswith("<!-- discobox:ap -->\n## Wireless\n")
-    assert block.endswith(" - Radios: 0 (2.4 GHz)\n<!-- /discobox:ap -->")
+    assert block.endswith(" - Radios:\n     - 0 (2.4 GHz)\n<!-- /discobox:ap -->")
     # nothing that changes on its own: no DHCP IP, no timestamp
     assert parsed["ip"] not in block and "Updated" not in block
     assert " - Controller: wlc-1.example.com" in block
     assert f" - Location: {parsed['site_tag']}/dot1x" in block
-    assert f" - Ethernet MAC: {parsed['ethernet_mac']}" in block
-    assert " - Radios: 0 (2.4 GHz)" in block
+    assert f" - MAC:\n     - Ethernet: {parsed['ethernet_mac']}\n     - Radio: {parsed['dot3_mac']}\n" in block
+    assert " - Radios:\n     - 0 (2.4 GHz)\n" in block
     # links: controller by id when known, uplink as a Netbox device search on its short name
     short = parsed["uplink_name"].split(".")[0]
     assert f" - Uplink: [{parsed['uplink_name']}](/dcim/devices/?q={short})" in block
