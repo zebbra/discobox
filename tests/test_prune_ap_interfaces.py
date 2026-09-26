@@ -54,3 +54,29 @@ def test_prune_removes_placeholders_and_wrong_template_ports_only() -> None:
 def test_prune_nothing_to_do() -> None:
     ifaces = {"GigabitEthernet0": _If(1, "GigabitEthernet0")}
     assert _prune_ap_interfaces(_nb(), SimpleNamespace(name="ap"), ifaces, "source", "netdisco", logging.getLogger()) == 0
+
+
+def test_prune_ap_bays_only_empty_and_only_when_counted() -> None:
+    from discobox import _prune_ap_bays
+
+    class _Bay(_If):
+        def __init__(self, id_, name, installed=None, attr="installed_device"):
+            super().__init__(id_, name)
+            setattr(self, attr, installed)
+
+    dbays = [_Bay(1, "Slot 1"), _Bay(2, "Slot 2", installed=SimpleNamespace(id=5))]
+    mbays = [_Bay(3, "Network Module", attr="installed_module")]
+    queried: list = []
+
+    def _ep(items, name):
+        return SimpleNamespace(filter=lambda device_id: queried.append(name) or items)
+
+    nb = SimpleNamespace(nb=SimpleNamespace(dcim=SimpleNamespace(
+        device_bays=_ep(dbays, "device_bays"), module_bays=_ep(mbays, "module_bays"))))
+    ap = SimpleNamespace(name="ap", id=1, device_bay_count=2, module_bay_count=1)
+    assert _prune_ap_bays(nb, ap, logging.getLogger()) == 2
+    assert [b.name for b in dbays + mbays if b.deleted] == ["Slot 1", "Network Module"]   # occupied bay kept
+    queried.clear()
+    assert _prune_ap_bays(nb, SimpleNamespace(name="ap", id=1, device_bay_count=0, module_bay_count=0),
+                          logging.getLogger()) == 0
+    assert queried == []                                      # no bays counted → no queries

@@ -101,7 +101,8 @@ library:                    # DeviceType enrichment from the devicetype-library 
 aps:                        # access points reported by a WLC (updated during the WLC's sync)
   prune_interfaces: true    # APs keep only GigabitEthernet0 + Dot11Radio<n>: others (import
                             # placeholders like main/Vlan2, wrong-template ports) are deleted on
-                            # every WLC sync, never with a cable or IP or another source's
+                            # every WLC sync, never with a cable or IP or another source's;
+                            # empty device/module bays too
 
 reconcile:
   interval: 86400           # seconds

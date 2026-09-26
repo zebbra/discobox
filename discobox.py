@@ -1903,6 +1903,33 @@ def _prune_ap_interfaces(nb, ap_dev, ifaces: dict, source_cf: Optional[str], sou
     return len(removed)
 
 
+def _prune_ap_bays(nb, ap_dev, log) -> int:
+    """
+    Delete an AP's empty device bays and module bays: an AP has neither, so
+    they can only come from a wrong DeviceType template. A bay with something
+    installed stays. Uses the device's own bay counters to skip the queries
+    for the (usual) AP without any bays. Returns the number deleted.
+    """
+    removed = 0
+    for counter, endpoint, installed_attr in (
+        ("device_bay_count", "device_bays", "installed_device"),
+        ("module_bay_count", "module_bays", "installed_module"),
+    ):
+        if not getattr(ap_dev, counter, None):
+            continue
+        for bay in getattr(nb.nb.dcim, endpoint).filter(device_id=ap_dev.id):
+            if getattr(bay, installed_attr, None):
+                continue
+            try:
+                bay.delete()
+                removed += 1
+            except Exception as exc:
+                log.error("  AP %s: could not delete %s %s: %s", ap_dev.name, endpoint[:-1].replace("_", " "), bay.name, exc)
+    if removed:
+        log.info("  AP %s: removed %d empty bay(s) (wrong template)", ap_dev.name, removed)
+    return removed
+
+
 def _ap_wired_iface_type(model: str) -> str:
     """Speed type for a new GigabitEthernet0 (datasheet uplinks; a template's own type is kept)."""
     m = (model or "").upper()
@@ -3379,7 +3406,7 @@ def sync_device(
     ha_mgmt_iface_name: str = "mgmt1",
     cf_controller: Optional[str] = "controller",  # object CF (→ Device) set on devices a
                                                    # controller reports, e.g. WLC → AP
-    ap_prune_interfaces: bool = True,  # APs keep only GigabitEthernet0 + Dot11Radio<n>
+    ap_prune_interfaces: bool = True,  # APs keep only GigabitEthernet0 + Dot11Radio<n>, no empty bays
     prune: bool = False,
     dry_run: bool = True,
 ) -> dict:
@@ -4173,6 +4200,7 @@ def sync_device(
                     changed = True
             if ap_prune_interfaces:
                 removed = _prune_ap_interfaces(nb, ap_dev, ifaces, iface_source_cf, iface_source_value, log)
+                removed += _prune_ap_bays(nb, ap_dev, log)
                 if removed:
                     changed = True
             return "updated" if changed else "unchanged"
