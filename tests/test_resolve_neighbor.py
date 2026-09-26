@@ -17,12 +17,20 @@ from discobox import _resolve_neighbor  # noqa: E402
 AP_MAC = "02:00:00:00:52:01"
 
 
+def _dev_filter(devices, q=None, name__ie=None, name__isw=None):
+    if q is not None:
+        return [d for d in devices if q in str(d.primary_ip4 or "")]
+    if name__ie is not None:
+        return [d for d in devices if d.name.lower() == name__ie.lower()]
+    return [d for d in devices if d.name.lower().startswith(name__isw.lower())]
+
+
 def _nb(devices=(), ifaces=(), macs=()):
     def _mac_filter(mac_address):
         return [m for m in macs if m.mac_address.upper() == mac_address.upper()]
 
     dcim = SimpleNamespace(
-        devices=SimpleNamespace(filter=lambda q: [d for d in devices if q in str(d.primary_ip4 or "")]),
+        devices=SimpleNamespace(filter=lambda **kw: _dev_filter(devices, **kw)),
         interfaces=SimpleNamespace(filter=lambda device_id, name: [
             i for i in ifaces if i.device.id == device_id and i.name == name
         ]),
@@ -51,9 +59,22 @@ def test_mac_only_neighbor_without_ip() -> None:
     assert _resolve_neighbor(_nb(macs=[mac]), "", "Gi0", AP_MAC) == (52, 520)
 
 
-def test_non_mac_chassis_id_is_ignored() -> None:
+def test_name_chassis_id_resolves_by_short_name_and_abbreviated_port() -> None:
+    # CDP/LLDP device ID is the AP's hostname (DHCP IP not in Netbox, no MAC match)
     dev, iface, mac = _ap()
-    assert _resolve_neighbor(_nb(macs=[mac]), "192.0.2.39", "Gi0", "BERN-W052") == (None, None)
+    dev.name = "bern-w052.example.com"
+    nb = _nb(devices=[dev], ifaces=[iface])
+    assert _resolve_neighbor(nb, "192.0.2.39", "Gi0", "BERN-W052") == (52, 520)
+    assert _resolve_neighbor(nb, "192.0.2.39", "GigabitEthernet0", "bern-w052.example.com") == (52, 520)
+    # device found but port unknown → device only (no cable, neighbor_device still set)
+    assert _resolve_neighbor(nb, "", "eth7", "BERN-W052") == (52, None)
+    assert _resolve_neighbor(nb, "", "Gi0", "OTHER-W1") == (None, None)
+
+
+def test_ambiguous_name_is_not_used() -> None:
+    a = SimpleNamespace(id=1, name="bern-w052.example.com", primary_ip4=None)
+    b = SimpleNamespace(id=2, name="bern-w052.other.example", primary_ip4=None)
+    assert _resolve_neighbor(_nb(devices=[a, b]), "", "Gi0", "BERN-W052") == (None, None)
 
 
 def test_ambiguous_mac_is_not_used() -> None:
