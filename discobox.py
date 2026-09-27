@@ -1915,6 +1915,32 @@ def _tags_without(tags, slugs: set[str]) -> Optional[list[int]]:
     return None if len(keep) == len(tags) else [t.id for t in keep]
 
 
+def _remove_wlc_radio_ports(nb, device, source_cf: Optional[str], source_value: str, log) -> int:
+    """
+    Delete a WLC's "<radio MAC>.<slot>" interfaces: per-AP radio pseudo-ports
+    that older discobox versions synced as the controller's own interfaces
+    (they're filtered out now, so only housekeeping would ever orphan-delete
+    them). Never one with a cable, an IP, or another source's ownership.
+    """
+    removed = 0
+    for iface in nb.nb.dcim.interfaces.filter(device_id=device.id):
+        if not _AP_RADIO_PORT_RE.match(iface.name or "") or getattr(iface, "cable", None):
+            continue
+        owner = dict(getattr(iface, "custom_fields", {}) or {}).get(source_cf) if source_cf else ""
+        if owner and owner != source_value:
+            continue
+        if list(nb.nb.ipam.ip_addresses.filter(assigned_object_type="dcim.interface", assigned_object_id=iface.id)):
+            continue
+        try:
+            iface.delete()
+            removed += 1
+        except Exception as exc:
+            log.error("  could not delete AP radio pseudo-port %s: %s", iface.name, exc)
+    if removed:
+        log.info("  Removed %d AP radio pseudo-port(s) from the controller (legacy)", removed)
+    return removed
+
+
 def _prune_ap_bays(nb, ap_dev, log) -> int:
     """
     Delete an AP's empty device bays and module bays: an AP has neither, so
@@ -3832,6 +3858,11 @@ def sync_device(
             "Housekeeping: deleted %d stale device bay(s), %d stale module bay(s), %d empty dummy interface(s)",
             deleted_bays, deleted_mod_bays, deleted_ifaces,
         )
+
+    # A WLC (it reports AP radio ports): drop the radio pseudo-ports older versions
+    # created on it. Not gated on housekeeping: they're never real interfaces.
+    if ap_port_count and _remove_wlc_radio_ports(nb, nb_device, iface_source_cf, iface_source_value, log):
+        device_changed = True
 
     counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "skipped": 0, "error": 0}
     ip_counts: dict[str, int] = {"created": 0, "fixed": 0, "moved": 0, "unchanged": 0, "skipped": 0, "error": 0}

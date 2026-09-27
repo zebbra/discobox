@@ -89,3 +89,18 @@ def test_tags_without() -> None:
     assert _tags_without([SimpleNamespace(id=2, slug="wifi")], {"fixme-model"}) is None    # nothing to do
     assert _tags_without(None, {"fixme-model"}) is None
     assert _tags_without([SimpleNamespace(id=1, slug="FIXME-Model")], {"fixme-model"}) == []
+
+
+def test_remove_wlc_radio_ports_only_unprotected_pseudo_ports() -> None:
+    from discobox import _remove_wlc_radio_ports
+    ifaces = [
+        _If(1, "02:00:00:aa:bb:cc.0"), _If(2, "02:00:00:aa:bb:cc.1"),               # pseudo-ports: removed
+        _If(3, "02:00:00:aa:bb:dd.0", cable=SimpleNamespace(id=1)),                  # cabled: kept
+        _If(4, "02:00:00:aa:bb:ee.0", source="bossy"),                               # foreign: kept
+        _If(5, "02:00:00:aa:bb:ff.0"),                                               # has IP: kept
+        _If(6, "TenGigabitEthernet0/0/0"), _If(7, "02:00:00:aa:bb:cc"),              # real / no slot: kept
+    ]
+    nb = _nb(ips_on={5})
+    nb.nb.dcim = SimpleNamespace(interfaces=SimpleNamespace(filter=lambda device_id: ifaces))
+    assert _remove_wlc_radio_ports(nb, SimpleNamespace(id=9), "source", "netdisco", logging.getLogger()) == 2
+    assert [i.name for i in ifaces if i.deleted] == ["02:00:00:aa:bb:cc.0", "02:00:00:aa:bb:cc.1"]
