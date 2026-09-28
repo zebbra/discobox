@@ -66,7 +66,7 @@ from discobox import (
     sync_device,
     validate_ip,
 )
-from typesync import Library, sync_types
+from typesync import Library, match_library, sync_types
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
@@ -264,6 +264,13 @@ reconcile_not_in_netdisco = Gauge(
 reconcile_skipped_offline = Gauge(
     "discobox_reconcile_skipped_offline",
     "Devices not enqueued by the last reconcile because liveness reported them down",
+    **_reg,
+)
+types_created_total = Counter(
+    "discobox_types_created_total",
+    "Bare DeviceTypes/ModuleTypes discobox had to create (no existing type matched), since start; "
+    "library: whether the devicetype-library has the model (available/none/unknown)",
+    ["kind", "manufacturer", "model", "library"],
     **_reg,
 )
 library_unmatched = Gauge(
@@ -609,7 +616,28 @@ def _get_netbox_client() -> NetboxClient:
                     module_type_aliases=_TYPES_MODULE_ALIASES,
                     create_missing_types=_TYPES_CREATE_MISSING,
                 )
+                _netbox_client.on_type_created = _on_type_created
     return _netbox_client
+
+
+def _on_type_created(kind: str, manufacturer: str, model: str) -> None:
+    """Count a bare type discobox minted, and whether the library could have filled it."""
+    library = "unknown"
+    if kind == "device":
+        try:
+            lib = _get_library()
+            entry, _ = match_library(
+                {"model": model, "part_number": model, "slug": model, "manufacturer": manufacturer},
+                lib.index_for([manufacturer]), _LIBRARY_MAPPING,
+            )
+            library = "available" if entry else "none"
+        except Exception:
+            pass
+    types_created_total.labels(kind, manufacturer, model, library).inc()
+    logger.warning(
+        "Created a bare %s type %s / %s (no templates)%s", kind, manufacturer, model,
+        ": the library has it, run /types/library?type=" + model if library == "available" else "",
+    )
 
 
 def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = None,

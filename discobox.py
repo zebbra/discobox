@@ -450,6 +450,9 @@ class NetboxClient:
         self.nb = pynetbox.api(url, token=token)
         self.nb.http_session = session
         self.type_alias_cf = type_alias_cf
+        # called as on_type_created(kind, manufacturer, model) after a bare
+        # DeviceType ("device") / ModuleType ("module") was minted (metrics)
+        self.on_type_created: Optional[Callable[[str, str, str], None]] = None
         self.device_type_aliases = _compile_type_aliases(device_type_aliases)
         self.module_type_aliases = _compile_type_aliases(module_type_aliases)
         self.create_missing_types = create_missing_types
@@ -1117,6 +1120,7 @@ class NetboxClient:
             comments="Created by discobox",
         )
         logger.debug("  DeviceType created: %s / %s", manufacturer.name, model)
+        self._notify_type_created("device", manufacturer.name, model)
         return dt
 
     def get_or_create_module_type(
@@ -1174,7 +1178,16 @@ class NetboxClient:
             comments="Created by discobox",
         )
         logger.debug("  ModuleType created: %s / %s", manufacturer.name, model)
+        self._notify_type_created("module", manufacturer.name, model)
         return mt
+
+    def _notify_type_created(self, kind: str, manufacturer: str, model: str) -> None:
+        hook = getattr(self, "on_type_created", None)   # tests build clients without __init__
+        if hook:
+            try:
+                hook(kind, manufacturer, model)
+            except Exception as exc:
+                logger.debug("on_type_created hook failed: %s", exc)
 
     def upsert_module_bay(
         self,

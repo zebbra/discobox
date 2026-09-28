@@ -252,3 +252,23 @@ def test_library_unmatched_metric(monkeypatch) -> None:
     # later matched (e.g. after a mapping) → series gone; a report not naming it leaves others alone
     server._update_library_metrics({"types": [dict(report["types"][1], library="y.yaml")]})
     assert val("CW9166I-E", "CW9166I-E") is None
+
+
+def test_bare_type_counter_says_whether_the_library_has_it(monkeypatch) -> None:
+    class _Lib:
+        def index_for(self, vendors):
+            return {"x": {"manufacturer": "Cisco", "model": "C9120AXI-E", "part_number": "C9120AXI-E",
+                          "slug": "cisco-c9120axi-e", "_file": "f"}}
+    monkeypatch.setattr(server, "_get_library", lambda: _Lib())
+    monkeypatch.setattr(server, "match_library", lambda t, idx, m: (idx["x"], "part_number")
+                        if t["model"] == "C9120AXI-E" else (None, ""))
+
+    def val(model, lib, kind="device"):
+        return server._custom_registry.get_sample_value(
+            "discobox_types_created_total", {"kind": kind, "manufacturer": "Cisco", "model": model, "library": lib})
+    server._on_type_created("device", "Cisco", "C9120AXI-E")
+    server._on_type_created("device", "Cisco", "FAKE-MODEL-1")
+    server._on_type_created("module", "Cisco", "FAKE-NM-1")
+    assert val("C9120AXI-E", "available") == 1
+    assert val("FAKE-MODEL-1", "none") == 1
+    assert val("FAKE-NM-1", "unknown", kind="module") == 1
