@@ -104,3 +104,12 @@ def test_remove_wlc_radio_ports_only_unprotected_pseudo_ports() -> None:
     nb.nb.dcim = SimpleNamespace(interfaces=SimpleNamespace(filter=lambda device_id: ifaces))
     assert _remove_wlc_radio_ports(nb, SimpleNamespace(id=9), "source", "netdisco", logging.getLogger()) == 2
     assert [i.name for i in ifaces if i.deleted] == ["02:00:00:aa:bb:cc.0", "02:00:00:aa:bb:cc.1"]
+
+
+def test_ap_iface_fixups_clear_rf_role_on_non_wireless() -> None:
+    from discobox import _ap_iface_fixups
+    ch = lambda v: SimpleNamespace(value=v)  # noqa: E731  (pynetbox ChoiceItem)
+    assert _ap_iface_fixups(SimpleNamespace(rf_role=ch("ap")), "2.5gbase-t") == {"rf_role": ""}
+    assert _ap_iface_fixups(SimpleNamespace(rf_role=ch("ap")), "ieee802.11ax") == {}
+    assert _ap_iface_fixups(SimpleNamespace(rf_role=None), "2.5gbase-t") == {}
+    assert _ap_iface_fixups(None, "2.5gbase-t") == {}

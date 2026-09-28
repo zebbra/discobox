@@ -1968,6 +1968,26 @@ def _prune_ap_bays(nb, ap_dev, log) -> int:
     return removed
 
 
+def _is_wireless_type(iface_type: Optional[str]) -> bool:
+    return (iface_type or "").startswith("ieee802.11")
+
+
+def _ap_iface_fixups(existing, final_type: Optional[str]) -> dict:
+    """
+    Extra fields an AP interface patch needs to pass Netbox validation: rf_role
+    is only valid on wireless types, but template-created interfaces can carry
+    it on any type (templates skip validation). Clear it when the interface
+    is (or becomes) non-wireless.
+    """
+    if existing is None:
+        return {}
+    rf_role = getattr(existing, "rf_role", None)
+    rf_role = getattr(rf_role, "value", rf_role)
+    if rf_role and not _is_wireless_type(final_type):
+        return {"rf_role": ""}
+    return {}
+
+
 def _ap_wired_iface_type(model: str) -> str:
     """Speed type for a new GigabitEthernet0 (datasheet uplinks; a template's own type is kept)."""
     m = (model or "").upper()
@@ -4312,13 +4332,17 @@ def sync_device(
             if eth_mac:
                 existing = next((i for n, i in ifaces.items() if n.lower() == AP_WIRED_IFACE.lower()), None)
                 old_mac = str(getattr(getattr(existing, "primary_mac_address", None), "mac_address", "") or "")
-                action, _ = nb.upsert_interface(
-                    ap_dev.id,
-                    {"name": AP_WIRED_IFACE, "type": _ap_wired_iface_type(model), "mac_address": eth_mac},
-                    existing, source_cf=iface_source_cf, source_value=iface_source_value,
-                )
-                if action in ("created", "updated") or (action == "unchanged" and old_mac.lower() != eth_mac.lower()):
-                    changed = True
+                wired_type = _ap_wired_iface_type(model)
+                data = {"name": AP_WIRED_IFACE, "type": wired_type, "mac_address": eth_mac,
+                        **_ap_iface_fixups(existing, wired_type)}
+                try:
+                    action, _ = nb.upsert_interface(
+                        ap_dev.id, data, existing, source_cf=iface_source_cf, source_value=iface_source_value,
+                    )
+                    if action in ("created", "updated") or (action == "unchanged" and old_mac.lower() != eth_mac.lower()):
+                        changed = True
+                except Exception as exc:
+                    log.error("  AP %s: %s update error: %s", ap_dev.name, AP_WIRED_IFACE, exc)
             # One Dot11Radio<slot> per radio the WLC reports (devicetype-library
             # naming, so template interfaces are adopted). The WLC only exposes
             # the radio base MAC, the same on every slot (per-slot BSSIDs aren't
@@ -4333,13 +4357,20 @@ def sync_device(
                 old_mac = str(getattr(getattr(existing, "primary_mac_address", None), "mac_address", "") or "")
                 if mac:
                     data["mac_address"] = mac
-                if existing is None:
+                current_type = getattr(getattr(existing, "type", None), "value", None) if existing else None
+                if existing is None or not _is_wireless_type(current_type):
+                    # a radio is a radio: fix a template/legacy non-wireless type
+                    # (a template's own wireless type is kept)
                     data["type"] = _ap_radio_iface_type(model)
-                action, _ = nb.upsert_interface(
-                    ap_dev.id, data, existing, source_cf=iface_source_cf, source_value=iface_source_value,
-                )
-                if action in ("created", "updated") or (mac and old_mac.lower() != mac.lower()):
-                    changed = True
+                data.update(_ap_iface_fixups(existing, data.get("type") or current_type))
+                try:
+                    action, _ = nb.upsert_interface(
+                        ap_dev.id, data, existing, source_cf=iface_source_cf, source_value=iface_source_value,
+                    )
+                    if action in ("created", "updated") or (mac and old_mac.lower() != mac.lower()):
+                        changed = True
+                except Exception as exc:
+                    log.error("  AP %s: %s update error: %s", ap_dev.name, name, exc)
             if ap_prune_interfaces:
                 removed = _prune_ap_interfaces(nb, ap_dev, ifaces, iface_source_cf, iface_source_value, log)
                 removed += _prune_ap_bays(nb, ap_dev, log)
