@@ -14,6 +14,7 @@ Endpoints:
   GET/POST /sync/resume      Release the pause gate
   GET      /reconcile        Compare Netbox with Netdisco now, return the gaps (read-only)
   GET/POST /reconcile/enqueue  Reconcile + enqueue discovers for missing devices / auto-create
+  GET/POST /discover         Enqueue a Netdisco discover for one device (Netbox SNMP profile/timeout)
   GET/POST /types/library    Enrich DeviceTypes from the devicetype-library (dry-run unless POST apply=true)
   GET      /metrics          Prometheus metrics
   GET      /health           Liveness check
@@ -54,6 +55,7 @@ from discobox import (
     NetboxClient,
     NetdiscoClient,
     __version__,
+    _parse_snmp_timeout_us,
     _recently_touched,
     fetch_liveness,
     fix_tag_mismatches,
@@ -1682,6 +1684,7 @@ async def index() -> str:
   <tr><td>GET/POST</td><td><a href=/reconcile/enqueue>/reconcile/enqueue</a></td><td>Reconcile and enqueue Netdisco discovery for Netbox devices Netdisco doesn't know yet (and auto-create)</td></tr>
   <tr><td>GET/POST</td><td><a href=/reconcile/fix-tags>/reconcile/fix-tags</a></td><td>Re-enqueue discovery (with Netbox's expected auth tag as a hint) for the last reconcile's tag mismatches</td></tr>
   <tr><td>GET</td><td><a href=/reconcile>/reconcile</a></td><td>Compare Netbox with Netdisco now and return the gaps as JSON (read-only; ?lists=true for the device lists)</td></tr>
+  <tr><td>GET/POST</td><td>/discover?host=…</td><td>Enqueue a Netdisco discover for one device, with its Netbox snmp_auth_profile / snmp_polling_timeout (or &amp;tag= / &amp;timeout=)</td></tr>
   <tr><td>GET</td><td><a href=/unknown-devices>/unknown-devices</a></td><td>Devices seen via LLDP but not found in Netbox (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/not-in-netdisco>/not-in-netdisco</a></td><td>Active Netbox devices not in Netdisco (JSON)</td></tr>
   <tr><td>GET/POST</td><td>/types/library?role=…</td><td>DeviceType enrichment from the devicetype-library (dry-run; POST apply=true writes)</td></tr>
@@ -1726,6 +1729,75 @@ async def stats() -> dict:
         "liveness_enabled": bool(_LIVENESS_URL),
         "liveness": _load_liveness_status() or None,
     }
+
+
+def _nb_device_for_host(nb: NetboxClient, host: str, ip: Optional[str]):
+    """Netbox device for a /discover host: by IP (incl. hostname/serial fallbacks) or by name/short name."""
+    if ip:
+        return nb.find_device_by_ip(ip)
+    hits = list(nb.nb.dcim.devices.filter(name__ie=host))
+    if not hits:
+        short = host.split(".", 1)[0].lower()
+        hits = [d for d in nb.nb.dcim.devices.filter(name__isw=short) if (d.name or "").split(".", 1)[0].lower() == short]
+    return hits[0] if len(hits) == 1 else None
+
+
+@app.api_route(
+    "/discover",
+    methods=["GET", "POST"],
+    dependencies=[Depends(require_auth)],
+    summary="Enqueue a Netdisco discover for one device, with its Netbox SNMP profile and timeout",
+)
+def discover(
+    host: Annotated[str, Query(description="Device IP, or its Netbox name (then its primary IP is used)")],
+    tag: Annotated[Optional[str], Query(description="Netdisco device_auth tag hint (default: Netbox snmp_auth_profile)")] = None,
+    timeout: Annotated[Optional[str], Query(description="SNMP timeout, e.g. 30s / 3m (default: Netbox snmp_polling_timeout, else 3s)")] = None,
+) -> dict:
+    """
+    One Netdisco discover job, the way reconcile enqueues them. With tag and
+    timeout both given (and an IP as host), nothing is looked up; otherwise the
+    Netbox device supplies whatever is missing. A device unknown to Netbox is
+    still enqueued (no hint, default timeout) when host is an IP.
+    """
+    try:
+        ip: Optional[str] = validate_ip(host)
+    except ValueError:
+        ip = None
+    timeout_us = None
+    if timeout is not None:
+        timeout_us = _parse_snmp_timeout_us(timeout)
+        if timeout_us is None:
+            raise HTTPException(400, f"invalid timeout {timeout!r} (e.g. 30s, 3m, 500ms)")
+    # where each value came from: param | netbox | default (none/3s)
+    tag_source = "param" if tag is not None else "default"
+    timeout_source = "param" if timeout is not None else "default"
+    device_name = None
+    if ip is None or tag is None or timeout is None:
+        dev = _nb_device_for_host(_get_netbox_client(), host, ip)
+        if dev is not None:
+            device_name = dev.name
+            cf = dict(getattr(dev, "custom_fields", {}) or {})
+            if tag is None and cf.get("snmp_auth_profile"):
+                tag, tag_source = cf["snmp_auth_profile"], "netbox"
+            parsed = _parse_snmp_timeout_us(cf.get("snmp_polling_timeout")) if timeout is None else None
+            if parsed is not None:
+                timeout_us, timeout_source = parsed, "netbox"
+            if ip is None and dev.primary_ip4:
+                ip = str(dev.primary_ip4).split("/")[0]
+        elif ip is None:
+            raise HTTPException(404, f"{host!r} is no IP and no (unique) Netbox device")
+    if ip is None:
+        raise HTTPException(422, f"Netbox device {device_name!r} has no primary IPv4 to discover")
+    try:
+        _get_netdisco_client().enqueue_discover(ip, device_auth_tag_hint=tag, snmp_timeout_us=timeout_us)
+    except Exception as exc:
+        raise HTTPException(502, f"Netdisco enqueue failed: {exc}")
+    effective_timeout = timeout_us if timeout_us is not None else 3_000_000
+    logger.info("Discover enqueued for %s (%s) device_auth_tag_hint=%r [%s] timeout=%dus [%s]",
+                ip, device_name or host, tag, tag_source, effective_timeout, timeout_source)
+    return {"status": "enqueued", "host": ip, "device": device_name,
+            "tag": tag, "tag_source": tag_source,
+            "timeout_us": effective_timeout, "timeout_source": timeout_source}
 
 
 @app.api_route(

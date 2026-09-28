@@ -97,3 +97,70 @@ def test_reconcile_diff_is_compare_only(monkeypatch) -> None:
     assert r == {"netbox_total": 10, "netdisco_total": 9, "already_known": 8, "not_in_netdisco": 1,
                  "not_in_netbox": 1, "tag_mismatches": 2, "offline": 1}
     assert server.reconcile_diff(lists=True)["not_in_netdisco_list"] == [{"ip": "192.0.2.1"}]
+
+
+# ── /discover ──
+
+class _NDJobs:
+    def __init__(self):
+        self.jobs: list = []
+
+    def enqueue_discover(self, ip, device_auth_tag_hint=None, snmp_timeout_us=None):
+        self.jobs.append((ip, device_auth_tag_hint, snmp_timeout_us))
+
+
+def _discover_env(monkeypatch, devices=()):
+    nd = _NDJobs()
+    lookups: list = []
+
+    class _NB:
+        def __init__(self):
+            self.nb = SimpleNamespace(dcim=SimpleNamespace(devices=SimpleNamespace(filter=self._filter)))
+
+        def _filter(self, name__ie=None, name__isw=None):
+            lookups.append(name__ie or name__isw)
+            if name__ie:
+                return [d for d in devices if d.name.lower() == name__ie.lower()]
+            return [d for d in devices if d.name.lower().startswith(name__isw.lower())]
+
+        def find_device_by_ip(self, ip):
+            lookups.append(ip)
+            return next((d for d in devices if str(d.primary_ip4).split("/")[0] == ip), None)
+
+    monkeypatch.setattr(server, "_get_netdisco_client", lambda: nd)
+    monkeypatch.setattr(server, "_get_netbox_client", lambda: _NB())
+    return nd, lookups
+
+
+def _dev(name, ip, tag=None, timeout=None):
+    return SimpleNamespace(name=name, primary_ip4=f"{ip}/24" if ip else None,
+                           custom_fields={"snmp_auth_profile": tag, "snmp_polling_timeout": timeout})
+
+
+def test_discover_with_params_needs_no_lookup(monkeypatch) -> None:
+    nd, lookups = _discover_env(monkeypatch)
+    r = server.discover(host="192.0.2.1", tag="v3", timeout="3m")
+    assert nd.jobs == [("192.0.2.1", "v3", 180_000_000)] and lookups == []
+    assert r["tag_source"] == r["timeout_source"] == "param"
+
+
+def test_discover_takes_profile_and_timeout_from_netbox(monkeypatch) -> None:
+    nd, _ = _discover_env(monkeypatch, [_dev("wlc1.example.com", "192.0.2.8", tag="wlc-v3", timeout="2m")])
+    r = server.discover(host="192.0.2.8", tag=None, timeout=None)
+    assert nd.jobs == [("192.0.2.8", "wlc-v3", 120_000_000)] and r["device"] == "wlc1.example.com"
+    assert r["tag_source"] == r["timeout_source"] == "netbox"
+    # by (short) name: the device's primary IP is discovered
+    r = server.discover(host="WLC1", tag=None, timeout=None)
+    assert nd.jobs[-1] == ("192.0.2.8", "wlc-v3", 120_000_000) and r["host"] == "192.0.2.8"
+
+
+def test_discover_unknown_ip_default_and_errors(monkeypatch) -> None:
+    nd, _ = _discover_env(monkeypatch)
+    r = server.discover(host="192.0.2.99", tag=None, timeout=None)
+    assert nd.jobs == [("192.0.2.99", None, None)] and r["timeout_us"] == 3_000_000
+    assert r["tag_source"] == r["timeout_source"] == "default"
+    for kw, code in (({"host": "no-such-device", "tag": None, "timeout": None}, 404),
+                     ({"host": "192.0.2.1", "tag": "x", "timeout": "soon"}, 400)):
+        with pytest.raises(HTTPException) as exc:
+            server.discover(**kw)
+        assert exc.value.status_code == code
