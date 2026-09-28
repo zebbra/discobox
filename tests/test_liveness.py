@@ -258,3 +258,24 @@ def test_reconcile_liveness_by_name() -> None:
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_fix_tag_mismatches_passes_the_device_snmp_timeout() -> None:
+    from discobox import fix_tag_mismatches
+
+    class _ND:
+        def __init__(self):
+            self.jobs: list = []
+
+        def get_queue_status(self, since="1h"):
+            return {"queued": 0, "failed": 0}
+
+        def enqueue_discover(self, ip, device_auth_tag_hint=None, snmp_timeout_us=None):
+            self.jobs.append((ip, device_auth_tag_hint, snmp_timeout_us))
+
+    nd = _ND()
+    fix_tag_mismatches(nd, [
+        {"ip": "192.0.2.1", "name": "wlc", "netbox_tag": "v3", "snmp_polling_timeout": "3m"},
+        {"ip": "192.0.2.2", "name": "sw", "netbox_tag": "v3"},          # older gap file: no field
+    ], max_queued=None, max_failed=None)
+    assert nd.jobs == [("192.0.2.1", "v3", 180_000_000), ("192.0.2.2", "v3", None)]

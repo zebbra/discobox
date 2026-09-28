@@ -3328,7 +3328,10 @@ def fix_tag_mismatches(
 
         ip = entry["ip"]
         try:
-            nd.enqueue_discover(ip, device_auth_tag_hint=nb_tag)
+            nd.enqueue_discover(
+                ip, device_auth_tag_hint=nb_tag,
+                snmp_timeout_us=_parse_snmp_timeout_us(entry.get("snmp_polling_timeout")),
+            )
             log.info("Re-enqueued discover for %s (%s) to fix auth tag: %r -> %r",
                       ip, entry.get("name"), entry.get("netdisco_tag"), nb_tag)
             result["enqueued"] += 1
@@ -3432,10 +3435,14 @@ def reconcile_devices(
             cf = getattr(device, "custom_fields", {}) or {}
             nb_tag = cf.get("snmp_auth_profile") or None
             nd_tag = nd_by_ip[ip].get("device_auth_tag") or None
+            # carried along so fix-tags' re-discover uses the device's own SNMP timeout
+            snmp_timeout = cf.get("snmp_polling_timeout") or None
             if not nd_tag:
-                tag_mismatches.append({"ip": ip, "name": device.name, "netbox_tag": nb_tag, "netdisco_tag": nd_tag, "reason": "missing"})
+                tag_mismatches.append({"ip": ip, "name": device.name, "netbox_tag": nb_tag, "netdisco_tag": nd_tag,
+                                       "reason": "missing", "snmp_polling_timeout": snmp_timeout})
             elif nb_tag and nd_tag != nb_tag:
-                tag_mismatches.append({"ip": ip, "name": device.name, "netbox_tag": nb_tag, "netdisco_tag": nd_tag, "reason": "mismatch"})
+                tag_mismatches.append({"ip": ip, "name": device.name, "netbox_tag": nb_tag, "netdisco_tag": nd_tag,
+                                       "reason": "mismatch", "snmp_polling_timeout": snmp_timeout})
             continue
 
         entry = {"ip": ip, "name": device.name}
