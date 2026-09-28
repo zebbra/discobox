@@ -57,6 +57,8 @@ from discobox import (
     __version__,
     _parse_snmp_timeout_us,
     _recently_touched,
+    configure_discover_snmptimeout,
+    discover_snmptimeout_us,
     fetch_liveness,
     fix_tag_mismatches,
     reconcile_devices,
@@ -438,6 +440,10 @@ _AP_TYPE_CONFIRMED_UNTAG: list      = list(_c(_CFG, "aps", "type_confirmed_untag
 _TOUCH_COOLDOWN_DAYS: int           = int(_c(_CFG, "sync", "touch_cooldown_days", default=1))
 
 _TYPES_CREATE_MISSING: bool          = _cbool(_CFG, "types", "create_missing", default=True)
+
+# Per-request snmptimeout policy for discobox-enqueued discover jobs (see
+# discobox.DISCOVER_SNMPTIMEOUT): derived from snmp_polling_timeout, bounded.
+configure_discover_snmptimeout(**(_c(_CFG, "netdisco", "discover_snmptimeout", default={}) or {}))
 _TYPES_ALIAS_CF:      Optional[str]  = _cstr(_CFG, "types", "alias_cf", default="snmp_models")
 _TYPES_DEVICE_ALIASES: dict          = _c(_CFG, "types", "device_aliases", default={}) or {}
 _TYPES_MODULE_ALIASES: dict          = _c(_CFG, "types", "module_aliases", default={}) or {}
@@ -1751,13 +1757,18 @@ def _nb_device_for_host(nb: NetboxClient, host: str, ip: Optional[str]):
 def discover(
     host: Annotated[str, Query(description="Device IP, or its Netbox name (then its primary IP is used)")],
     tag: Annotated[Optional[str], Query(description="Netdisco device_auth tag hint (default: Netbox snmp_auth_profile)")] = None,
-    timeout: Annotated[Optional[str], Query(description="SNMP timeout, e.g. 30s / 3m (default: Netbox snmp_polling_timeout, else 3s)")] = None,
+    timeout: Annotated[Optional[str], Query(description="Per-request SNMP timeout, e.g. 10s, used as-is (default: derived from Netbox snmp_polling_timeout, bounded; see netdisco.discover_snmptimeout)")] = None,
 ) -> dict:
     """
     One Netdisco discover job, the way reconcile enqueues them. With tag and
     timeout both given (and an IP as host), nothing is looked up; otherwise the
     Netbox device supplies whatever is missing. A device unknown to Netbox is
     still enqueued (no hint, default timeout) when host is an IP.
+
+    An explicit ?timeout= is the per-request value and is used as-is, not
+    clamped (a deliberate manual override, e.g. to test 10s on one device);
+    the CF snmp_polling_timeout is a whole-device budget and gets derived and
+    bounded (discover_snmptimeout_us).
     """
     try:
         ip: Optional[str] = validate_ip(host)
@@ -1779,20 +1790,21 @@ def discover(
             cf = dict(getattr(dev, "custom_fields", {}) or {})
             if tag is None and cf.get("snmp_auth_profile"):
                 tag, tag_source = cf["snmp_auth_profile"], "netbox"
-            parsed = _parse_snmp_timeout_us(cf.get("snmp_polling_timeout")) if timeout is None else None
-            if parsed is not None:
-                timeout_us, timeout_source = parsed, "netbox"
+            if timeout is None and _parse_snmp_timeout_us(cf.get("snmp_polling_timeout")) is not None:
+                timeout_us, timeout_source = discover_snmptimeout_us(cf["snmp_polling_timeout"]), "netbox"
             if ip is None and dev.primary_ip4:
                 ip = str(dev.primary_ip4).split("/")[0]
         elif ip is None:
             raise HTTPException(404, f"{host!r} is no IP and no (unique) Netbox device")
     if ip is None:
         raise HTTPException(422, f"Netbox device {device_name!r} has no primary IPv4 to discover")
+    if timeout_us is None:
+        timeout_us = discover_snmptimeout_us(None)     # the policy floor
     try:
         _get_netdisco_client().enqueue_discover(ip, device_auth_tag_hint=tag, snmp_timeout_us=timeout_us)
     except Exception as exc:
         raise HTTPException(502, f"Netdisco enqueue failed: {exc}")
-    effective_timeout = timeout_us if timeout_us is not None else 3_000_000
+    effective_timeout = timeout_us
     logger.info("Discover enqueued for %s (%s) device_auth_tag_hint=%r [%s] timeout=%dus [%s]",
                 ip, device_name or host, tag, tag_source, effective_timeout, timeout_source)
     return {"status": "enqueued", "host": ip, "device": device_name,

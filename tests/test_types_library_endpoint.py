@@ -147,17 +147,18 @@ def test_discover_with_params_needs_no_lookup(monkeypatch) -> None:
 def test_discover_takes_profile_and_timeout_from_netbox(monkeypatch) -> None:
     nd, _ = _discover_env(monkeypatch, [_dev("wlc1.example.com", "192.0.2.8", tag="wlc-v3", timeout="2m")])
     r = server.discover(host="192.0.2.8", tag=None, timeout=None)
-    assert nd.jobs == [("192.0.2.8", "wlc-v3", 120_000_000)] and r["device"] == "wlc1.example.com"
+    # the CF is a whole-device budget: "2m" → 10s per request (bounded)
+    assert nd.jobs == [("192.0.2.8", "wlc-v3", 10_000_000)] and r["device"] == "wlc1.example.com"
     assert r["tag_source"] == r["timeout_source"] == "netbox"
     # by (short) name: the device's primary IP is discovered
     r = server.discover(host="WLC1", tag=None, timeout=None)
-    assert nd.jobs[-1] == ("192.0.2.8", "wlc-v3", 120_000_000) and r["host"] == "192.0.2.8"
+    assert nd.jobs[-1] == ("192.0.2.8", "wlc-v3", 10_000_000) and r["host"] == "192.0.2.8"
 
 
 def test_discover_unknown_ip_default_and_errors(monkeypatch) -> None:
     nd, _ = _discover_env(monkeypatch)
     r = server.discover(host="192.0.2.99", tag=None, timeout=None)
-    assert nd.jobs == [("192.0.2.99", None, None)] and r["timeout_us"] == 3_000_000
+    assert nd.jobs == [("192.0.2.99", None, 10_000_000)] and r["timeout_us"] == 10_000_000
     assert r["tag_source"] == r["timeout_source"] == "default"
     for kw, code in (({"host": "no-such-device", "tag": None, "timeout": None}, 404),
                      ({"host": "192.0.2.1", "tag": "x", "timeout": "soon"}, 400)):

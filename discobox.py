@@ -385,8 +385,9 @@ class NetdiscoClient:
         return self._get(f"/api/v1/queue/status?since={since}")
 
     def enqueue_discover(self, ip: str, device_auth_tag_hint: Optional[str] = None, snmp_timeout_us: Optional[int] = None) -> None:
+        """snmp_timeout_us is the per-request value (see discover_snmptimeout_us); None = the policy floor."""
         extra: dict = {
-            "snmptimeout": snmp_timeout_us if snmp_timeout_us is not None else 3_000_000,
+            "snmptimeout": snmp_timeout_us if snmp_timeout_us is not None else DISCOVER_SNMPTIMEOUT["floor_us"],
             "skip_neighbor_queue": True,
         }
         if device_auth_tag_hint:
@@ -2690,6 +2691,39 @@ def _handle_vip_device(
 
 _TIMEOUT_UNITS = {"us": 1, "ms": 1_000, "s": 1_000_000, "m": 60_000_000, "h": 3_600_000_000}
 
+# Per-request SNMP timeout for the discover jobs discobox enqueues ("snmptimeout",
+# µs; Netdisco hands it to net-snmp unmodified as the timeout of EVERY request).
+# The Netbox CF snmp_polling_timeout is NOT a per-request value: modulator writes
+# the whole-device Prometheus scrape budget there (sum of module scrape durations
+# × 1.5, rounded to a choice step, floor 2m). Using it as-is would give 2-5 minutes
+# per SNMP PDU. So the per-request value is derived from it and bounded:
+#   clamp(budget / divisor, floor, cap)   e.g. "2m" → 10s, "5m" → 20s, "20s" → 10s
+# and the floor applies when the CF is empty or unparsable. Configurable via
+# netdisco.discover_snmptimeout {divisor, floor, cap} (see configure_discover_snmptimeout).
+DISCOVER_SNMPTIMEOUT = {"divisor": 12, "floor_us": 10_000_000, "cap_us": 20_000_000}
+
+
+def configure_discover_snmptimeout(divisor=None, floor=None, cap=None) -> None:
+    """Override the per-request policy (floor/cap as durations like "10s", or µs ints)."""
+    def _us(v):
+        return v if isinstance(v, int) else _parse_snmp_timeout_us(str(v))
+    if divisor:
+        DISCOVER_SNMPTIMEOUT["divisor"] = int(divisor)
+    if floor is not None and _us(floor):
+        DISCOVER_SNMPTIMEOUT["floor_us"] = _us(floor)
+    if cap is not None and _us(cap):
+        DISCOVER_SNMPTIMEOUT["cap_us"] = _us(cap)
+
+
+def discover_snmptimeout_us(budget: Optional[str]) -> int:
+    """Per-request snmptimeout (µs) derived from a snmp_polling_timeout budget (see DISCOVER_SNMPTIMEOUT)."""
+    p = DISCOVER_SNMPTIMEOUT
+    parsed = _parse_snmp_timeout_us(budget) if budget else None
+    if parsed is None:
+        return p["floor_us"]
+    return max(p["floor_us"], min(p["cap_us"], parsed // p["divisor"]))
+
+
 def _parse_snmp_timeout_us(value: Optional[str]) -> Optional[int]:
     """Parse a Netbox snmp_polling_timeout string (e.g. '3m', '30s') to microseconds."""
     if not value:
@@ -3330,7 +3364,7 @@ def fix_tag_mismatches(
         try:
             nd.enqueue_discover(
                 ip, device_auth_tag_hint=nb_tag,
-                snmp_timeout_us=_parse_snmp_timeout_us(entry.get("snmp_polling_timeout")),
+                snmp_timeout_us=discover_snmptimeout_us(entry.get("snmp_polling_timeout")),
             )
             log.info("Re-enqueued discover for %s (%s) to fix auth tag: %r -> %r",
                       ip, entry.get("name"), entry.get("netdisco_tag"), nb_tag)
@@ -3462,7 +3496,7 @@ def reconcile_devices(
             log.debug("Skipping %s (%s): no snmp_auth_profile set", ip, device.name)
             counts["skipped"] += 1
             continue
-        snmp_timeout_us = _parse_snmp_timeout_us(cf.get("snmp_polling_timeout"))
+        snmp_timeout_us = discover_snmptimeout_us(cf.get("snmp_polling_timeout"))
 
         if offset and counts["enqueued"] + counts.get("offset_skipped", 0) < offset:
             counts["offset_skipped"] = counts.get("offset_skipped", 0) + 1
@@ -3479,7 +3513,7 @@ def reconcile_devices(
 
         try:
             nd.enqueue_discover(ip, device_auth_tag_hint=device_auth_tag_hint, snmp_timeout_us=snmp_timeout_us)
-            effective_timeout = snmp_timeout_us if snmp_timeout_us is not None else 3_000_000
+            effective_timeout = snmp_timeout_us
             log.info("Enqueued discover for %s (%s) device_auth_tag_hint=%r timeout=%dus",
                      ip, device.name, device_auth_tag_hint, effective_timeout)
             counts["enqueued"] += 1

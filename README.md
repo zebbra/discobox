@@ -336,6 +336,7 @@ CDP/LLDP neighbor data from Netdisco, written on every interface sync. Text fiel
 | `/sync/resume` | GET, POST | yes | Resume queued syncs |
 | `/reconcile` | GET | yes | Compare Netbox with Netdisco now and return the gaps as JSON (read-only: no discover jobs, no auto-create); `?lists=true` adds the device lists |
 | `/reconcile/enqueue` | GET, POST | yes | Reconcile and act: enqueue discovers for missing devices (and auto-create) in the background; optional `?max_enqueue=N&offset=N` |
+| `/discover` | GET, POST | yes | Enqueue a Netdisco discover for one device: `?host=<ip or Netbox name>`, tag hint from `snmp_auth_profile` and per-request SNMP timeout derived from `snmp_polling_timeout` (`netdisco.discover_snmptimeout`), or `&tag=` / `&timeout=` (per-request, used as-is) |
 | `/unknown-devices` | GET | no | Devices seen in Netdisco webhooks but not found in Netbox (JSON) |
 | `/metrics` | GET | no | Prometheus metrics |
 | `/health` | GET | no | Liveness check + in-flight hosts |

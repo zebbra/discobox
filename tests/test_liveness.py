@@ -278,4 +278,30 @@ def test_fix_tag_mismatches_passes_the_device_snmp_timeout() -> None:
         {"ip": "192.0.2.1", "name": "wlc", "netbox_tag": "v3", "snmp_polling_timeout": "3m"},
         {"ip": "192.0.2.2", "name": "sw", "netbox_tag": "v3"},          # older gap file: no field
     ], max_queued=None, max_failed=None)
-    assert nd.jobs == [("192.0.2.1", "v3", 180_000_000), ("192.0.2.2", "v3", None)]
+    # "3m" budget → 180s / 12 = 15s per request; no field → the 10s floor
+    assert nd.jobs == [("192.0.2.1", "v3", 15_000_000), ("192.0.2.2", "v3", 10_000_000)]
+
+
+def test_discover_snmptimeout_is_derived_and_bounded() -> None:
+    from discobox import discover_snmptimeout_us
+    assert discover_snmptimeout_us("2m") == 10_000_000     # 120s / 12
+    assert discover_snmptimeout_us("5m") == 20_000_000     # 25s → cap
+    assert discover_snmptimeout_us("20s") == 10_000_000    # 1.7s → floor
+    assert discover_snmptimeout_us("3m") == 15_000_000
+    assert discover_snmptimeout_us("") == 10_000_000       # empty → floor
+    assert discover_snmptimeout_us(None) == 10_000_000
+    assert discover_snmptimeout_us("soon") == 10_000_000   # garbage → floor
+    assert discover_snmptimeout_us("180") == 15_000_000    # bare number = seconds
+    assert discover_snmptimeout_us("30") == 10_000_000     # bare 30s → 2.5s → floor
+
+
+def test_discover_snmptimeout_policy_is_configurable() -> None:
+    from discobox import DISCOVER_SNMPTIMEOUT, configure_discover_snmptimeout, discover_snmptimeout_us
+    saved = dict(DISCOVER_SNMPTIMEOUT)
+    try:
+        configure_discover_snmptimeout(divisor=6, floor="5s", cap="1m")
+        assert discover_snmptimeout_us("2m") == 20_000_000
+        assert discover_snmptimeout_us("") == 5_000_000
+        assert discover_snmptimeout_us("1h") == 60_000_000
+    finally:
+        DISCOVER_SNMPTIMEOUT.update(saved)

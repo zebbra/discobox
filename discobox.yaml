@@ -95,6 +95,13 @@ custom_fields:
   controller: controller    # object CF (type Object → Device) on Device: set to the WLC on
                             # every AP it reports; skipped unless the field exists — null to disable
 
+netdisco:
+  discover_snmptimeout:     # per-request SNMP timeout of the discover jobs discobox enqueues
+    divisor: 12             # (reconcile, fix-tags, /discover): the Netbox CF snmp_polling_timeout
+    floor: 10s              # is a whole-device scrape budget (modulator, floor 2m), so the
+    cap: 20s                # per-request value is clamp(budget / divisor, floor, cap);
+                            # floor also when the CF is empty/unparsable ("2m" → 10s, "5m" → 20s)
+
 library:                    # DeviceType enrichment from the devicetype-library (/types/library)
   path: /opt/devicetype-library  # device-types/ checkout; the image bakes a pinned copy in
   overlay: null             # extra dir, same layout, wins over the library: fills its gaps
