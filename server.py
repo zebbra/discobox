@@ -429,6 +429,7 @@ _CF_OS_RELEASE:      Optional[str]  = _cstr(_CFG, "custom_fields", "os_release",
 _CF_STACK_MEMBERS:   Optional[str]  = _cstr(_CFG, "custom_fields", "stack_members", default="stack_members")
 _STACK_MEMBERS_ONLY_INCREASE: bool  = _cbool(_CFG, "custom_fields", "stack_members_only_increase", default=True)
 _CF_TOUCH:           Optional[str]  = _cstr(_CFG, "custom_fields", "touch", default="netdisco_last_update")
+_CF_INVENTORY_REBUILD: Optional[str] = _cstr(_CFG, "custom_fields", "inventory_rebuild", default="inventory_last_rebuild")
 _CF_CONTROLLER:      Optional[str]  = _cstr(_CFG, "custom_fields", "controller", default="controller")
 _AP_PRUNE_INTERFACES: bool          = _cbool(_CFG, "aps", "prune_interfaces", default=True)
 # Orphaned interfaces (in Netbox, not in Netdisco): discobox's own always go; the
@@ -1408,7 +1409,7 @@ async def rebuild(
                 iface_source_cf=_IFACE_SOURCE_CF, iface_source_value=_IFACE_SOURCE_VALUE,
                 cf_os_version=_CF_OS_VERSION, cf_os_name=_CF_OS_NAME, cf_os_release=_CF_OS_RELEASE,
                 cf_stack_members=_CF_STACK_MEMBERS, stack_members_only_increase=_STACK_MEMBERS_ONLY_INCREASE,
-                cf_touch=_CF_TOUCH, touch_cooldown_days=0,
+                cf_touch=_CF_TOUCH, touch_cooldown_days=0, cf_inventory_rebuild=_CF_INVENTORY_REBUILD,
                 ha_metrics_url=_LIVENESS_URL, ha_metrics_metric=_HA_METRICS_METRIC,
                 ha_metrics_hostname_label=_HA_METRICS_HOSTNAME_LABEL,
                 ha_metrics_target_label=_HA_METRICS_TARGET_LABEL,

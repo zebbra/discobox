@@ -72,3 +72,4 @@ def test_sync_device_releases_its_lock_on_error(monkeypatch) -> None:
         pass
     assert lock.acquire(blocking=False)        # released by the wrapper
     lock.release()
+

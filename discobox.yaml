@@ -92,6 +92,9 @@ custom_fields:
   neighbor_port: neighbor_port
   neighbor_device: neighbor_device
   neighbor_iface: neighbor_iface
+  inventory_rebuild: inventory_last_rebuild  # datetime CF on Device: stamped (UTC) after every
+                            # /rebuild with dry_run=false, whether or not it changed anything; never
+                            # by a normal sync or a dry-run. Skipped unless the field exists — null to disable
   controller: controller    # object CF (type Object → Device) on Device: set to the WLC on
                             # every AP it reports; skipped unless the field exists — null to disable
 

@@ -14,7 +14,7 @@ import re
 import sys
 import threading
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Optional, Union
 from urllib.parse import quote
 
@@ -2030,6 +2030,47 @@ def _remove_orphaned_interfaces(
     return deleted
 
 
+def _remove_misplaced_vss_interfaces(
+    nb, vss_ifaces: dict[int, dict], positions: set, source_cf: Optional[str], source_value: str, log,
+) -> int:
+    """
+    Delete interfaces sitting on the wrong VSS member device (the switch number
+    in the name says another member), so the sync recreates them on the right
+    one. Unlike orphans these aren't gone from Netdisco, only misplaced, so a
+    source-less one goes too. Kept (with a warning): one owned by another
+    source, one with a cable or an IP, which the delete would lose. Subinterfaces
+    first so Netbox's cascade doesn't 404 the child. Returns the number deleted.
+    """
+    removed = 0
+    for pos, dev_ifaces in vss_ifaces.items():
+        misplaced = [
+            (name, iface, owner_pos)
+            for name, iface in dev_ifaces.items()
+            if (owner_pos := _slot_from_iface("vss", name)) is not None
+            and owner_pos != pos and owner_pos in positions
+        ]
+        misplaced.sort(key=lambda x: (0 if "." in x[0] else 1))
+        for name, iface, owner_pos in misplaced:
+            owner = dict(getattr(iface, "custom_fields", {}) or {}).get(source_cf) if source_cf else None
+            if owner and owner != source_value:
+                log.warning("  %-40s on Switch %d, belongs on Switch %d: kept (owned by %r)",
+                            name, pos, owner_pos, owner)
+                continue
+            if getattr(iface, "cable", None):
+                log.warning("  %-40s on Switch %d, belongs on Switch %d: kept (has a cable, move it by hand)",
+                            name, pos, owner_pos)
+                continue
+            if list(nb.nb.ipam.ip_addresses.filter(assigned_object_type="dcim.interface", assigned_object_id=iface.id)):
+                log.warning("  %-40s on Switch %d, belongs on Switch %d: kept (has IPs, move them by hand)",
+                            name, pos, owner_pos)
+                continue
+            if _delete_with_retry(iface, f"misplaced {name!r} on Switch {pos}", log):
+                del dev_ifaces[name]
+                removed += 1
+                log.debug("  %-40s moved from Switch %d → Switch %d", name, pos, owner_pos)
+    return removed
+
+
 def _prune_ap_bays(nb, ap_dev, log) -> int:
     """
     Delete an AP's empty device bays and module bays: an AP has neither, so
@@ -3736,6 +3777,8 @@ def _sync_device(
     cf_stack_members: Optional[str] = "stack_members",
     stack_members_only_increase: bool = True,
     cf_touch: Optional[str] = "netdisco_last_update",
+    cf_inventory_rebuild: Optional[str] = None,  # datetime CF stamped when a rebuild (prune,
+                                                 # not dry-run) ran, changed or not; None = off
     touch_cooldown_days: int = 1,
     ha_metrics_url: Optional[str] = None,
     ha_metrics_metric: str = "fgHaStatsSyncStatus_info",
@@ -4756,27 +4799,9 @@ def _sync_device(
                 for pos, dev in slot_to_device.items()
             }
             # Remove interfaces sitting on the wrong VSS member device from a prior run.
-            # Subinterfaces first to avoid Netbox cascade-delete causing a 404 on the child.
-            for pos, dev_ifaces in vss_ifaces.items():
-                misplaced = [
-                    (iface_name, iface, owner)
-                    for iface_name, iface in dev_ifaces.items()
-                    if (
-                        (owner := _slot_from_iface("vss", iface_name)) is not None
-                        and owner != pos
-                        and owner in slot_to_device
-                    )
-                ]
-                misplaced.sort(key=lambda x: (0 if "." in x[0] else 1))
-                for iface_name, iface, owner_pos in misplaced:
-                    try:
-                        iface.delete()
-                        del dev_ifaces[iface_name]
-                        log.debug("  %-40s moved from Switch %d → Switch %d",
-                                  iface_name, pos, owner_pos)
-                    except Exception as exc:
-                        log.error("  %-40s could not remove from wrong VSS member: %s",
-                                  iface_name, exc)
+            _remove_misplaced_vss_interfaces(
+                nb, vss_ifaces, set(slot_to_device), iface_source_cf, iface_source_value, log,
+            )
         else:
             vss_ifaces = {}
 
@@ -5460,12 +5485,19 @@ def _sync_device(
         ):
             device_changed = True
 
+    stamps: dict = {}
     if cf_touch and device_changed:
+        stamps[cf_touch] = date.today().isoformat()
+    # Rebuild stamp: only when the CF exists on Device (Netbox lists every defined CF)
+    if (prune and not dry_run and cf_inventory_rebuild
+            and cf_inventory_rebuild in (getattr(nb_device, "custom_fields", {}) or {})):
+        stamps[cf_inventory_rebuild] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if stamps:
         try:
-            nb_device.update({"custom_fields": _merged_custom_fields(nb_device, {cf_touch: date.today().isoformat()})})
-            log.debug("  %s updated (config changed)", cf_touch)
+            nb_device.update({"custom_fields": _merged_custom_fields(nb_device, stamps)})
+            log.debug("  %s updated", ", ".join(stamps))
         except Exception as exc:
-            log.error("  %s update error: %s", cf_touch, exc)
+            log.error("  %s update error: %s", ", ".join(stamps), exc)
 
     def _fmt(label: str, c: dict) -> Optional[str]:
         changed = c.get("created", 0) + c.get("updated", 0)
