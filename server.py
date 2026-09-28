@@ -12,6 +12,8 @@ Endpoints:
   GET/POST /rebuild          Rebuild one device's inventory to exactly match Netdisco (deletes stale entries)
   GET/POST /sync/pause       Hold queued syncs from starting
   GET/POST /sync/resume      Release the pause gate
+  GET      /reconcile        Compare Netbox with Netdisco now, return the gaps (read-only)
+  GET/POST /reconcile/enqueue  Reconcile + enqueue discovers for missing devices / auto-create
   GET/POST /types/library    Enrich DeviceTypes from the devicetype-library (dry-run unless POST apply=true)
   GET      /metrics          Prometheus metrics
   GET      /health           Liveness check
@@ -587,13 +589,20 @@ def _get_netbox_client() -> NetboxClient:
     return _netbox_client
 
 
-def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = None) -> None:
-    if _is_paused():
+def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = None,
+                   compare_only: bool = False) -> Optional[dict]:
+    """
+    Compare Netbox with Netdisco and (unless compare_only) enqueue discovers /
+    auto-create. compare_only never writes anywhere but the gap reports: no
+    discover jobs, no auto-create, no queue-busy abort, allowed while paused.
+    Returns reconcile_devices' counts (None when skipped or aborted).
+    """
+    if _is_paused() and not compare_only:
         logger.info("Reconcile skipped: sync is paused")
-        return
+        return None
     nd = _get_netdisco_client()
     nb = _get_netbox_client()
-    effective_max = max_enqueue if max_enqueue is not None else _RECONCILE_MAX_ENQUEUE
+    effective_max = 0 if compare_only else (max_enqueue if max_enqueue is not None else _RECONCILE_MAX_ENQUEUE)
 
     liveness = None
     if _LIVENESS_URL:
@@ -615,15 +624,15 @@ def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = No
 
     counts = reconcile_devices(
         nd, nb,
-        max_queued=_RECONCILE_MAX_QUEUED,
-        max_failed=_RECONCILE_MAX_FAILED,
+        max_queued=None if compare_only else _RECONCILE_MAX_QUEUED,
+        max_failed=None if compare_only else _RECONCILE_MAX_FAILED,
         max_enqueue=effective_max,
         offset=offset,
         roles=_RECONCILE_ROLES,
         statuses=_RECONCILE_STATUSES,
         require_auth_tag=_RECONCILE_REQUIRE_AUTH_TAG,
-        auto_create_role=_AUTO_CREATE_ROLE,
-        auto_create_site=_AUTO_CREATE_SITE,
+        auto_create_role=None if compare_only else _AUTO_CREATE_ROLE,
+        auto_create_site=None if compare_only else _AUTO_CREATE_SITE,
         auto_create_status=_AUTO_CREATE_STATUS,
         auto_create_location=_AUTO_CREATE_LOCATION,
         iface_source_cf=_IFACE_SOURCE_CF,
@@ -633,7 +642,7 @@ def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = No
     )
     if counts.get("aborted"):
         reconcile_aborted_total.inc()
-        return
+        return None
     reconcile_netbox_devices.set(counts.get("netbox_total", 0))
     reconcile_netdisco_devices.set(counts.get("netdisco_total", 0))
     reconcile_enqueued_total.inc(counts.get("enqueued", 0))
@@ -647,6 +656,7 @@ def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = No
         _save_gap(_TAG_MISMATCHES_FILE, counts.get("tag_mismatches_list", []))
     reconcile_runs_total.labels(status="success").inc()
     reconcile_last_run_timestamp.set(time.time())
+    return counts
 
 
 def _run_fix_tag_mismatches(max_enqueue: Optional[int] = None) -> None:
@@ -1669,8 +1679,9 @@ async def index() -> str:
   <tr><td>GET/POST</td><td><a href=/docs#/default/rebuild_rebuild_post>/rebuild</a>?host=&lt;ip&gt;&dry_run=true</td><td>Rebuild one device's inventory to exactly match Netdisco — deletes stale interfaces/modules/inventory (dry_run=true by default)</td></tr>
   <tr><td>GET/POST</td><td><a href=/sync/pause>/sync/pause</a></td><td>Pause queued syncs</td></tr>
   <tr><td>GET/POST</td><td><a href=/sync/resume>/sync/resume</a></td><td>Resume queued syncs</td></tr>
-  <tr><td>GET/POST</td><td><a href=/reconcile>/reconcile</a></td><td>Trigger reconcile: enqueue Netdisco discovery for Netbox devices Netdisco doesn't know yet</td></tr>
+  <tr><td>GET/POST</td><td><a href=/reconcile/enqueue>/reconcile/enqueue</a></td><td>Reconcile and enqueue Netdisco discovery for Netbox devices Netdisco doesn't know yet (and auto-create)</td></tr>
   <tr><td>GET/POST</td><td><a href=/reconcile/fix-tags>/reconcile/fix-tags</a></td><td>Re-enqueue discovery (with Netbox's expected auth tag as a hint) for the last reconcile's tag mismatches</td></tr>
+  <tr><td>GET</td><td><a href=/reconcile>/reconcile</a></td><td>Compare Netbox with Netdisco now and return the gaps as JSON (read-only; ?lists=true for the device lists)</td></tr>
   <tr><td>GET</td><td><a href=/unknown-devices>/unknown-devices</a></td><td>Devices seen via LLDP but not found in Netbox (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/not-in-netdisco>/not-in-netdisco</a></td><td>Active Netbox devices not in Netdisco (JSON)</td></tr>
   <tr><td>GET/POST</td><td>/types/library?role=…</td><td>DeviceType enrichment from the devicetype-library (dry-run; POST apply=true writes)</td></tr>
@@ -1717,7 +1728,12 @@ async def stats() -> dict:
     }
 
 
-@app.api_route("/reconcile", methods=["GET", "POST"], dependencies=[Depends(require_auth)], summary="Trigger reconcile run manually")
+@app.api_route(
+    "/reconcile/enqueue",
+    methods=["GET", "POST"],
+    dependencies=[Depends(require_auth)],
+    summary="Reconcile and act: enqueue Netdisco discovers for missing devices (and auto-create), in the background",
+)
 async def trigger_reconcile(
     background_tasks: BackgroundTasks,
     max_enqueue: Annotated[Optional[int], Query(description="Max devices to enqueue (overrides DISCOBOX_RECONCILE_MAX_ENQUEUE)")] = None,
@@ -1726,6 +1742,36 @@ async def trigger_reconcile(
     effective_max = max_enqueue if max_enqueue is not None else _RECONCILE_MAX_ENQUEUE
     background_tasks.add_task(_run_reconcile, max_enqueue=effective_max, offset=offset)
     return {"status": "reconcile queued", "max_enqueue": effective_max, "offset": offset}
+
+
+_DIFF_KEYS = ("netbox_total", "netdisco_total", "already_known", "not_in_netdisco", "skipped_offline",
+              "not_in_netbox", "tag_mismatches")
+
+
+@app.get(
+    "/reconcile",
+    dependencies=[Depends(require_auth)],
+    summary="Compare Netbox with Netdisco now and return the gaps (read-only: no discover jobs, no auto-create)",
+)
+def reconcile_diff(
+    lists: Annotated[bool, Query(description="Include the device lists, not only the counts")] = False,
+) -> dict:
+    # Plain def: runs in FastAPI's threadpool (the full inventory compare takes a while)
+    try:
+        counts = _run_reconcile(compare_only=True)
+    except Exception as exc:
+        logger.error("Reconcile compare failed: %s", exc)
+        raise HTTPException(502, f"Compare failed: {exc}")
+    if counts is None:
+        raise HTTPException(503, "Compare failed (see the discobox log)")
+    result: dict = {k: counts.get(k, 0) for k in _DIFF_KEYS}
+    # skipped_offline: not-in-Netdisco devices the liveness data reports down (not counted above)
+    result["offline"] = result.pop("skipped_offline")
+    if lists:
+        result["not_in_netdisco_list"] = counts.get("not_in_netdisco_list", [])
+        result["not_in_netbox_list"] = counts.get("not_in_netbox_list", [])
+        result["tag_mismatches_list"] = counts.get("tag_mismatches_list", [])
+    return result
 
 
 @app.api_route(

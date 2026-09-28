@@ -74,3 +74,26 @@ def test_missing_library_is_503(monkeypatch) -> None:
     with pytest.raises(HTTPException) as exc:
         server._get_library()
     assert exc.value.status_code == 503
+
+
+def test_reconcile_diff_is_compare_only(monkeypatch) -> None:
+    seen: dict = {}
+
+    def fake_reconcile(nd, nb, **kw):
+        seen.update(kw)
+        return {"netbox_total": 10, "netdisco_total": 9, "already_known": 8, "not_in_netdisco": 1,
+                "skipped_offline": 1, "not_in_netbox": 1, "tag_mismatches": 2,
+                "not_in_netdisco_list": [{"ip": "192.0.2.1"}], "not_in_netbox_list": [], "tag_mismatches_list": []}
+
+    monkeypatch.setattr(server, "reconcile_devices", fake_reconcile)
+    monkeypatch.setattr(server, "_get_netdisco_client", lambda: object())
+    monkeypatch.setattr(server, "_get_netbox_client", lambda: object())
+    monkeypatch.setattr(server, "_LIVENESS_URL", None)
+    monkeypatch.setattr(server, "_is_paused", lambda: True)          # read-only: runs while paused
+    monkeypatch.setattr(server, "_save_gap", lambda *a: None)
+    r = server.reconcile_diff(lists=False)          # GET /reconcile
+    assert seen["max_enqueue"] == 0 and seen["auto_create_role"] is None
+    assert seen["max_queued"] is None and seen["max_failed"] is None
+    assert r == {"netbox_total": 10, "netdisco_total": 9, "already_known": 8, "not_in_netdisco": 1,
+                 "not_in_netbox": 1, "tag_mismatches": 2, "offline": 1}
+    assert server.reconcile_diff(lists=True)["not_in_netdisco_list"] == [{"ip": "192.0.2.1"}]
