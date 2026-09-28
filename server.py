@@ -57,6 +57,7 @@ from discobox import (
     __version__,
     _parse_snmp_timeout_us,
     _recently_touched,
+    configure_ap_fingerprint,
     configure_discover_snmptimeout,
     discover_snmptimeout_us,
     fetch_liveness,
@@ -929,6 +930,13 @@ _TAG_MISMATCHES_FILE: str = os.path.join(
 )
 _reconcile_gaps_lock = threading.Lock()
 
+# WLC AP pass: skip the APs while the WLC's AP list is unchanged (per-WLC state
+# file here), full pass every aps.full_pass_days and on every rebuild.
+configure_ap_fingerprint(
+    _STATE_DIR if _cbool(_CFG, "aps", "skip_unchanged", default=True) else None,
+    _c(_CFG, "aps", "full_pass_days", default=7),
+)
+
 # Summary of the last finished reconcile run (counts, when, how long, error),
 # served by GET /reconcile without re-running the compare.
 _RECONCILE_LAST_FILE: str = os.path.join(
@@ -1375,6 +1383,13 @@ async def rebuild(
 
     Defaults to dry_run=true: nothing is deleted unless dry_run=false is
     passed explicitly.
+
+    dry_run=true previews the rebuild's deletions, but the sync part still
+    runs, exactly like a normal sync (configured housekeeping, AP skip as
+    usual): it never writes more than a normal sync would. dry_run=false
+    forces housekeeping and a full WLC AP pass, and stamps
+    inventory_last_rebuild. Source-less orphaned interfaces follow
+    sync.remove_orphaned_interfaces either way.
     """
     try:
         resolved_host = validate_ip(host)
@@ -1401,7 +1416,12 @@ async def rebuild(
                 nd=nd, nb=nb, ip=resolved_host,
                 sync_mac=_DEFAULT_MAC, sync_ip=_DEFAULT_IP, sync_modules=_DEFAULT_MODULES,
                 sync_sfp=_DEFAULT_SFP, sync_poe=_DEFAULT_POE,
-                housekeeping=True, lldp_clear_stale=_DEFAULT_LLDP_CLEAR_STALE,
+                # dry-run: the sync part runs exactly like a normal sync (same settings,
+                # no forced housekeeping, no forced AP pass); only the rebuild's own
+                # deletions are previewed. Source-less orphans follow the config either way.
+                housekeeping=_DEFAULT_HOUSEKEEPING if dry_run else True,
+                remove_orphaned_interfaces=_REMOVE_ORPHANED, ap_full=not dry_run,
+                lldp_clear_stale=_DEFAULT_LLDP_CLEAR_STALE,
                 vip_mode=_VIP_MODE, vip_mode_by_vendor=_VIP_MODE_BY_VENDOR,
                 cf_neighbor_text=_CF_NEIGHBOR_TEXT, cf_neighbor_port=_CF_NEIGHBOR_PORT,
                 cf_neighbor_device=_CF_NEIGHBOR_DEVICE, cf_neighbor_iface=_CF_NEIGHBOR_IFACE,

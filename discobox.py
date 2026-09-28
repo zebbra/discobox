@@ -7,9 +7,11 @@ Imported by cli.py (one-shot CLI) and server.py (FastAPI webhook receiver).
 
 __version__ = "1.12.1"
 
+import hashlib
 import ipaddress
 import json
 import logging
+import os
 import re
 import sys
 import threading
@@ -2030,6 +2032,72 @@ def _remove_orphaned_interfaces(
     return deleted
 
 
+# WLC AP pass skip: the AP pass costs a few Netbox reads per AP (hundreds per
+# WLC) on every sync. When everything it reads from Netdisco is unchanged
+# since the last pass, the APs are skipped, except those still unresolved
+# (not found / failed) last time. A full pass still runs every
+# AP_FULL_PASS_DAYS (repairs hand edits in Netbox) and on every rebuild.
+# AP_STATE_DIR None = off (always a full pass).
+AP_STATE_DIR: Optional[str] = None
+AP_FULL_PASS_DAYS: float = 7
+_AP_MODULE_KEYS = ("name", "description", "model", "serial", "sw_ver", "hw_ver", "fw_ver", "vendor")
+_AP_PORT_KEYS = ("port", "mac", "type")
+
+
+def configure_ap_fingerprint(state_dir: Optional[str], full_pass_days: Optional[float] = None) -> None:
+    global AP_STATE_DIR, AP_FULL_PASS_DAYS
+    AP_STATE_DIR = state_dir or None
+    if full_pass_days is not None:
+        AP_FULL_PASS_DAYS = float(full_pass_days)
+
+
+def _ap_fingerprint(ap_modules: list[dict], ap_radio_ports: list[dict], context: list) -> str:
+    """Hash of everything the AP pass reads from Netdisco, plus the settings/WLC fields it writes from."""
+    data = [
+        __version__, context,
+        sorted([str(m.get(k) or "") for k in _AP_MODULE_KEYS] for m in ap_modules),
+        sorted([str(p.get(k) or "") for k in _AP_PORT_KEYS] for p in ap_radio_ports),
+    ]
+    return hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:32]
+
+
+def _ap_state_path(device_id: int) -> Optional[str]:
+    return os.path.join(AP_STATE_DIR, f"discobox.ap_pass.{device_id}.json") if AP_STATE_DIR else None
+
+
+def _load_ap_state(device_id: int) -> dict:
+    path = _ap_state_path(device_id)
+    if not path:
+        return {}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_ap_state(device_id: int, state: dict) -> None:
+    path = _ap_state_path(device_id)
+    if not path:
+        return
+    try:
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.warning("Could not save the AP pass state: %s", exc)
+
+
+def _plan_ap_pass(state: dict, fingerprint: str, full: bool, now: float) -> tuple[bool, set]:
+    """(full pass?, hostnames to retry on a skipped pass)."""
+    if full or not AP_STATE_DIR or state.get("fingerprint") != fingerprint:
+        return True, set()
+    if now - float(state.get("full_at") or 0) >= AP_FULL_PASS_DAYS * 86400:
+        return True, set()
+    return False, set(state.get("pending") or [])
+
+
 def _remove_misplaced_vss_interfaces(
     nb, vss_ifaces: dict[int, dict], positions: set, source_cf: Optional[str], source_value: str, log,
 ) -> int:
@@ -3797,6 +3865,7 @@ def _sync_device(
     orphan_delete_max_percent: int = 25,  # mass-deletion brake for that
     ap_type_confirmed_untag: Optional[list[str]] = None,  # tag slugs removed once an AP's model
                                                            # resolves to a type; None = ["fixme-model"]
+    ap_full: bool = False,  # WLC: update every AP even when the AP list's fingerprint is unchanged
     prune: bool = False,
     dry_run: bool = True,
     _held_locks: Optional[list] = None,
@@ -4145,7 +4214,7 @@ def _sync_device(
     ip_counts: dict[str, int] = {"created": 0, "fixed": 0, "moved": 0, "unchanged": 0, "skipped": 0, "error": 0}
     mod_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
     sfp_counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0, "error": 0}
-    ap_counts: dict[str, int] = {"updated": 0, "unchanged": 0, "not_found": 0, "error": 0}
+    ap_counts: dict[str, int] = {"updated": 0, "unchanged": 0, "not_found": 0, "error": 0, "skipped": 0}
 
     # slot_to_module populated during module sync; consumed by interface→module pass.
     slot_to_module: dict[int, int] = {}  # slot key (stack pos / FEX ID) → nb module id
@@ -4635,9 +4704,20 @@ def _sync_device(
                     changed = True
             return "updated" if changed else "unchanged"
 
+        ap_state: dict = _load_ap_state(nb_device.id) if ap_modules else {}
+        ap_fp = _ap_fingerprint(ap_modules, ap_radio_ports, [
+            nb_device.id, nb_device.name, nd_device.get("vendor"), cf_controller, cf_os_version,
+            cf_os_name, cf_os_release, ap_prune_interfaces, iface_source_cf, iface_source_value, sorted(ap_untag),
+        ]) if ap_modules else ""
+        ap_now = time.time()
+        ap_full_pass, ap_retry = _plan_ap_pass(ap_state, ap_fp, ap_full, ap_now) if ap_modules else (True, set())
+        ap_pending: list[str] = []      # not found / failed this pass: retried on the next skipped one
         for ap_mod in ap_modules:
             parsed = _parse_ap_description(ap_mod.get("description") or "")
             hostname = parsed.get("hostname")
+            if not ap_full_pass and (hostname or "") not in ap_retry:
+                ap_counts["skipped"] += 1
+                continue
             if not hostname:
                 log.debug(
                     "  AP serial=%s: description didn't parse, skipping", ap_mod.get("serial", ""),
@@ -4650,10 +4730,12 @@ def _sync_device(
                 )
             except Exception as exc:
                 ap_counts["error"] += 1
+                ap_pending.append(hostname)
                 log.error("  AP %-20s lookup error: %s", hostname, exc)
                 continue
             if not ap_dev:
                 ap_counts["not_found"] += 1
+                ap_pending.append(hostname)
                 log.debug("  AP %-20s not found in Netbox: skipping", hostname)
                 continue
             try:
@@ -4666,7 +4748,17 @@ def _sync_device(
                     )
             except Exception as exc:
                 ap_counts["error"] += 1
+                ap_pending.append(hostname)
                 log.error("  AP %-20s update error: %s", hostname, exc)
+        if ap_modules:
+            _save_ap_state(nb_device.id, {
+                "fingerprint": ap_fp,
+                "full_at": ap_now if ap_full_pass else ap_state.get("full_at"),
+                "pending": sorted(set(ap_pending)),
+            })
+            if not ap_full_pass:
+                log.debug("APs: list unchanged since the last pass: skipped %d, retried %d",
+                          ap_counts["skipped"], len(ap_modules) - ap_counts["skipped"])
 
         if ap_modules:
             log.debug(
@@ -5534,6 +5626,8 @@ def _sync_device(
             s += f"/?{c['not_found']}"
         if c["error"]:
             s += f"/!{c['error']}"
+        if c["skipped"]:
+            s += f" (unchanged: {c['skipped']} skipped)"
         return s
 
     parts = list(filter(None, [
