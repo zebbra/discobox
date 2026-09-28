@@ -262,6 +262,7 @@ class NetdiscoClient:
     ):
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
+        _mount_read_retries(self.session)
         self.session.verify = verify_tls
         self.session.headers.update({"Accept": "application/json", "User-Agent": "discobox"})
         if not verify_tls:
@@ -399,10 +400,27 @@ class NetdiscoClient:
 
 # ── Netbox client ──────────────────────────────────────────────────────────────
 
+def _mount_read_retries(session: requests.Session) -> None:
+    """
+    Retry idempotent reads (GET/HEAD) on a dropped connection, e.g. a server or
+    proxy closing an idle keep-alive connection mid-run ("RemoteDisconnected").
+    Writes are never retried: a POST/PATCH/DELETE may have been applied already.
+    """
+    retry = urllib3.util.Retry(
+        total=3, connect=3, read=3, status=0, other=0,
+        allowed_methods=frozenset({"GET", "HEAD"}),
+        backoff_factor=0.5, raise_on_status=False,
+    )
+    adapter = requests.adapters.HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+
 class _ChangelogSession(requests.Session):
-    """requests.Session that sets the discobox User-Agent and counts requests."""
+    """requests.Session that sets the discobox User-Agent, counts requests and retries dropped reads."""
     def __init__(self, on_request: Optional[Callable[[str], None]] = None):
         super().__init__()
+        _mount_read_retries(self)
         self._on_request = on_request or (lambda method: None)
         self.headers.update({"User-Agent": "discobox"})
 

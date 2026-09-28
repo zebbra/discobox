@@ -12,7 +12,7 @@ Endpoints:
   GET/POST /rebuild          Rebuild one device's inventory to exactly match Netdisco (deletes stale entries)
   GET/POST /sync/pause       Hold queued syncs from starting
   GET/POST /sync/resume      Release the pause gate
-  GET      /reconcile        Compare Netbox with Netdisco now, return the gaps (read-only)
+  GET      /reconcile        Last Netbox↔Netdisco compare: the gaps (read-only; ?refresh re-runs it)
   GET/POST /reconcile/enqueue  Reconcile + enqueue discovers for missing devices / auto-create
   GET/POST /discover         Enqueue a Netdisco discover for one device (Netbox SNMP profile/timeout)
   GET/POST /types/library    Enrich DeviceTypes from the devicetype-library (dry-run unless POST apply=true)
@@ -603,11 +603,28 @@ def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = No
     Compare Netbox with Netdisco and (unless compare_only) enqueue discovers /
     auto-create. compare_only never writes anywhere but the gap reports: no
     discover jobs, no auto-create, no queue-busy abort, allowed while paused.
-    Returns reconcile_devices' counts (None when skipped or aborted).
+    Returns reconcile_devices' counts (None when skipped or aborted). Every
+    finished run (or its error) is recorded for GET /reconcile.
     """
     if _is_paused() and not compare_only:
         logger.info("Reconcile skipped: sync is paused")
         return None
+    started = time.time()
+    try:
+        counts = _reconcile_once(max_enqueue, offset, compare_only)
+    except Exception as exc:
+        _save_reconcile_last({"mode": "compare" if compare_only else "enqueue", "started": started,
+                              "finished": time.time(), "duration_s": round(time.time() - started, 1),
+                              "error": str(exc)})
+        raise
+    if counts is not None:
+        _save_reconcile_last({"mode": "compare" if compare_only else "enqueue", "started": started,
+                              "finished": time.time(), "duration_s": round(time.time() - started, 1),
+                              "error": None, "counts": _diff_counts(counts)})
+    return counts
+
+
+def _reconcile_once(max_enqueue: Optional[int], offset: Optional[int], compare_only: bool) -> Optional[dict]:
     nd = _get_netdisco_client()
     nb = _get_netbox_client()
     effective_max = 0 if compare_only else (max_enqueue if max_enqueue is not None else _RECONCILE_MAX_ENQUEUE)
@@ -910,6 +927,26 @@ _TAG_MISMATCHES_FILE: str = os.path.join(
     _STATE_DIR, "discobox.tag_mismatches.json"
 )
 _reconcile_gaps_lock = threading.Lock()
+
+# Summary of the last finished reconcile run (counts, when, how long, error),
+# served by GET /reconcile without re-running the compare.
+_RECONCILE_LAST_FILE: str = os.path.join(
+    _STATE_DIR, "discobox.reconcile_last.json"
+)
+
+def _load_reconcile_last() -> dict:
+    try:
+        with open(_RECONCILE_LAST_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def _save_reconcile_last(summary: dict) -> None:
+    try:
+        with open(_RECONCILE_LAST_FILE, "w") as f:
+            json.dump(summary, f)
+    except OSError as exc:
+        logger.warning("Could not save the reconcile summary: %s", exc)
 
 def _load_gap(path: str) -> list[dict]:
     try:
@@ -1695,7 +1732,7 @@ async def index() -> str:
   <tr><td>GET/POST</td><td><a href=/sync/resume>/sync/resume</a></td><td>Resume queued syncs</td></tr>
   <tr><td>GET/POST</td><td><a href=/reconcile/enqueue>/reconcile/enqueue</a></td><td>Reconcile and enqueue Netdisco discovery for Netbox devices Netdisco doesn't know yet (and auto-create)</td></tr>
   <tr><td>GET/POST</td><td><a href=/reconcile/fix-tags>/reconcile/fix-tags</a></td><td>Re-enqueue discovery (with Netbox's expected auth tag as a hint) for the last reconcile's tag mismatches</td></tr>
-  <tr><td>GET</td><td><a href=/reconcile>/reconcile</a></td><td>Compare Netbox with Netdisco now and return the gaps as JSON (read-only; ?lists=true for the device lists)</td></tr>
+  <tr><td>GET</td><td><a href=/reconcile>/reconcile</a></td><td>The last Netbox↔Netdisco compare: the gaps as JSON (read-only; ?refresh=true re-runs it in the background, ?lists=true adds the device lists)</td></tr>
   <tr><td>GET/POST</td><td>/discover?host=…</td><td>Enqueue a Netdisco discover for one device, with its Netbox snmp_auth_profile / snmp_polling_timeout (or &amp;tag= / &amp;timeout=)</td></tr>
   <tr><td>GET</td><td><a href=/unknown-devices>/unknown-devices</a></td><td>Devices seen via LLDP but not found in Netbox (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/not-in-netdisco>/not-in-netdisco</a></td><td>Active Netbox devices not in Netdisco (JSON)</td></tr>
@@ -1841,27 +1878,83 @@ _DIFF_KEYS = ("netbox_total", "netdisco_total", "already_known", "not_in_netdisc
 @app.get(
     "/reconcile",
     dependencies=[Depends(require_auth)],
-    summary="Compare Netbox with Netdisco now and return the gaps (read-only: no discover jobs, no auto-create)",
+    summary="The last Netbox/Netdisco compare's gaps (read-only: no discover jobs, no auto-create); ?refresh=true re-runs it",
 )
 def reconcile_diff(
     lists: Annotated[bool, Query(description="Include the device lists, not only the counts")] = False,
+    refresh: Annotated[bool, Query(description="Start a new compare in the background (unless one is running)")] = False,
+    wait: Annotated[bool, Query(description="Run the compare now and answer when done (slow: may exceed proxy timeouts)")] = False,
 ) -> dict:
-    # Plain def: runs in FastAPI's threadpool (the full inventory compare takes a while)
-    try:
-        counts = _run_reconcile(compare_only=True)
-    except Exception as exc:
-        logger.error("Reconcile compare failed: %s", exc)
-        raise HTTPException(502, f"Compare failed: {exc}")
-    if counts is None:
-        raise HTTPException(503, "Compare failed (see the discobox log)")
+    """
+    The last reconcile's result, immediately. The full inventory compare takes
+    longer than a proxy/route timeout, so it runs in the background: ?refresh
+    starts one (also started when there's no result yet), `running` says one
+    is in progress, and the reconcile loop's runs update the result too.
+    """
+    # Plain def: runs in FastAPI's threadpool
+    if wait:
+        try:
+            _run_reconcile_compare()
+        except Exception as exc:
+            raise HTTPException(502, f"Compare failed: {exc}")
+    last = _load_reconcile_last()
+    started = False
+    if not wait and (refresh or not last):
+        started = _start_background_compare()
+    result: dict = dict(last.get("counts") or {})
+    result.update({
+        "mode": last.get("mode"),
+        "finished": last.get("finished"),
+        "age_s": round(time.time() - last["finished"]) if last.get("finished") else None,
+        "duration_s": last.get("duration_s"),
+        "error": last.get("error"),
+        "running": _compare_running.locked(),
+        "refresh_started": started,
+    })
+    if lists:
+        with _reconcile_gaps_lock:
+            result["not_in_netdisco_list"] = _load_gap(_NOT_IN_NETDISCO_FILE)
+            result["not_in_netbox_list"] = _load_gap(_NOT_IN_NETBOX_FILE)
+            result["tag_mismatches_list"] = _load_gap(_TAG_MISMATCHES_FILE)
+    return result
+
+
+def _diff_counts(counts: dict) -> dict:
     result: dict = {k: counts.get(k, 0) for k in _DIFF_KEYS}
     # skipped_offline: not-in-Netdisco devices the liveness data reports down (not counted above)
     result["offline"] = result.pop("skipped_offline")
-    if lists:
-        result["not_in_netdisco_list"] = counts.get("not_in_netdisco_list", [])
-        result["not_in_netbox_list"] = counts.get("not_in_netbox_list", [])
-        result["tag_mismatches_list"] = counts.get("tag_mismatches_list", [])
+    if counts.get("enqueued"):
+        result["enqueued"] = counts["enqueued"]
     return result
+
+
+_compare_running = threading.Lock()
+
+
+def _run_reconcile_compare() -> None:
+    """One compare-only reconcile; a second caller waits for the running one instead of doubling it."""
+    if not _compare_running.acquire(blocking=False):
+        with _compare_running:       # wait for the running compare, whose result is then current
+            return
+    try:
+        _run_reconcile(compare_only=True)
+    finally:
+        _compare_running.release()
+
+
+def _start_background_compare() -> bool:
+    """Start a compare-only reconcile in a thread; False when one is running already."""
+    if _compare_running.locked():
+        return False
+
+    def _bg() -> None:
+        try:
+            _run_reconcile_compare()
+        except Exception as exc:
+            logger.error("Reconcile compare failed: %s", exc)
+
+    threading.Thread(target=_bg, name="reconcile-compare", daemon=True).start()
+    return True
 
 
 @app.api_route(

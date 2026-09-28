@@ -305,3 +305,14 @@ def test_discover_snmptimeout_policy_is_configurable() -> None:
         assert discover_snmptimeout_us("1h") == 60_000_000
     finally:
         DISCOVER_SNMPTIMEOUT.update(saved)
+
+
+def test_sessions_retry_reads_not_writes() -> None:
+    import discobox
+    nd = discobox.NetdiscoClient("http://netdisco.example", token="t")     # token: no login request
+    for session, url in ((discobox._ChangelogSession(), "https://netbox.example/api/"),
+                         (nd.session, "http://netdisco.example/api/v1/")):
+        retry = session.get_adapter(url).max_retries
+        assert retry.total == 3 and retry._is_method_retryable("GET")
+        assert not retry._is_method_retryable("POST") and not retry._is_method_retryable("PATCH")
+        assert not retry._is_method_retryable("DELETE")

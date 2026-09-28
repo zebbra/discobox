@@ -90,13 +90,71 @@ def test_reconcile_diff_is_compare_only(monkeypatch) -> None:
     monkeypatch.setattr(server, "_get_netbox_client", lambda: object())
     monkeypatch.setattr(server, "_LIVENESS_URL", None)
     monkeypatch.setattr(server, "_is_paused", lambda: True)          # read-only: runs while paused
-    monkeypatch.setattr(server, "_save_gap", lambda *a: None)
-    r = server.reconcile_diff(lists=False)          # GET /reconcile
+    state = tempfile.mkdtemp(prefix="discobox-state-")
+    for attr, name in (("_RECONCILE_LAST_FILE", "last"), ("_NOT_IN_NETDISCO_FILE", "nind"),
+                       ("_NOT_IN_NETBOX_FILE", "ninb"), ("_TAG_MISMATCHES_FILE", "tm")):
+        monkeypatch.setattr(server, attr, os.path.join(state, name + ".json"))
+    r = server.reconcile_diff(lists=False, refresh=False, wait=True)     # GET /reconcile?wait=true
     assert seen["max_enqueue"] == 0 and seen["auto_create_role"] is None
     assert seen["max_queued"] is None and seen["max_failed"] is None
-    assert r == {"netbox_total": 10, "netdisco_total": 9, "already_known": 8, "not_in_netdisco": 1,
-                 "not_in_netbox": 1, "tag_mismatches": 2, "offline": 1}
-    assert server.reconcile_diff(lists=True)["not_in_netdisco_list"] == [{"ip": "192.0.2.1"}]
+    counts = {k: r[k] for k in ("netbox_total", "netdisco_total", "already_known", "not_in_netdisco",
+                                "not_in_netbox", "tag_mismatches", "offline")}
+    assert counts == {"netbox_total": 10, "netdisco_total": 9, "already_known": 8, "not_in_netdisco": 1,
+                      "not_in_netbox": 1, "tag_mismatches": 2, "offline": 1}
+    assert r["mode"] == "compare" and r["error"] is None and r["running"] is False
+    assert r["refresh_started"] is False
+    # lists come from the saved gap files
+    assert server.reconcile_diff(lists=True, refresh=False, wait=False)["not_in_netdisco_list"] == [{"ip": "192.0.2.1"}]
+
+
+def test_reconcile_diff_answers_immediately_and_refreshes_in_background(monkeypatch) -> None:
+    import threading
+    gate, calls = threading.Event(), []
+
+    def slow_reconcile(nd, nb, **kw):
+        calls.append(kw)
+        gate.wait(5)
+        return {"netbox_total": 3, "netdisco_total": 3, "already_known": 3}
+
+    monkeypatch.setattr(server, "reconcile_devices", slow_reconcile)
+    monkeypatch.setattr(server, "_get_netdisco_client", lambda: object())
+    monkeypatch.setattr(server, "_get_netbox_client", lambda: object())
+    monkeypatch.setattr(server, "_LIVENESS_URL", None)
+    state = tempfile.mkdtemp(prefix="discobox-state-")
+    for attr, name in (("_RECONCILE_LAST_FILE", "last"), ("_NOT_IN_NETDISCO_FILE", "nind"),
+                       ("_NOT_IN_NETBOX_FILE", "ninb"), ("_TAG_MISMATCHES_FILE", "tm")):
+        monkeypatch.setattr(server, attr, os.path.join(state, name + ".json"))
+
+    r = server.reconcile_diff(lists=False, refresh=False, wait=False)   # no result yet → starts one
+    assert r["refresh_started"] is True and r["running"] is True and r["finished"] is None
+    r2 = server.reconcile_diff(lists=False, refresh=True, wait=False)   # already running → not doubled
+    assert r2["refresh_started"] is False and r2["running"] is True
+    gate.set()
+    with server._compare_running:        # wait for the background compare
+        pass
+    for _ in range(50):
+        r3 = server.reconcile_diff(lists=False, refresh=False, wait=False)
+        if r3["finished"]:
+            break
+        __import__("time").sleep(0.05)
+    assert len(calls) == 1
+    assert r3["netbox_total"] == 3 and r3["running"] is False and r3["refresh_started"] is False
+
+
+def test_reconcile_diff_records_errors(monkeypatch) -> None:
+    def boom(nd, nb, **kw):
+        raise ConnectionError("Remote end closed connection without response")
+
+    monkeypatch.setattr(server, "reconcile_devices", boom)
+    monkeypatch.setattr(server, "_get_netdisco_client", lambda: object())
+    monkeypatch.setattr(server, "_get_netbox_client", lambda: object())
+    monkeypatch.setattr(server, "_LIVENESS_URL", None)
+    monkeypatch.setattr(server, "_RECONCILE_LAST_FILE", os.path.join(tempfile.mkdtemp(), "last.json"))
+    with pytest.raises(HTTPException) as exc:
+        server.reconcile_diff(lists=False, refresh=False, wait=True)
+    assert exc.value.status_code == 502
+    r = server.reconcile_diff(lists=False, refresh=False, wait=False)
+    assert "Remote end closed" in r["error"] and r["refresh_started"] is False
 
 
 # ── /discover ──
