@@ -12,6 +12,8 @@ import json
 import logging
 import re
 import sys
+import threading
+import time
 from datetime import date, timedelta
 from typing import Callable, Optional, Union
 from urllib.parse import quote
@@ -1540,9 +1542,10 @@ class NetboxClient:
                 continue
             if dry_run:
                 logger.info("  [dry-run] would delete stale interface %r", iface.name)
-            else:
-                iface.delete()
+            elif _delete_with_retry(iface, f"stale interface {iface.name!r}"):
                 logger.info("  Deleted stale interface %r", iface.name)
+            else:
+                continue
             deleted += 1
         return deleted
 
@@ -1898,11 +1901,8 @@ def _prune_ap_interfaces(nb, ap_dev, ifaces: dict, source_cf: Optional[str], sou
         if list(nb.nb.ipam.ip_addresses.filter(assigned_object_type="dcim.interface", assigned_object_id=iface.id)):
             log.debug("  AP %s: %s has IP(s), kept", ap_dev.name, name)
             continue
-        try:
-            iface.delete()
+        if _delete_with_retry(iface, f"AP {ap_dev.name}: stale interface {name}", log):
             removed.append(name)
-        except Exception as exc:
-            log.error("  AP %s: could not delete stale interface %s: %s", ap_dev.name, name, exc)
     if removed:
         log.info("  AP %s: removed %d stale interface(s)", ap_dev.name, len(removed))
         log.debug("  AP %s: removed %s", ap_dev.name, ", ".join(sorted(removed)))
@@ -1932,11 +1932,8 @@ def _remove_wlc_radio_ports(nb, device, source_cf: Optional[str], source_value: 
             continue
         if list(nb.nb.ipam.ip_addresses.filter(assigned_object_type="dcim.interface", assigned_object_id=iface.id)):
             continue
-        try:
-            iface.delete()
+        if _delete_with_retry(iface, f"AP radio pseudo-port {iface.name}", log):
             removed += 1
-        except Exception as exc:
-            log.error("  could not delete AP radio pseudo-port %s: %s", iface.name, exc)
     if removed:
         log.info("  Removed %d AP radio pseudo-port(s) from the controller (legacy)", removed)
     return removed
@@ -2007,12 +2004,9 @@ def _remove_orphaned_interfaces(
         if list(nb.nb.ipam.ip_addresses.filter(assigned_object_type="dcim.interface", assigned_object_id=iface.id)):
             log.warning("  %-40s not in Netdisco but has IP(s) assigned: keeping", name)
             continue
-        try:
-            iface.delete()
+        if _delete_with_retry(iface, f"orphan {name!r}", log):
             deleted.append(name)
             log.debug("  %-40s deleted (not in Netdisco)", name)
-        except Exception as exc:
-            log.error("  %-40s could not delete orphan: %s", name, exc)
     if deleted:
         log.info("  Removed %d orphaned interface(s) (not in Netdisco)", len(deleted))
     return deleted
@@ -2237,6 +2231,50 @@ def _cf_record_id(value) -> Optional[int]:
 
 
 NULL_MAC = "00:00:00:00:00:00"
+
+
+DEADLOCK_RETRIES = (0.5, 1.0, 2.0)   # back-off seconds between attempts
+
+
+def _is_deadlock(exc: Exception) -> bool:
+    return "deadlock detected" in str(exc).lower()
+
+
+def _delete_with_retry(obj, what: str, log=None) -> bool:
+    """
+    obj.delete(), retried when Netbox's Postgres aborts it as a deadlock (two
+    writers on the same rows, e.g. the device's interface counter). Any other
+    or a persistent failure is logged and returns False instead of raising, so
+    one failed delete never aborts a whole sync or rebuild.
+    """
+    log = log or logger
+    for attempt, pause in enumerate((0.0,) + DEADLOCK_RETRIES):
+        if pause:
+            time.sleep(pause)
+        try:
+            obj.delete()
+            return True
+        except Exception as exc:
+            if _is_deadlock(exc) and attempt < len(DEADLOCK_RETRIES):
+                log.warning("  %s: deadlock, retrying (%d/%d)", what, attempt + 1, len(DEADLOCK_RETRIES))
+                continue
+            log.error("  %s: delete failed: %s", what, exc)
+            return False
+    return False
+
+
+# One sync/rebuild at a time per Netbox device: the same device can arrive via
+# several IPs (an HA pair's WMI and RMIs, a cluster VIP), so the server's
+# per-IP in-flight dedup doesn't serialise them, and concurrent writers on one
+# device deadlock in Netbox's Postgres.
+_DEVICE_LOCKS: dict[int, threading.Lock] = {}
+_DEVICE_LOCKS_GUARD = threading.Lock()
+DEVICE_LOCK_WAIT_S = 900
+
+
+def _device_lock(device_id: int) -> threading.Lock:
+    with _DEVICE_LOCKS_GUARD:
+        return _DEVICE_LOCKS.setdefault(device_id, threading.Lock())
 
 
 _CISCO_ABBREV = [
@@ -3636,7 +3674,21 @@ def _remove_legacy_chassis_modules(nb: "NetboxClient", device, chassis: list[dic
     return removed
 
 
-def sync_device(
+def sync_device(*args, **kwargs) -> dict:
+    """
+    Sync one device (see _sync_device), serialised per Netbox device: the
+    per-device lock is taken inside once the device is resolved, and always
+    released here.
+    """
+    held: list = []
+    try:
+        return _sync_device(*args, _held_locks=held, **kwargs)
+    finally:
+        for lock in held:
+            lock.release()
+
+
+def _sync_device(
     ip: str,
     nd: NetdiscoClient,
     nb: NetboxClient,
@@ -3686,6 +3738,7 @@ def sync_device(
                                                            # resolves to a type; None = ["fixme-model"]
     prune: bool = False,
     dry_run: bool = True,
+    _held_locks: Optional[list] = None,
 ) -> dict:
     """
     Sync device fields, interfaces, MACs, IPs, modules, and SFPs.
@@ -3763,6 +3816,17 @@ def sync_device(
                 "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
 
     logger.debug("Netbox    device=%r  id=%s", nb_device.name, nb_device.id)
+
+    if _held_locks is not None:
+        lock = _device_lock(nb_device.id)
+        if lock.acquire(blocking=False):
+            _held_locks.append(lock)
+        else:
+            log.info("  %s is being synced already (another IP of the same device): waiting", nb_device.name)
+            if lock.acquire(timeout=DEVICE_LOCK_WAIT_S):
+                _held_locks.append(lock)
+            else:
+                log.warning("  %s still busy after %ds: syncing anyway", nb_device.name, DEVICE_LOCK_WAIT_S)
 
     if cf_touch:
         touch_value = dict(getattr(nb_device, "custom_fields", {}) or {}).get(cf_touch)

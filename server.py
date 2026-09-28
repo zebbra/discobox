@@ -1389,6 +1389,12 @@ async def rebuild(
     try:
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, _do_rebuild)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # one line in the log and a readable answer instead of an ASGI traceback
+        logger.error("rebuild failed for %s%s: %s", resolved_host, " [dry-run]" if dry_run else "", exc)
+        raise HTTPException(status_code=502, detail=f"rebuild failed: {exc}")
     finally:
         _release_host(resolved_host)
         with _in_flight_lock:
