@@ -266,6 +266,17 @@ reconcile_skipped_offline = Gauge(
     "Devices not enqueued by the last reconcile because liveness reported them down",
     **_reg,
 )
+library_unmatched = Gauge(
+    "discobox_library_unmatched_devices",
+    "DeviceTypes without a devicetype-library match (last /types/library report): devices using the type",
+    ["manufacturer", "model", "part_number"],
+    **_reg,
+)
+library_report_timestamp = Gauge(
+    "discobox_library_report_timestamp_seconds",
+    "Unix timestamp of the last /types/library report (the unmatched metric's age)",
+    **_reg,
+)
 
 liveness_query_up = Gauge(
     "discobox_liveness_query_up",
@@ -455,6 +466,8 @@ _LIBRARY_PATH:    Optional[str] = _cstr(_CFG, "library", "path", default="/opt/d
 _LIBRARY_OVERLAY: Optional[str] = _cstr(_CFG, "library", "overlay")
 _LIBRARY_ROLES:   list          = list(_c(_CFG, "library", "roles", default=[]) or [])
 _LIBRARY_MAPPING: dict          = _c(_CFG, "library", "device_types", default={}) or {}
+# library.roles dry-run report for the unmatched metric: this often (0 = only on /types/library calls)
+_LIBRARY_METRICS_INTERVAL: int  = int(_c(_CFG, "library", "metrics_interval", default=86400) or 0)
 _library: Optional[Library] = None
 _library_lock = threading.Lock()
 
@@ -788,6 +801,8 @@ async def lifespan(app):
         tasks.append(asyncio.create_task(_retry_loop()))
     except Exception as exc:
         logger.error("Failed to start retry loop: %s", exc)
+    if is_reconcile_leader and _LIBRARY_METRICS_INTERVAL > 0 and _LIBRARY_ROLES:
+        tasks.append(asyncio.create_task(_library_metrics_loop()))
     yield
     for task in tasks:
         task.cancel()
@@ -2015,12 +2030,54 @@ def types_library(
     if not roles and not types:
         raise HTTPException(400, "Nothing selected: pass role= and/or type= (or set library.roles)")
     try:
-        return sync_types(_get_netbox_client(), _get_library(), _LIBRARY_MAPPING, roles, types, apply=apply)
+        result = sync_types(_get_netbox_client(), _get_library(), _LIBRARY_MAPPING, roles, types, apply=apply)
+        _update_library_metrics(result)
+        return result
     except ValueError as exc:            # e.g. an unknown role
         raise HTTPException(400, str(exc))
     except Exception as exc:
         logger.error("types/library failed: %s", exc)
         raise HTTPException(502, f"types/library failed: {exc}")
+
+
+_library_metric_labels: dict[int, tuple] = {}   # DeviceType id → its unmatched series' labels
+
+
+def _update_library_metrics(result: dict) -> None:
+    """
+    Per reported DeviceType: an unmatched one's series = its device count; a
+    matched one's series is removed. Types outside this report keep theirs
+    (a type= run only updates what it selected). In memory only.
+    """
+    for item in result.get("types") or []:
+        old = _library_metric_labels.pop(item["id"], None)
+        if old:
+            try:
+                library_unmatched.remove(*old)
+            except KeyError:
+                pass
+        if not item.get("library"):
+            labels = (item.get("manufacturer") or "", item.get("model") or "", item.get("part_number") or "")
+            library_unmatched.labels(*labels).set(item.get("devices") or 0)
+            _library_metric_labels[item["id"]] = labels
+    library_report_timestamp.set(time.time())
+
+
+async def _library_metrics_loop() -> None:
+    """library.roles dry-run report every library.metrics_interval, so the metric exists without manual calls."""
+    loop = asyncio.get_running_loop()
+    await asyncio.sleep(60)          # let startup settle
+    while True:
+        try:
+            result = await loop.run_in_executor(None, partial(
+                sync_types, _get_netbox_client(), _get_library(), _LIBRARY_MAPPING, _LIBRARY_ROLES, [], apply=False,
+            ))
+            _update_library_metrics(result)
+            s = result.get("summary") or {}
+            logger.info("Library report: %s of %s type(s) unmatched", s.get("unmatched"), s.get("types"))
+        except Exception as exc:
+            logger.warning("Library report for the metrics failed: %s", getattr(exc, "detail", exc))
+        await asyncio.sleep(_LIBRARY_METRICS_INTERVAL)
 
 
 @app.get("/unknown-devices", summary="Devices seen in Netdisco webhooks but not found in Netbox")

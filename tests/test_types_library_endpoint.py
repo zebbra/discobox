@@ -234,3 +234,21 @@ def test_types_library_unknown_role_is_400(monkeypatch) -> None:
     with pytest.raises(HTTPException) as exc:
         server.types_library(GET, role=["4"], type=None, apply=False)
     assert exc.value.status_code == 400 and "Unknown device role" in exc.value.detail
+
+
+def test_library_unmatched_metric(monkeypatch) -> None:
+    monkeypatch.setattr(server, "_library_metric_labels", {})
+    server.library_unmatched.clear()
+    report = {"types": [
+        {"id": 1, "manufacturer": "Cisco", "model": "9120AX", "part_number": "9120AX", "devices": 937, "library": "x.yaml"},
+        {"id": 2, "manufacturer": "Cisco", "model": "CW9166I-E", "part_number": "CW9166I-E", "devices": 12, "library": None},
+    ]}
+    server._update_library_metrics(report)
+
+    def val(model, pn):
+        return server._custom_registry.get_sample_value(
+            "discobox_library_unmatched_devices", {"manufacturer": "Cisco", "model": model, "part_number": pn})
+    assert val("CW9166I-E", "CW9166I-E") == 12 and val("9120AX", "9120AX") is None
+    # later matched (e.g. after a mapping) → series gone; a report not naming it leaves others alone
+    server._update_library_metrics({"types": [dict(report["types"][1], library="y.yaml")]})
+    assert val("CW9166I-E", "CW9166I-E") is None
