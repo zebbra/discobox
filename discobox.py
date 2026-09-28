@@ -1963,6 +1963,7 @@ def _remove_orphaned_interfaces(
     """
     nd_lower = {str(n).lower() for n in nd_names if n}
     candidates = []
+    unowned_kept: list[str] = []
     for name, iface in existing.items():
         lname = name.lower()
         if lname in nd_lower or lname.startswith(PORT_BLACKLIST_PREFIXES):
@@ -1973,7 +1974,8 @@ def _remove_orphaned_interfaces(
                 log.debug("  %-40s orphan kept: owned by %r", name, owner)
                 continue
             if not owner and not include_unowned:
-                log.debug("  %-40s orphan kept: no %s (enable sync.remove_orphaned_interfaces)", name, source_cf)
+                if not getattr(iface, "cable", None):
+                    unowned_kept.append(name)
                 continue
         elif not include_unowned:
             continue
@@ -1981,6 +1983,13 @@ def _remove_orphaned_interfaces(
             log.debug("  %-40s orphan kept: has a cable", name)
             continue
         candidates.append((name, iface))
+    if unowned_kept:
+        # preview for sync.remove_orphaned_interfaces: what it would remove here
+        # (before the IP check and the brake, so an upper bound)
+        log.info(
+            "  %d source-less orphan(s) kept (sync.remove_orphaned_interfaces would remove them): %s",
+            len(unowned_kept), ", ".join(sorted(unowned_kept)[:10]) + (" …" if len(unowned_kept) > 10 else ""),
+        )
     if not candidates:
         return []
     limit = max(ORPHAN_DELETE_MIN_ALLOWED, len(existing) * max_percent // 100)
