@@ -159,8 +159,8 @@ class _Endpoint:
     def filter(self, **kw):
         out = self.records
         for k, v in kw.items():
-            if k == "role":
-                out = [r for r in out if r.role in v]
+            if k == "role_id":
+                out = [r for r in out if r.role_id in v]
             elif k == "device_type_id":
                 out = [r for r in out if r.device_type.id == v]
             else:
@@ -169,6 +169,9 @@ class _Endpoint:
 
     def get(self, id_):
         return next((r for r in self.records if r.id == id_), None)
+
+    def all(self):
+        return list(self.records)
 
     def count(self, **kw):
         rack = kw.pop("rack_id", None)
@@ -185,6 +188,7 @@ class _FakeNB:
     def __init__(self, dt, devices, tpl_ifaces=()):
         dcim = _Rec(
             device_types=_Endpoint([dt]), devices=_Endpoint(devices),
+            device_roles=_Endpoint([_Rec(id=5, slug="lwapp-ap", name="LWAPP AP"), _Rec(id=6, slug="switch", name="Switch")]),
             interface_templates=_Endpoint(tpl_ifaces), console_port_templates=_Endpoint(),
             console_server_port_templates=_Endpoint(), power_port_templates=_Endpoint(),
         )
@@ -196,7 +200,7 @@ def _fake(library: Path, racked: bool = False, tpl_ifaces=()):
     dt = _Rec(id=131, model="9120AX", slug="9120ax", part_number="", manufacturer=_Rec(name="Cisco"),
               weight=None, weight_unit=None, airflow=None, description="", comments="",
               u_height=1.0, device_count=2)
-    devices = [_Rec(id=i, role="lwapp-ap", device_type=dt, rack=_Rec(id=1) if racked else None) for i in (1, 2)]
+    devices = [_Rec(id=i, role_id=5, device_type=dt, rack=_Rec(id=1) if racked else None) for i in (1, 2)]
     return _FakeNB(dt, devices, tpl_ifaces), dt, Library([library])
 
 
@@ -231,3 +235,14 @@ def test_sync_types_unmatched_type_reported(library: Path) -> None:
     result = sync_types(nb, lib, {}, ["lwapp-ap"], [], apply=True)
     assert result["types"][0]["library"] is None
     assert result["summary"]["unmatched"] == 1 and dt.updates == []
+
+
+def test_roles_by_slug_name_or_id_unknown_is_a_clear_error(library: Path) -> None:
+    import pytest
+
+    from typesync import resolve_roles, select_types
+    nb, dt, _ = _fake(library)
+    assert resolve_roles(nb, ["lwapp-ap", "5", "LWAPP AP", "Switch"]) == [5, 5, 5, 6]
+    assert [t.id for t in select_types(nb, ["5"], [])] == [131]
+    with pytest.raises(ValueError, match=r"Unknown device role\(s\): 4 .*valid slugs: lwapp-ap, switch"):
+        resolve_roles(nb, ["4"])

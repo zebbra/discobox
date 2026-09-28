@@ -2002,7 +2002,7 @@ async def trigger_fix_tags(
 )
 def types_library(
     request: Request,
-    role: Annotated[Optional[list[str]], Query(description="Device role slug(s) whose DeviceTypes to include (default: library.roles)")] = None,
+    role: Annotated[Optional[list[str]], Query(description="Device role slug(s), name(s) or id(s) whose DeviceTypes to include (default: library.roles)")] = None,
     type: Annotated[Optional[list[str]], Query(description="DeviceType model/slug/part_number(s) to include")] = None,
     apply: Annotated[bool, Query(description="Write the changes (POST only)")] = False,
 ) -> dict:
@@ -2014,7 +2014,13 @@ def types_library(
     roles = role if role is not None else ([] if types else _LIBRARY_ROLES)
     if not roles and not types:
         raise HTTPException(400, "Nothing selected: pass role= and/or type= (or set library.roles)")
-    return sync_types(_get_netbox_client(), _get_library(), _LIBRARY_MAPPING, roles, types, apply=apply)
+    try:
+        return sync_types(_get_netbox_client(), _get_library(), _LIBRARY_MAPPING, roles, types, apply=apply)
+    except ValueError as exc:            # e.g. an unknown role
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        logger.error("types/library failed: %s", exc)
+        raise HTTPException(502, f"types/library failed: {exc}")
 
 
 @app.get("/unknown-devices", summary="Devices seen in Netdisco webhooks but not found in Netbox")

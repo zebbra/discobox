@@ -223,3 +223,14 @@ def test_discover_unknown_ip_default_and_errors(monkeypatch) -> None:
         with pytest.raises(HTTPException) as exc:
             server.discover(**kw)
         assert exc.value.status_code == code
+
+
+def test_types_library_unknown_role_is_400(monkeypatch) -> None:
+    def boom(*a, **kw):
+        raise ValueError("Unknown device role(s): 4 (valid slugs: switch)")
+    monkeypatch.setattr(server, "sync_types", boom)
+    monkeypatch.setattr(server, "_get_netbox_client", lambda: object())
+    monkeypatch.setattr(server, "_get_library", lambda: object())
+    with pytest.raises(HTTPException) as exc:
+        server.types_library(GET, role=["4"], type=None, apply=False)
+    assert exc.value.status_code == 400 and "Unknown device role" in exc.value.detail

@@ -228,11 +228,32 @@ def _nb_type_dict(dt) -> dict:
     }
 
 
+def resolve_roles(nb: NetboxClient, roles: list[str]) -> list[int]:
+    """Device role slugs, names or ids → ids. ValueError naming the unknown ones (and the valid slugs)."""
+    known = list(nb.nb.dcim.device_roles.all())
+    by_key: dict[str, int] = {}
+    for r in known:
+        by_key[str(r.id)] = r.id
+        by_key[_norm(r.slug)] = r.id
+        by_key[_norm(r.name)] = r.id
+    ids, unknown = [], []
+    for role in roles:
+        rid = by_key.get(str(role).strip()) or by_key.get(_norm(str(role)))
+        (ids.append(rid) if rid else unknown.append(str(role)))
+    if unknown:
+        raise ValueError(
+            f"Unknown device role(s): {', '.join(unknown)} (valid slugs: "
+            f"{', '.join(sorted(r.slug for r in known))})"
+        )
+    return ids
+
+
 def select_types(nb: NetboxClient, roles: list[str], types: list[str]) -> list:
-    """DeviceTypes used by devices of roles, plus those named in types (model/slug/part_number)."""
+    """DeviceTypes used by devices of roles (slug, name or id), plus those named in types (model/slug/part_number)."""
     selected: dict[int, object] = {}
     if roles:
-        ids = {d.device_type.id for d in nb.nb.dcim.devices.filter(role=roles) if d.device_type}
+        role_ids = resolve_roles(nb, roles)
+        ids = {d.device_type.id for d in nb.nb.dcim.devices.filter(role_id=role_ids) if d.device_type}
         for dt_id in ids:
             dt = nb.nb.dcim.device_types.get(dt_id)
             if dt:
