@@ -113,3 +113,39 @@ def test_ap_iface_fixups_clear_rf_role_on_non_wireless() -> None:
     assert _ap_iface_fixups(SimpleNamespace(rf_role=ch("ap")), "ieee802.11ax") == {}
     assert _ap_iface_fixups(SimpleNamespace(rf_role=None), "2.5gbase-t") == {}
     assert _ap_iface_fixups(None, "2.5gbase-t") == {}
+
+
+# ── orphaned interfaces (switch side) ──
+
+def _orphan_setup():
+    existing = {i.name: i for i in (
+        _If(1, "Gi1/0/1", source="netdisco"),                      # own orphan: removed
+        _If(2, "Gi1/0/2"),                                         # source-less: only with the flag
+        _If(3, "Gi1/0/3", source="bossy"),                         # foreign: never
+        _If(4, "Gi1/0/4", source="netdisco", cable=SimpleNamespace(id=1)),   # cabled: never
+        _If(5, "Gi1/0/5", source="netdisco"),                      # has IP: never
+    )}
+    existing.update({f"Te1/1/{n}": _If(10 + n, f"Te1/1/{n}", source="netdisco") for n in range(1, 16)})
+    nd_names = {f"Te1/1/{n}" for n in range(1, 16)}                # still reported by Netdisco
+    return existing, nd_names
+
+
+def test_orphans_own_always_unowned_only_with_flag_foreign_never() -> None:
+    from discobox import _remove_orphaned_interfaces
+    existing, nd = _orphan_setup()
+    assert _remove_orphaned_interfaces(_nb(ips_on={5}), existing, nd, 15, "source", "netdisco", 25,
+                                       logging.getLogger()) == ["Gi1/0/1"]
+    existing, nd = _orphan_setup()
+    assert sorted(_remove_orphaned_interfaces(_nb(ips_on={5}), existing, nd, 15, "source", "netdisco", 25,
+                                              logging.getLogger(), include_unowned=True)) == ["Gi1/0/1", "Gi1/0/2"]
+
+
+def test_orphan_brake_on_empty_or_mass_deletion() -> None:
+    from discobox import _remove_orphaned_interfaces
+    existing, _ = _orphan_setup()
+    # Netdisco reports no ports at all: nothing goes, whatever the ownership
+    assert _remove_orphaned_interfaces(_nb(), existing, set(), 0, "source", "netdisco", 25, logging.getLogger()) == []
+    assert not any(i.deleted for i in existing.values())
+    # 16 own orphans of 20 interfaces (80% > 25%, > the 5 always allowed): brake
+    assert _remove_orphaned_interfaces(_nb(), existing, {"Gi1/0/2"}, 1, "source", "netdisco", 25,
+                                       logging.getLogger()) == []

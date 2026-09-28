@@ -17,7 +17,13 @@ sync:
   #                         # physical interface answers it (soft frees it for reassignment).
   #   fortinet: threenode
   lldp_clear_stale: false     # also gates stale discobox-owned cable deletion
-  housekeeping: false
+  housekeeping: false       # stale template bays + empty dummy interfaces (main, mgmt)
+  # remove_orphaned_interfaces: false  # interfaces in Netbox Netdisco doesn't report: discobox's
+                            # own (source=netdisco) are always removed; source-less ones
+                            # (imported/manual) only with this; another source's never; never
+                            # with a cable or IP. Unset → follows housekeeping
+  orphan_delete_max_percent: 25  # brake: skip the cleanup when more than this share of a
+                            # device's interfaces would go, or Netdisco reports no ports
   pause_on_error: false
   touch_cooldown_days: 1    # skip a device's sync while its touch field (below) shows a
                             # real change within this many days; 0 disables the skip

@@ -1941,6 +1941,73 @@ def _remove_wlc_radio_ports(nb, device, source_cf: Optional[str], source_value: 
     return removed
 
 
+ORPHAN_DELETE_MIN_ALLOWED = 5    # small devices: this many orphans are always fine
+
+
+def _remove_orphaned_interfaces(
+    nb, existing: dict, nd_names: set, nd_port_count: int,
+    source_cf: Optional[str], source_value: str, max_percent: int, log,
+    include_unowned: bool = False,
+) -> list[str]:
+    """
+    Delete Netbox interfaces Netdisco doesn't report ("orphans"), returning
+    the deleted names. By source_cf: discobox's own (source_value, i.e.
+    created or adopted by discobox) always; unset (imported/manual) only with
+    include_unowned (sync.remove_orphaned_interfaces); another source's never.
+    Without source_cf, ownership can't be told apart: include_unowned decides
+    alone. Never one with a cable or an IP.
+    Mass-deletion brake: nothing is deleted when Netdisco reports no ports at
+    all, or when the deletable orphans exceed max_percent of the device's
+    interfaces (and ORPHAN_DELETE_MIN_ALLOWED) — a failed or partial discovery
+    must not wipe a device.
+    """
+    nd_lower = {str(n).lower() for n in nd_names if n}
+    candidates = []
+    for name, iface in existing.items():
+        lname = name.lower()
+        if lname in nd_lower or lname.startswith(PORT_BLACKLIST_PREFIXES):
+            continue
+        if source_cf:
+            owner = dict(getattr(iface, "custom_fields", {}) or {}).get(source_cf) or ""
+            if owner and owner != source_value:
+                log.debug("  %-40s orphan kept: owned by %r", name, owner)
+                continue
+            if not owner and not include_unowned:
+                log.debug("  %-40s orphan kept: no %s (enable sync.remove_orphaned_interfaces)", name, source_cf)
+                continue
+        elif not include_unowned:
+            continue
+        if getattr(iface, "cable", None):
+            log.debug("  %-40s orphan kept: has a cable", name)
+            continue
+        candidates.append((name, iface))
+    if not candidates:
+        return []
+    limit = max(ORPHAN_DELETE_MIN_ALLOWED, len(existing) * max_percent // 100)
+    if nd_port_count == 0 or len(candidates) > limit:
+        log.warning(
+            "  Orphan cleanup skipped: %d of %d interfaces would go (Netdisco ports: %d, limit %d) — "
+            "discovery incomplete? Check the device, or run a rebuild",
+            len(candidates), len(existing), nd_port_count, limit,
+        )
+        return []
+    deleted: list[str] = []
+    for name, iface in candidates:
+        # Netbox cascades an interface delete to its IPs: the device would lose them
+        if list(nb.nb.ipam.ip_addresses.filter(assigned_object_type="dcim.interface", assigned_object_id=iface.id)):
+            log.warning("  %-40s not in Netdisco but has IP(s) assigned: keeping", name)
+            continue
+        try:
+            iface.delete()
+            deleted.append(name)
+            log.debug("  %-40s deleted (not in Netdisco)", name)
+        except Exception as exc:
+            log.error("  %-40s could not delete orphan: %s", name, exc)
+    if deleted:
+        log.info("  Removed %d orphaned interface(s) (not in Netdisco)", len(deleted))
+    return deleted
+
+
 def _prune_ap_bays(nb, ap_dev, log) -> int:
     """
     Delete an AP's empty device bays and module bays: an AP has neither, so
@@ -2940,6 +3007,8 @@ def _ensure_member_ip(
     prefix_len: str,
     iface_name: str,
     log: logging.Logger,
+    source_cf: Optional[str] = None,
+    source_value: str = "netdisco",
 ) -> bool:
     """
     Ensure `device` has target_ip assigned to one of its interfaces and set
@@ -2957,6 +3026,8 @@ def _ensure_member_ip(
     iface = ifaces[0] if ifaces else None
     if not iface:
         iface = nb.nb.dcim.interfaces.create(device=device.id, name=iface_name, type="other")
+        if source_cf:
+            iface.update({"custom_fields": {source_cf: source_value}})
         log.info("  Created management interface %r on %r", iface_name, device.name)
 
     action = nb.upsert_ip(f"{target_ip}/{prefix_len}", iface)
@@ -2983,6 +3054,8 @@ def _ensure_ha_member_ip(
     verify_tls: bool,
     mgmt_iface_name: str,
     log: logging.Logger,
+    source_cf: Optional[str] = None,
+    source_value: str = "netdisco",
 ) -> bool:
     """
     Ensure `device` has its own management IP — resolved by its NetBox FQDN
@@ -3002,7 +3075,7 @@ def _ensure_ha_member_ip(
     except Exception as exc:
         log.warning("HA management-IP lookup for %r failed: %s", device.name, exc)
         return False
-    return _ensure_member_ip(nb, device, target_ip, prefix_len, mgmt_iface_name, log)
+    return _ensure_member_ip(nb, device, target_ip, prefix_len, mgmt_iface_name, log, source_cf, source_value)
 
 
 def _iface_lookup(existing: dict, name: str):
@@ -3555,6 +3628,10 @@ def sync_device(
     cf_controller: Optional[str] = "controller",  # object CF (→ Device) set on devices a
                                                    # controller reports, e.g. WLC → AP
     ap_prune_interfaces: bool = True,  # APs keep only GigabitEthernet0 + Dot11Radio<n>, no empty bays
+    remove_orphaned_interfaces: Optional[bool] = None,  # also delete source-less interfaces Netdisco
+                                                        # doesn't report (own ones always go); None =
+                                                        # follow housekeeping
+    orphan_delete_max_percent: int = 25,  # mass-deletion brake for that
     ap_type_confirmed_untag: Optional[list[str]] = None,  # tag slugs removed once an AP's model
                                                            # resolves to a type; None = ["fixme-model"]
     prune: bool = False,
@@ -3610,6 +3687,8 @@ def sync_device(
     log.info("sync start%s %s", " (rebuild)" if prune else "", nd_hostname or ip)
     log.debug("Netdisco  hostname=%r  ports=%d", nd_hostname, len(nd_ports))
 
+    remove_orphans = housekeeping if remove_orphaned_interfaces is None else remove_orphaned_interfaces
+    orphans_removed = 0
     ap_radio_ports = [p for p in nd_ports if _is_ap_port(p)]
     ap_port_count = len(ap_radio_ports)
     if ap_port_count:
@@ -3715,6 +3794,7 @@ def sync_device(
                             nb, member, mgmt_prefix, ha_metrics_url, ha_metrics_instance_label,
                             ha_metrics_metric, ha_metrics_target_label, ha_metrics_timeout,
                             ha_metrics_tls_verify, ha_mgmt_iface_name, log,
+                            source_cf=iface_source_cf, source_value=iface_source_value,
                         ):
                             device_changed = True
 
@@ -3780,7 +3860,8 @@ def sync_device(
                     # hostname mismatch redirected us here) it's the floating/cluster
                     # address, so it belongs on the VIP device, not wherever a prior
                     # vip_mode may have left it.
-                    if _ensure_member_ip(nb, vip_device, ip, mgmt_prefix, ha_mgmt_iface_name, log):
+                    if _ensure_member_ip(nb, vip_device, ip, mgmt_prefix, ha_mgmt_iface_name, log,
+                                         iface_source_cf, iface_source_value):
                         device_changed = True
                 try:
                     vc_action, _ = nb.upsert_virtual_chassis(vc_name, vc_members)
@@ -3815,6 +3896,7 @@ def sync_device(
                             nb, member, mgmt_prefix, ha_metrics_url, ha_metrics_instance_label,
                             ha_metrics_metric, ha_metrics_target_label, ha_metrics_timeout,
                             ha_metrics_tls_verify, ha_mgmt_iface_name, log,
+                            source_cf=iface_source_cf, source_value=iface_source_value,
                         ):
                             device_changed = True
 
@@ -4577,42 +4659,16 @@ def sync_device(
         for d in vss_ifaces.values():
             all_existing.update(d)
         all_existing.update(existing_ifaces)
-        orphaned_deleted = 0
-        orphaned_errors = 0
-        nd_names_lower = {str(n).lower() for n in nd_names if n}
-        for name, iface in list(all_existing.items()):
-            if name.lower() not in nd_names_lower and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
-                if housekeeping:
-                    if iface_source_cf:
-                        owner = (dict(getattr(iface, "custom_fields", {}) or {}).get(iface_source_cf) or "")
-                        if owner and owner != iface_source_value:
-                            log.debug("  %-40s skipping orphan delete: owned by %r", name, owner)
-                            continue
-                    # Never delete an interface that still holds IPs (e.g. a manually
-                    # created mgmt interface): Netbox cascades the delete to the IPs
-                    # and the device silently loses its management address.
-                    ips = list(nb.nb.ipam.ip_addresses.filter(
-                        assigned_object_type="dcim.interface",
-                        assigned_object_id=iface.id,
-                    ))
-                    if ips:
-                        log.warning(
-                            "  %-40s not in Netdisco but has %d IP(s) assigned: keeping",
-                            name, len(ips),
-                        )
-                        continue
-                    try:
-                        iface.delete()
-                        orphaned_deleted += 1
-                        log.debug("  %-40s deleted (not in Netdisco)", name)
-                        existing_ifaces.pop(name, None)
-                        for m in vss_ifaces.values():
-                            m.pop(name, None)
-                    except Exception as exc:
-                        orphaned_errors += 1
-                        log.error("  %-40s could not delete orphan: %s", name, exc)
-        if housekeeping and (orphaned_deleted or orphaned_errors):
-            log.debug("Orphaned interfaces: deleted=%d errors=%d", orphaned_deleted, orphaned_errors)
+        # own orphans always; source-less ones only with remove_orphans
+        for name in _remove_orphaned_interfaces(
+            nb, all_existing, nd_names, len(nd_ports), iface_source_cf, iface_source_value,
+            orphan_delete_max_percent, log, include_unowned=remove_orphans,
+        ):
+            orphans_removed += 1
+            device_changed = True
+            existing_ifaces.pop(name, None)
+            for m in vss_ifaces.values():
+                m.pop(name, None)
 
         # Stack cables: class=other entries with a real model and serial
         # (e.g. STACK-T1-50CM stackwise cables). One inventory item per StackPort entry.
@@ -4757,42 +4813,16 @@ def sync_device(
         for d in vss_ifaces.values():
             all_existing.update(d)
         all_existing.update(existing_ifaces)
-        orphaned_deleted = 0
-        orphaned_errors = 0
-        nd_names_lower = {str(n).lower() for n in nd_names if n}
-        for name, iface in list(all_existing.items()):
-            if name.lower() not in nd_names_lower and not name.lower().startswith(PORT_BLACKLIST_PREFIXES):
-                if housekeeping:
-                    if iface_source_cf:
-                        owner = (dict(getattr(iface, "custom_fields", {}) or {}).get(iface_source_cf) or "")
-                        if owner and owner != iface_source_value:
-                            log.debug("  %-40s skipping orphan delete: owned by %r", name, owner)
-                            continue
-                    # Never delete an interface that still holds IPs (e.g. a manually
-                    # created mgmt interface): Netbox cascades the delete to the IPs
-                    # and the device silently loses its management address.
-                    ips = list(nb.nb.ipam.ip_addresses.filter(
-                        assigned_object_type="dcim.interface",
-                        assigned_object_id=iface.id,
-                    ))
-                    if ips:
-                        log.warning(
-                            "  %-40s not in Netdisco but has %d IP(s) assigned: keeping",
-                            name, len(ips),
-                        )
-                        continue
-                    try:
-                        iface.delete()
-                        orphaned_deleted += 1
-                        log.debug("  %-40s deleted (not in Netdisco)", name)
-                        existing_ifaces.pop(name, None)
-                        for m in vss_ifaces.values():
-                            m.pop(name, None)
-                    except Exception as exc:
-                        orphaned_errors += 1
-                        log.error("  %-40s could not delete orphan: %s", name, exc)
-        if housekeeping and (orphaned_deleted or orphaned_errors):
-            log.debug("Orphaned interfaces: deleted=%d errors=%d", orphaned_deleted, orphaned_errors)
+        # own orphans always; source-less ones only with remove_orphans
+        for name in _remove_orphaned_interfaces(
+            nb, all_existing, nd_names, len(nd_ports), iface_source_cf, iface_source_value,
+            orphan_delete_max_percent, log, include_unowned=remove_orphans,
+        ):
+            orphans_removed += 1
+            device_changed = True
+            existing_ifaces.pop(name, None)
+            for m in vss_ifaces.values():
+                m.pop(name, None)
 
     # Sort: parent interfaces before subinterfaces (dot-notation) so parents exist when children are created
     nd_ports_sorted = sorted(nd_ports, key=lambda p: (1 if "." in (p.get("port") or p.get("descr") or "") else 0))
@@ -5350,6 +5380,7 @@ def sync_device(
         _fmt_aps(ap_counts) if sync_modules else None,
         _fmt("stackcables", _stack_cable_counts) if _stack_cable_counts else None,
         _fmt_cables(cable_counts),
+        f"orphans=-{orphans_removed}" if orphans_removed else None,
     ]))
     summary = ("  " + "  ".join(parts)) if parts else "  no changes"
     errors_suffix = f"  errors={total_errors}" if total_errors else ""

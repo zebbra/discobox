@@ -425,6 +425,11 @@ _STACK_MEMBERS_ONLY_INCREASE: bool  = _cbool(_CFG, "custom_fields", "stack_membe
 _CF_TOUCH:           Optional[str]  = _cstr(_CFG, "custom_fields", "touch", default="netdisco_last_update")
 _CF_CONTROLLER:      Optional[str]  = _cstr(_CFG, "custom_fields", "controller", default="controller")
 _AP_PRUNE_INTERFACES: bool          = _cbool(_CFG, "aps", "prune_interfaces", default=True)
+# Orphaned interfaces (in Netbox, not in Netdisco): discobox's own always go; the
+# source-less (imported/manual) ones only with this. Unset → follows housekeeping.
+_REMOVE_ORPHANED_RAW = _c(_CFG, "sync", "remove_orphaned_interfaces", default=None)
+_REMOVE_ORPHANED: Optional[bool]    = None if _REMOVE_ORPHANED_RAW is None else _cbool(_CFG, "sync", "remove_orphaned_interfaces")
+_ORPHAN_DELETE_MAX_PERCENT: int     = int(_c(_CFG, "sync", "orphan_delete_max_percent", default=25))
 _AP_TYPE_CONFIRMED_UNTAG: list      = list(_c(_CFG, "aps", "type_confirmed_untag", default=["fixme-model"]) or [])
 _TOUCH_COOLDOWN_DAYS: int           = int(_c(_CFG, "sync", "touch_cooldown_days", default=1))
 
@@ -1097,6 +1102,8 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             cf_controller=_CF_CONTROLLER,
             ap_prune_interfaces=_AP_PRUNE_INTERFACES,
             ap_type_confirmed_untag=_AP_TYPE_CONFIRMED_UNTAG,
+            remove_orphaned_interfaces=_REMOVE_ORPHANED,
+            orphan_delete_max_percent=_ORPHAN_DELETE_MAX_PERCENT,
         )
         status = "success" if result.get("ok") else "error"
         if result.get("reason") == "discovery_incomplete":
@@ -1355,6 +1362,7 @@ async def rebuild(
                 cf_controller=_CF_CONTROLLER,
                 ap_prune_interfaces=_AP_PRUNE_INTERFACES,
                 ap_type_confirmed_untag=_AP_TYPE_CONFIRMED_UNTAG,
+                orphan_delete_max_percent=_ORPHAN_DELETE_MAX_PERCENT,
                 prune=True, dry_run=dry_run,
             )
         finally:
