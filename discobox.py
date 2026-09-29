@@ -12,6 +12,7 @@ import ipaddress
 import json
 import logging
 import os
+import random
 import re
 import sys
 import threading
@@ -418,6 +419,25 @@ class NetdiscoClient:
 
 # ── Netbox client ──────────────────────────────────────────────────────────────
 
+READ_RETRY_BACKOFF_S = 2.0      # pauses before read retries: 2, 4, 8 s (+ up to 1 s jitter)
+READ_RETRY_BACKOFF_MAX_S = 30.0
+
+
+class _ReadRetry(urllib3.util.Retry):
+    """
+    Retry whose first retry already waits: urllib3 retries the first failure
+    immediately (0, 1, 2 s with factor 0.5), which gives an overloaded server
+    no time to recover. Here: READ_RETRY_BACKOFF_S * 2^(n-1), capped, plus
+    jitter so parallel syncs don't come back in lockstep.
+    """
+    def get_backoff_time(self) -> float:
+        errors = len([h for h in self.history if h is not None])
+        if errors == 0:
+            return 0.0
+        base = min(READ_RETRY_BACKOFF_MAX_S, self.backoff_factor * (2 ** (errors - 1)))
+        return base + random.uniform(0, self.backoff_jitter)
+
+
 def _mount_read_retries(session: requests.Session) -> None:
     """
     Retry idempotent reads (GET/HEAD) on a dropped connection, e.g. a server or
@@ -428,11 +448,11 @@ def _mount_read_retries(session: requests.Session) -> None:
     may have been applied already. After the last attempt the response is
     returned as-is, so callers see the same error as before.
     """
-    retry = urllib3.util.Retry(
+    retry = _ReadRetry(
         total=3, connect=3, read=3, status=3, other=0,
         allowed_methods=frozenset({"GET", "HEAD"}),
         status_forcelist=(500, 502, 503),
-        backoff_factor=0.5, raise_on_status=False,
+        backoff_factor=READ_RETRY_BACKOFF_S, backoff_jitter=1.0, raise_on_status=False,
     )
     adapter = requests.adapters.HTTPAdapter(max_retries=retry)
     session.mount("http://", adapter)

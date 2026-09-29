@@ -104,3 +104,15 @@ def test_reads_retry_on_5xx_but_not_504_or_writes() -> None:
     retry = discobox._ChangelogSession().get_adapter("https://netbox.example/api/").max_retries
     assert retry.is_retry("GET", 500) and retry.is_retry("GET", 503)
     assert not retry.is_retry("GET", 504) and not retry.is_retry("PATCH", 500) and not retry.is_retry("POST", 503)
+
+
+def test_read_retry_pauses_grow_from_the_first_retry(monkeypatch) -> None:
+    import discobox
+    monkeypatch.setattr(discobox.random, "uniform", lambda a, b: 0.0)
+    retry = discobox._ChangelogSession().get_adapter("https://netbox.example/api/").max_retries
+    assert retry.get_backoff_time() == 0.0
+    pauses = []
+    for _ in range(3):
+        retry = retry.increment(method="GET", url="/x", error=discobox.urllib3.exceptions.ProtocolError("reset"))
+        pauses.append(retry.get_backoff_time())
+    assert pauses == [2.0, 4.0, 8.0] and isinstance(retry, discobox._ReadRetry)
