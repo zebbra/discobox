@@ -2241,20 +2241,24 @@ def _ap_radios(radio_ports: list[dict], radio_mac: str) -> list[str]:
     ]
 
 
-def _ap_note_block(parsed: dict, controller_name: str, radios: list[str], controller_id: Optional[int] = None) -> str:
+def _ap_note_block(
+    parsed: dict, controller_name: str, radios: list[str], controller_id: Optional[int] = None,
+    uplink_id: Optional[int] = None,
+) -> str:
     """
     The discobox-owned part of an AP's comments (Markdown, marker-delimited).
     Only slow-changing facts: no DHCP IP and no timestamp, so the block (and
     the AP's changelog) only changes when something real does. Links are
-    Netbox-relative: the controller by id, the uplink switch (known only by
-    the name the WLC reports) as a device search on its short name.
+    Netbox-relative: the controller by id, the uplink switch by id when it
+    resolved (see _resolve_ap_uplinks), else as a device search on its short name.
     """
     # as the WLC shows it ("show ap summary" Location column): "<site tag>/<tag>"
     tag = "/".join(x for x in (parsed.get("site_tag"), parsed.get("tag")) if x)
     uplink = parsed.get("uplink_name")
     if uplink:
         short = uplink.split(".", 1)[0]
-        uplink = f"[{uplink}](/dcim/devices/?q={quote(short)})"
+        href = f"/dcim/devices/{uplink_id}/" if uplink_id else f"/dcim/devices/?q={quote(short)}"
+        uplink = f"[{uplink}]({href})"
         if parsed.get("uplink_ip"):
             uplink += f" ({parsed['uplink_ip']})"
     controller = f"[{controller_name}](/dcim/devices/{controller_id}/)" if controller_id else controller_name
@@ -2275,6 +2279,67 @@ def _ap_note_block(parsed: dict, controller_name: str, radios: list[str], contro
         lines += [f"     - {r}" for r in radios]
     lines.append(AP_NOTE_END)
     return "\n".join(lines)
+
+
+def _ap_uplink_key(parsed: dict) -> tuple[str, str]:
+    return (parsed.get("uplink_name") or "", parsed.get("uplink_ip") or "")
+
+
+def _chunks(items: list, size: int = 50):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
+def _resolve_ap_uplinks(nb, parsed_aps: list[dict], log=None) -> dict[tuple[str, str], int]:
+    """
+    Netbox device id per AP uplink (uplink_name, uplink_ip) from the WLC's AP
+    descriptions, in bulk: a few chunked queries per pass for all distinct
+    switches, never one per AP. Per uplink, the first unambiguous hit of:
+      1. uplink_ip = a device's primary IPv4
+      2. exact name, the reported one or its short name (case-insensitive)
+      3. a unique device whose name starts with "<short>." (FQDN vs short name)
+    Unresolved uplinks are left out (the note keeps its search link).
+    """
+    log = log or logger
+    keys = {_ap_uplink_key(p) for p in parsed_aps if p.get("uplink_name") or p.get("uplink_ip")}
+    if not keys:
+        return {}
+    dcim, ipam = nb.nb.dcim, nb.nb.ipam
+
+    by_ip: dict[str, set] = {}
+    ips = sorted({ip for _, ip in keys if ip})
+    for chunk in _chunks(ips):
+        addr_ids = [a.id for a in ipam.ip_addresses.filter(address=chunk)]
+        for ids in _chunks(addr_ids):
+            for d in dcim.devices.filter(primary_ip4_id=ids):
+                host = str(getattr(d.primary_ip4, "address", "") or "").split("/")[0]
+                by_ip.setdefault(host, set()).add(d.id)
+
+    by_name: dict[str, set] = {}
+    names = sorted({n.lower() for n, _ in keys if n} | {n.split(".", 1)[0].lower() for n, _ in keys if n})
+    for chunk in _chunks(names):
+        for d in dcim.devices.filter(name__ie=chunk):
+            by_name.setdefault((d.name or "").lower(), set()).add(d.id)
+    by_prefix: dict[str, set] = {}
+    shorts = sorted({n.split(".", 1)[0].lower() for n, _ in keys if n})
+    unresolved = [s for s in shorts if s not in by_name]
+    for chunk in _chunks(unresolved):
+        for d in dcim.devices.filter(name__isw=chunk):
+            lname = (d.name or "").lower()
+            short = lname.split(".", 1)[0]
+            if short in unresolved and lname.startswith(short + "."):
+                by_prefix.setdefault(short, set()).add(d.id)
+
+    out: dict[tuple[str, str], int] = {}
+    for name, ip in keys:
+        short = name.split(".", 1)[0].lower()
+        for hits in (by_ip.get(ip) if ip else None, by_name.get(name.lower()) if name else None,
+                     by_name.get(short) if name else None, by_prefix.get(short) if name else None):
+            if hits and len(hits) == 1:
+                out[(name, ip)] = next(iter(hits))
+                break
+    log.debug("AP uplinks: %d of %d resolved to a Netbox device", len(out), len(keys))
+    return out
 
 
 def _merge_note_block(comments: str, block: str, block_re: re.Pattern) -> Optional[str]:
@@ -4610,6 +4675,8 @@ def _sync_device(
         ap_untyped: dict[str, int] = {}   # AP model → count of APs no existing DeviceType matched
         ap_untag = {t.lower() for t in (["fixme-model"] if ap_type_confirmed_untag is None else ap_type_confirmed_untag)}
 
+        ap_uplink_ids: dict[tuple[str, str], int] = {}
+
         def _update_ap_device(ap_dev, ch: dict, parsed: dict) -> str:
             model = ch.get("model") or ""
             serial = ch.get("serial") or ""
@@ -4656,7 +4723,8 @@ def _sync_device(
             radios = _ap_radios(ap_radio_ports, parsed.get("dot3_mac") or "")
             new_comments = _merge_ap_note(
                 getattr(ap_dev, "comments", "") or "",
-                _ap_note_block(parsed, nb_device.name, radios, controller_id=nb_device.id),
+                _ap_note_block(parsed, nb_device.name, radios, controller_id=nb_device.id,
+                               uplink_id=ap_uplink_ids.get(_ap_uplink_key(parsed))),
             )
             if new_comments is not None:
                 patch["comments"] = new_comments
@@ -4725,6 +4793,13 @@ def _sync_device(
         ap_now = time.time()
         ap_full_pass, ap_retry = _plan_ap_pass(ap_state, ap_fp, ap_full, ap_now) if ap_modules else (True, set())
         ap_pending: list[str] = []      # not found / failed this pass: retried on the next skipped one
+        # uplink switch ids for the note links: once per pass, in bulk, only for the APs it touches
+        ap_parsed = [_parse_ap_description(m.get("description") or "") for m in ap_modules]
+        ap_parsed = [p for p in ap_parsed if p.get("hostname") and (ap_full_pass or p["hostname"] in ap_retry)]
+        try:
+            ap_uplink_ids.update(_resolve_ap_uplinks(nb, ap_parsed, log))
+        except Exception as exc:
+            log.warning("  AP uplink lookup failed (notes keep the search links): %s", exc)
         for ap_mod in ap_modules:
             parsed = _parse_ap_description(ap_mod.get("description") or "")
             hostname = parsed.get("hostname")
