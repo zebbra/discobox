@@ -193,6 +193,12 @@ aps_total = Counter(
     ["action"],   # updated | unchanged | not_found | skipped | error
     **_reg,
 )
+rebuilds_total = Counter(
+    "discobox_rebuilds_total",
+    "/rebuild calls by outcome (error = the rebuild aborted, e.g. Netbox/Netdisco failed)",
+    ["status", "dry_run"],   # success | error | skipped
+    **_reg,
+)
 sync_errors_total = Counter(
     "discobox_sync_errors_total",
     "Errors inside completed syncs, all parts (interfaces, IPs, modules, SFPs, PoE, APs, stack cables); "
@@ -1562,6 +1568,7 @@ async def rebuild(
     except Exception as exc:
         # one line in the log and a readable answer instead of an ASGI traceback
         logger.error("rebuild failed for %s%s: %s", resolved_host, " [dry-run]" if dry_run else "", exc)
+        rebuilds_total.labels(status="error", dry_run=str(dry_run).lower()).inc()
         raise HTTPException(status_code=502, detail=f"rebuild failed: {exc}")
     finally:
         _release_host(resolved_host)
@@ -1570,6 +1577,10 @@ async def rebuild(
 
     reason = result.get("reason")
     status = "skipped" if reason else ("ok" if result.get("ok") else "error")
+    rebuilds_total.labels(status="success" if status == "ok" else status, dry_run=str(dry_run).lower()).inc()
+    if "errors" in result and result.get("hostname"):
+        sync_errors_total.inc(result["errors"])
+        device_sync_errors.labels(instance=result["hostname"]).set(result["errors"])
     prune_result = result.get("prune", {})
     logger.info(
         "rebuild %s for %s%s: %s", status, resolved_host, " [dry-run]" if dry_run else "",

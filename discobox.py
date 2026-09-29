@@ -34,6 +34,22 @@ logging.basicConfig(
 logger = logging.getLogger("discobox")
 
 
+# Errors a sync logs, counted per thread: every ERROR record on a discobox
+# logger while this thread runs a sync (see sync_device), so an error that's
+# only logged (a failed note update, a fan/PSU, …) still reaches the result's
+# "errors" and the metrics, without each call site keeping its own counter.
+_sync_error_tls = threading.local()
+
+
+class _SyncErrorCounter(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        if getattr(_sync_error_tls, "count", None) is not None:
+            _sync_error_tls.count += 1
+
+
+logger.addHandler(_SyncErrorCounter(level=logging.ERROR))
+
+
 class _DeviceLogAdapter(logging.LoggerAdapter):
     """Prefixes every message with a device IP without creating a new named
     Logger per device — logging.getLogger() caches loggers for the life of the
@@ -405,12 +421,17 @@ class NetdiscoClient:
 def _mount_read_retries(session: requests.Session) -> None:
     """
     Retry idempotent reads (GET/HEAD) on a dropped connection, e.g. a server or
-    proxy closing an idle keep-alive connection mid-run ("RemoteDisconnected").
-    Writes are never retried: a POST/PATCH/DELETE may have been applied already.
+    proxy closing an idle keep-alive connection mid-run ("RemoteDisconnected"),
+    and on a transient server error (500, 502, 503). Not on 504: a gateway
+    timeout usually repeats (the request is too slow for the proxy), so a retry
+    only multiplies the load. Writes are never retried: a POST/PATCH/DELETE
+    may have been applied already. After the last attempt the response is
+    returned as-is, so callers see the same error as before.
     """
     retry = urllib3.util.Retry(
-        total=3, connect=3, read=3, status=0, other=0,
+        total=3, connect=3, read=3, status=3, other=0,
         allowed_methods=frozenset({"GET", "HEAD"}),
+        status_forcelist=(500, 502, 503),
         backoff_factor=0.5, raise_on_status=False,
     )
     adapter = requests.adapters.HTTPAdapter(max_retries=retry)
@@ -3916,11 +3937,15 @@ def sync_device(*args, **kwargs) -> dict:
     released here.
     """
     held: list = []
+    outer_count = getattr(_sync_error_tls, "count", None)     # a sync inside a sync: keep counting
+    _sync_error_tls.count = 0
     try:
         return _sync_device(*args, _held_locks=held, **kwargs)
     finally:
         for lock in held:
             lock.release()
+        inner = _sync_error_tls.count
+        _sync_error_tls.count = None if outer_count is None else outer_count + inner
 
 
 def _sync_device(
@@ -5732,8 +5757,12 @@ def _sync_device(
     _stack_cable_counts = locals().get("stack_cable_counts")
     total_errors = sum(
         c.get("error", 0)
-        for c in [counts, ip_counts, mod_counts, sfp_counts, poe_counts, ap_counts]
+        for c in [counts, ip_counts, mod_counts, sfp_counts, poe_counts, ap_counts,
+                  locals().get("fan_counts") or {}, locals().get("psu_counts") or {}]
     ) + (_stack_cable_counts.get("error", 0) if _stack_cable_counts else 0)
+    # plus errors only logged (note updates, …): the higher of the two, as most
+    # counted errors are logged too
+    total_errors = max(total_errors, getattr(_sync_error_tls, "count", None) or 0)
     def _fmt_aps(c: dict) -> Optional[str]:
         # Always shown for a WLC: an all-unchanged AP run is still worth seeing.
         total = sum(c.values())

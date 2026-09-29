@@ -73,3 +73,34 @@ def test_sync_device_releases_its_lock_on_error(monkeypatch) -> None:
     assert lock.acquire(blocking=False)        # released by the wrapper
     lock.release()
 
+
+
+def test_logged_errors_count_per_sync_thread(monkeypatch) -> None:
+    import logging
+    import threading
+
+    import discobox
+
+    def fake(*a, _held_locks=None, **kw):
+        log = discobox._DeviceLogAdapter(discobox.logger, {"ip": "192.0.2.1"})
+        log.error("note update error")                           # only logged, not counted anywhere
+        logging.getLogger("discobox.sync").error("child logger")  # propagates to "discobox"
+        log.warning("not an error")
+        return {"ok": True, "seen": discobox._sync_error_tls.count}
+    monkeypatch.setattr(discobox, "_sync_device", fake)
+    assert discobox.sync_device()["seen"] == 2
+    assert discobox._sync_error_tls.count is None             # reset afterwards
+    discobox.logger.error("outside a sync: not counted, no crash")
+
+    other: list = []
+    t = threading.Thread(target=lambda: other.append(getattr(discobox._sync_error_tls, "count", None)))
+    t.start()
+    t.join()
+    assert other == [None]                                     # per thread
+
+
+def test_reads_retry_on_5xx_but_not_504_or_writes() -> None:
+    import discobox
+    retry = discobox._ChangelogSession().get_adapter("https://netbox.example/api/").max_retries
+    assert retry.is_retry("GET", 500) and retry.is_retry("GET", 503)
+    assert not retry.is_retry("GET", 504) and not retry.is_retry("PATCH", 500) and not retry.is_retry("POST", 503)
