@@ -5765,6 +5765,7 @@ def _sync_device(
     )
     return {
         "ok": counts["error"] == 0,
+        "errors": total_errors,   # every part (interfaces, IPs, modules, SFPs, PoE, APs, stack cables)
         "hostname": nb_device.name,
         "interfaces": counts,
         "ips": ip_counts,

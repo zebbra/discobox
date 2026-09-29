@@ -383,6 +383,7 @@ When a sync times out but the circuit breaker has **not** tripped (isolated fail
 - If the queue is full when a retry becomes due, it is deferred 60s and re-attempted
   (the attempt is not consumed) rather than dropped
 - Metric: `discobox_sync_retries_total`
+- Errors inside a sync that still completes (an AP, IP, module, … that failed; `errors=` in the `sync done` line) don't make it an `error` in `discobox_syncs_total`: they count in `discobox_sync_errors_total` and per device in `discobox_device_last_sync_errors{instance}`; APs also in `discobox_aps_total{action}`
 
 ---
 

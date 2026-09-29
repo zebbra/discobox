@@ -279,3 +279,26 @@ def test_types_library_needs_a_selection_bare_counts(calls) -> None:
     assert exc.value.status_code == 400
     server.types_library(GET, role=None, type=None, bare=True, apply=False)
     assert calls[-1] == {"roles": [], "types": [], "apply": False, "bare": True}   # no default roles pulled in
+
+
+def test_ap_and_partial_errors_reach_the_metrics(monkeypatch) -> None:
+    def fake_sync(**kw):
+        return {"ok": True, "errors": 2, "hostname": "wlc-test-1", "interfaces": {"unchanged": 3},
+                "aps": {"updated": 1, "unchanged": 5, "not_found": 0, "error": 2, "skipped": 0}}
+    monkeypatch.setattr(server, "sync_device", fake_sync)
+    monkeypatch.setattr(server, "_get_netdisco_client", lambda: object())
+    monkeypatch.setattr(server, "_get_netbox_client", lambda: object())
+    monkeypatch.setattr(server, "_is_paused", lambda: False)
+    monkeypatch.setattr(server, "_release_host", lambda h: None)
+    monkeypatch.setattr(server, "_mark_synced", lambda h: None)
+    reg = server._custom_registry
+
+    def get(name, labels=None):
+        return reg.get_sample_value(name, labels or {}) or 0
+    before = (get("discobox_aps_total", {"action": "error"}), get("discobox_sync_errors_total"))
+    server.sync_in_progress.inc()           # _run_sync decrements it
+    server._run_sync("192.0.2.250", True, True, True, True, True, False)
+    assert get("discobox_aps_total", {"action": "error"}) - before[0] == 2
+    assert get("discobox_sync_errors_total") - before[1] == 2
+    assert get("discobox_device_last_sync_errors", {"instance": "wlc-test-1"}) == 2
+    assert get("discobox_device_last_sync_failed", {"instance": "wlc-test-1"}) == 0   # still a success

@@ -187,6 +187,24 @@ sfps_total = Counter(
     ["action"],   # created | updated | unchanged | error
     **_reg,
 )
+aps_total = Counter(
+    "discobox_aps_total",
+    "Access points processed across all WLC syncs",
+    ["action"],   # updated | unchanged | not_found | skipped | error
+    **_reg,
+)
+sync_errors_total = Counter(
+    "discobox_sync_errors_total",
+    "Errors inside completed syncs, all parts (interfaces, IPs, modules, SFPs, PoE, APs, stack cables); "
+    "a sync with some of these can still count as success in discobox_syncs_total",
+    **_reg,
+)
+device_sync_errors = Gauge(
+    "discobox_device_last_sync_errors",
+    "Errors inside the last completed sync of each device (all parts; 0 = clean)",
+    ["instance"],
+    **_reg,
+)
 syncs_skipped_total = Counter(
     "discobox_syncs_skipped_total",
     "Sync requests dropped because the host was already being synced",
@@ -1331,6 +1349,11 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             modules_total.labels(action=action).inc(count)
         for action, count in result.get("sfps", {}).items():
             sfps_total.labels(action=action).inc(count)
+        for action, count in result.get("aps", {}).items():
+            aps_total.labels(action=action).inc(count)
+        if "errors" in result:
+            sync_errors_total.inc(result["errors"])
+            device_sync_errors.labels(instance=instance).set(result["errors"])
         if result.get("ha_vip"):
             ha_vip_total.inc()
         logger.info("Sync %s for %s in %.1fs", status, instance, elapsed)
