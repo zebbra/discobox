@@ -419,6 +419,7 @@ class NetdiscoClient:
 
 # ── Netbox client ──────────────────────────────────────────────────────────────
 
+READ_RETRIES = 3
 READ_RETRY_BACKOFF_S = 2.0      # pauses before read retries: 2, 4, 8 s (+ up to 1 s jitter)
 READ_RETRY_BACKOFF_MAX_S = 30.0
 
@@ -430,6 +431,17 @@ class _ReadRetry(urllib3.util.Retry):
     no time to recover. Here: READ_RETRY_BACKOFF_S * 2^(n-1), capped, plus
     jitter so parallel syncs don't come back in lockstep.
     """
+    def increment(self, method=None, url=None, response=None, error=None, _pool=None, _stacktrace=None):
+        new = super().increment(method, url, response, error, _pool, _stacktrace)
+        # urllib3 logs a retry after a status code (500/502/503) only at DEBUG,
+        # and one after a connection error without the pause: one WARNING for both
+        if response is not None and error is None and not new.is_exhausted():
+            logger.warning(
+                "Retrying %s %s after HTTP %s (retry %d of %d, in ~%.0fs)",
+                method, url, response.status, len(new.history), READ_RETRIES, new.get_backoff_time(),
+            )
+        return new
+
     def get_backoff_time(self) -> float:
         errors = len([h for h in self.history if h is not None])
         if errors == 0:
@@ -449,7 +461,7 @@ def _mount_read_retries(session: requests.Session) -> None:
     returned as-is, so callers see the same error as before.
     """
     retry = _ReadRetry(
-        total=3, connect=3, read=3, status=3, other=0,
+        total=READ_RETRIES, connect=READ_RETRIES, read=READ_RETRIES, status=READ_RETRIES, other=0,
         allowed_methods=frozenset({"GET", "HEAD"}),
         status_forcelist=(500, 502, 503),
         backoff_factor=READ_RETRY_BACKOFF_S, backoff_jitter=1.0, raise_on_status=False,
