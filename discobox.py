@@ -2161,6 +2161,34 @@ def _plan_ap_pass(state: dict, fingerprint: str, full: bool, now: float) -> tupl
     return False, set(state.get("pending") or [])
 
 
+def _apply_poe(nb, existing_ifaces: dict, powered_ports: list[dict], poe_counts: dict, log) -> None:
+    """poe_mode=pse on every interface Netdisco reports as powered (PSE)."""
+    poe_iface_names = {p["port"] for p in powered_ports if p.get("port")}
+    for port_name in poe_iface_names:
+        iface = _iface_lookup(existing_ifaces, port_name)
+        if not iface:
+            poe_counts["skipped"] += 1
+            continue
+        # Netbox rejects PoE on virtual/bridge/LAG interfaces; Netdisco can still
+        # list one as powered (a PSE port index mapped to the wrong ifIndex)
+        if nb._nb_value(getattr(iface, "type", None)) in NO_POE_IFACE_TYPES:
+            poe_counts["skipped"] += 1
+            log.debug("  PoE %s skipped: Netdisco reports power on a %s interface",
+                      port_name, nb._nb_value(iface.type))
+            continue
+        try:
+            current = nb._nb_value(getattr(iface, "poe_mode", None))
+            if current != "pse":
+                iface.update({"poe_mode": "pse"})
+                poe_counts["updated"] += 1
+                log.debug("  PoE %s → pse", port_name)
+            else:
+                poe_counts["unchanged"] += 1
+        except Exception as exc:
+            poe_counts["error"] += 1
+            log.error("  PoE %s error: %s", port_name, exc)
+
+
 def _remove_misplaced_vss_interfaces(
     nb, vss_ifaces: dict[int, dict], positions: set, source_cf: Optional[str], source_value: str, log,
 ) -> int:
@@ -2486,6 +2514,7 @@ def _cf_record_id(value) -> Optional[int]:
 
 
 NULL_MAC = "00:00:00:00:00:00"
+NO_POE_IFACE_TYPES = frozenset({"virtual", "bridge", "lag"})   # Netbox: no poe_mode allowed
 CREATED_BY_COMMENT = "Created by discobox"   # comments of the bare types discobox mints
 
 
@@ -5643,23 +5672,7 @@ def _sync_device(
 
         if powered_ports:
             existing_ifaces = nb.fetch_interfaces(nb_device.id)
-            poe_iface_names = {p["port"] for p in powered_ports if p.get("port")}
-            for port_name in poe_iface_names:
-                iface = _iface_lookup(existing_ifaces, port_name)
-                if not iface:
-                    poe_counts["skipped"] += 1
-                    continue
-                try:
-                    current = nb._nb_value(getattr(iface, "poe_mode", None))
-                    if current != "pse":
-                        iface.update({"poe_mode": "pse"})
-                        poe_counts["updated"] += 1
-                        log.debug("  PoE %s → pse", port_name)
-                    else:
-                        poe_counts["unchanged"] += 1
-                except Exception as exc:
-                    poe_counts["error"] += 1
-                    log.error("  PoE %s error: %s", port_name, exc)
+            _apply_poe(nb, existing_ifaces, powered_ports, poe_counts, log)
 
             log.debug(
                 "PoE: updated=%d unchanged=%d skipped=%d errors=%d",
