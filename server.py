@@ -266,22 +266,17 @@ reconcile_skipped_offline = Gauge(
     "Devices not enqueued by the last reconcile because liveness reported them down",
     **_reg,
 )
-types_created_total = Counter(
-    "discobox_types_created_total",
-    "Bare DeviceTypes/ModuleTypes discobox had to create (no existing type matched), since start; "
-    "library: whether the devicetype-library has the model (available/none/unknown)",
-    ["kind", "manufacturer", "model", "library"],
+types_bare = Gauge(
+    "discobox_types_bare",
+    "Bare DeviceTypes/ModuleTypes (source=netdisco: created by discobox without templates) in Netbox, "
+    "value = devices/modules using it; library: whether the devicetype-library has the model "
+    "(available: /types/library can fill it, none: fix by hand or upstream, unknown: not checked)",
+    ["kind", "manufacturer", "model", "part_number", "library"],
     **_reg,
 )
-library_unmatched = Gauge(
-    "discobox_library_unmatched_devices",
-    "DeviceTypes without a devicetype-library match (last /types/library report): devices using the type",
-    ["manufacturer", "model", "part_number"],
-    **_reg,
-)
-library_report_timestamp = Gauge(
-    "discobox_library_report_timestamp_seconds",
-    "Unix timestamp of the last /types/library report (the unmatched metric's age)",
+types_bare_timestamp = Gauge(
+    "discobox_types_bare_timestamp_seconds",
+    "Unix timestamp of the last discobox_types_bare refresh",
     **_reg,
 )
 
@@ -473,8 +468,10 @@ _LIBRARY_PATH:    Optional[str] = _cstr(_CFG, "library", "path", default="/opt/d
 _LIBRARY_OVERLAY: Optional[str] = _cstr(_CFG, "library", "overlay")
 _LIBRARY_ROLES:   list          = list(_c(_CFG, "library", "roles", default=[]) or [])
 _LIBRARY_MAPPING: dict          = _c(_CFG, "library", "device_types", default={}) or {}
-# library.roles dry-run report for the unmatched metric: this often (0 = only on /types/library calls)
-_LIBRARY_METRICS_INTERVAL: int  = int(_c(_CFG, "library", "metrics_interval", default=86400) or 0)
+# discobox_types_bare refresh from Netbox: this often (0 = only after type creations / applies)
+_LIBRARY_METRICS_INTERVAL: int  = int(_c(_CFG, "library", "metrics_interval", default=3600) or 0)
+# source value /types/library apply sets on a library-filled type (custom_fields.source)
+_LIBRARY_SOURCE_VALUE: str      = _c(_CFG, "library", "source_value", default="devicetype-library")
 _library: Optional[Library] = None
 _library_lock = threading.Lock()
 
@@ -617,27 +614,74 @@ def _get_netbox_client() -> NetboxClient:
                     create_missing_types=_TYPES_CREATE_MISSING,
                 )
                 _netbox_client.on_type_created = _on_type_created
+                _netbox_client.type_source_cf = _IFACE_SOURCE_CF
+                _netbox_client.type_source_value = _IFACE_SOURCE_VALUE
     return _netbox_client
 
 
+def _library_has(manufacturer: str, model: str, part_number: str = "") -> str:
+    """available / none / unknown (library not loadable)."""
+    try:
+        lib = _get_library()
+        entry, _ = match_library(
+            {"model": model, "part_number": part_number or model, "slug": model, "manufacturer": manufacturer},
+            lib.index_for([manufacturer]), _LIBRARY_MAPPING,
+        )
+        return "available" if entry else "none"
+    except Exception:
+        return "unknown"
+
+
 def _on_type_created(kind: str, manufacturer: str, model: str) -> None:
-    """Count a bare type discobox minted, and whether the library could have filled it."""
-    library = "unknown"
-    if kind == "device":
-        try:
-            lib = _get_library()
-            entry, _ = match_library(
-                {"model": model, "part_number": model, "slug": model, "manufacturer": manufacturer},
-                lib.index_for([manufacturer]), _LIBRARY_MAPPING,
-            )
-            library = "available" if entry else "none"
-        except Exception:
-            pass
-    types_created_total.labels(kind, manufacturer, model, library).inc()
+    """A sync minted a bare type: say so, and refresh the metric shortly (rare)."""
+    library = _library_has(manufacturer, model) if kind == "device" else "unknown"
     logger.warning(
         "Created a bare %s type %s / %s (no templates)%s", kind, manufacturer, model,
-        ": the library has it, run /types/library?type=" + model if library == "available" else "",
+        f": the library has it, run /types/library?type={model}&apply=true" if library == "available"
+        else ": not in the library, fix it by hand (then set source=manual) or upstream it",
     )
+    # a bit later: the sync assigns the device to the new type only after creating it
+    threading.Timer(60, _refresh_types_bare_safe).start()
+
+
+_types_bare_lock = threading.Lock()
+
+
+def _refresh_types_bare() -> int:
+    """
+    discobox_types_bare from Netbox: every DeviceType/ModuleType with
+    source=netdisco (fully replaced each time, so a type that got fixed, i.e.
+    source changed or the type deleted, drops out). Returns the number found.
+    """
+    if not _IFACE_SOURCE_CF:
+        return 0
+    nb = _get_netbox_client()
+    rows = []
+    flt = {f"cf_{_IFACE_SOURCE_CF}": _IFACE_SOURCE_VALUE}
+    if nb.cf_on(_IFACE_SOURCE_CF, "dcim.devicetype"):
+        for dt in nb.nb.dcim.device_types.filter(**flt):
+            mfr = getattr(dt.manufacturer, "name", "") or ""
+            pn = getattr(dt, "part_number", "") or ""
+            rows.append((("device", mfr, dt.model, pn, _library_has(mfr, dt.model, pn)),
+                         getattr(dt, "device_count", 0) or 0))
+    if nb.cf_on(_IFACE_SOURCE_CF, "dcim.moduletype"):
+        for mt in nb.nb.dcim.module_types.filter(**flt):
+            mfr = getattr(mt.manufacturer, "name", "") or ""
+            rows.append((("module", mfr, mt.model, getattr(mt, "part_number", "") or "", "unknown"),
+                         getattr(mt, "module_count", 0) or 0))
+    with _types_bare_lock:
+        types_bare.clear()
+        for labels, value in rows:
+            types_bare.labels(*labels).set(value)
+        types_bare_timestamp.set(time.time())
+    return len(rows)
+
+
+def _refresh_types_bare_safe() -> None:
+    try:
+        _refresh_types_bare()
+    except Exception as exc:
+        logger.warning("discobox_types_bare refresh failed: %s", exc)
 
 
 def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = None,
@@ -829,8 +873,8 @@ async def lifespan(app):
         tasks.append(asyncio.create_task(_retry_loop()))
     except Exception as exc:
         logger.error("Failed to start retry loop: %s", exc)
-    if is_reconcile_leader and _LIBRARY_METRICS_INTERVAL > 0 and _LIBRARY_ROLES:
-        tasks.append(asyncio.create_task(_library_metrics_loop()))
+    if is_reconcile_leader and _LIBRARY_METRICS_INTERVAL > 0 and _IFACE_SOURCE_CF:
+        tasks.append(asyncio.create_task(_types_bare_loop()))
     yield
     for task in tasks:
         task.cancel()
@@ -2047,6 +2091,7 @@ def types_library(
     request: Request,
     role: Annotated[Optional[list[str]], Query(description="Device role slug(s), name(s) or id(s) whose DeviceTypes to include (default: library.roles)")] = None,
     type: Annotated[Optional[list[str]], Query(description="DeviceType model/slug/part_number(s) to include")] = None,
+    bare: Annotated[bool, Query(description="Include every type discobox created without templates (source=netdisco, or its creation comment)")] = False,
     apply: Annotated[bool, Query(description="Write the changes (POST only)")] = False,
 ) -> dict:
     # Plain def: FastAPI runs it in its threadpool, the Netbox calls don't block the event loop.
@@ -2054,12 +2099,16 @@ def types_library(
         raise HTTPException(405, "apply=true needs POST")
     types = type or []
     # library.roles is only the default selection: an explicit type= alone must not pull it in
-    roles = role if role is not None else ([] if types else _LIBRARY_ROLES)
-    if not roles and not types:
-        raise HTTPException(400, "Nothing selected: pass role= and/or type= (or set library.roles)")
+    roles = role if role is not None else ([] if types or bare else _LIBRARY_ROLES)
+    if not roles and not types and not bare:
+        raise HTTPException(400, "Nothing selected: pass role=, type= and/or bare=true (or set library.roles)")
     try:
-        result = sync_types(_get_netbox_client(), _get_library(), _LIBRARY_MAPPING, roles, types, apply=apply)
-        _update_library_metrics(result)
+        result = sync_types(
+            _get_netbox_client(), _get_library(), _LIBRARY_MAPPING, roles, types, apply=apply, bare=bare,
+            source_cf=_IFACE_SOURCE_CF, bare_value=_IFACE_SOURCE_VALUE, library_value=_LIBRARY_SOURCE_VALUE,
+        )
+        if apply:
+            _refresh_types_bare_safe()
         return result
     except ValueError as exc:            # e.g. an unknown role
         raise HTTPException(400, str(exc))
@@ -2068,43 +2117,12 @@ def types_library(
         raise HTTPException(502, f"types/library failed: {exc}")
 
 
-_library_metric_labels: dict[int, tuple] = {}   # DeviceType id → its unmatched series' labels
-
-
-def _update_library_metrics(result: dict) -> None:
-    """
-    Per reported DeviceType: an unmatched one's series = its device count; a
-    matched one's series is removed. Types outside this report keep theirs
-    (a type= run only updates what it selected). In memory only.
-    """
-    for item in result.get("types") or []:
-        old = _library_metric_labels.pop(item["id"], None)
-        if old:
-            try:
-                library_unmatched.remove(*old)
-            except KeyError:
-                pass
-        if not item.get("library"):
-            labels = (item.get("manufacturer") or "", item.get("model") or "", item.get("part_number") or "")
-            library_unmatched.labels(*labels).set(item.get("devices") or 0)
-            _library_metric_labels[item["id"]] = labels
-    library_report_timestamp.set(time.time())
-
-
-async def _library_metrics_loop() -> None:
-    """library.roles dry-run report every library.metrics_interval, so the metric exists without manual calls."""
+async def _types_bare_loop() -> None:
+    """Refresh discobox_types_bare every library.metrics_interval (first one shortly after start)."""
     loop = asyncio.get_running_loop()
-    await asyncio.sleep(60)          # let startup settle
+    await asyncio.sleep(30)          # let startup settle
     while True:
-        try:
-            result = await loop.run_in_executor(None, partial(
-                sync_types, _get_netbox_client(), _get_library(), _LIBRARY_MAPPING, _LIBRARY_ROLES, [], apply=False,
-            ))
-            _update_library_metrics(result)
-            s = result.get("summary") or {}
-            logger.info("Library report: %s of %s type(s) unmatched", s.get("unmatched"), s.get("types"))
-        except Exception as exc:
-            logger.warning("Library report for the metrics failed: %s", getattr(exc, "detail", exc))
+        await loop.run_in_executor(None, _refresh_types_bare_safe)
         await asyncio.sleep(_LIBRARY_METRICS_INTERVAL)
 
 

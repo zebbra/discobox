@@ -213,7 +213,8 @@ def test_sync_types_dry_run_writes_nothing(library: Path) -> None:
     assert item["set"]["weight"] == 1.3 and item["set"]["u_height"] == 0
     assert [c["name"] for c in item["add"]["interfaces"]] == ["Dot11Radio0", "Dot11Radio1", "GigabitEthernet0"]
     assert item["not_imported"] == ["module-bays"]
-    assert result["summary"] == {"types": 1, "matched": 1, "unmatched": 0, "fields": 4, "templates": 4, "errors": 0}
+    assert result["summary"] == {"types": 1, "matched": 1, "unmatched": 0, "fields": 4, "templates": 4, "errors": 0,
+                                 "source_changes": 0}
     assert dt.updates == [] and nb.nb.dcim.interface_templates.created == []
 
 
@@ -246,3 +247,25 @@ def test_roles_by_slug_name_or_id_unknown_is_a_clear_error(library: Path) -> Non
     assert [t.id for t in select_types(nb, ["5"], [])] == [131]
     with pytest.raises(ValueError, match=r"Unknown device role\(s\): 4 .*valid slugs: lwapp-ap, switch"):
         resolve_roles(nb, ["4"])
+
+
+def _dt(comments="", source=...):
+    cf = {} if source is ... else {"source": source}
+    return _Rec(id=1, model="M", comments=comments, custom_fields=cf)
+
+
+def test_bare_detection_and_source_plan() -> None:
+    from typesync import is_bare, plan_source
+    C = "Created by discobox"
+    assert is_bare(_dt(source="netdisco"), "source", "netdisco")
+    assert is_bare(_dt(C, source=None), "source", "netdisco")            # backfill candidate
+    assert not is_bare(_dt(C, source="manual"), "source", "netdisco")     # fixed by hand
+    assert is_bare(_dt(C), "source", "netdisco")                          # CF not on DeviceType: comment
+    assert not is_bare(_dt("imported"), "source", "netdisco")
+    args = ("source", "netdisco", "devicetype-library")
+    assert plan_source(_dt(C, source="netdisco"), True, *args) == "devicetype-library"
+    assert plan_source(_dt("", source=None), True, *args) == "devicetype-library"
+    assert plan_source(_dt(C, source="manual"), True, *args) is None      # never over another source
+    assert plan_source(_dt(C, source=None), False, *args) == "netdisco"   # backfill
+    assert plan_source(_dt("", source=None), False, *args) is None        # not ours
+    assert plan_source(_dt(C), True, *args) is None                       # CF missing: never written

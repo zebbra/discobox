@@ -459,6 +459,10 @@ class NetboxClient:
         # object type ("dcim.devicetype") → whether type_alias_cf exists on it;
         # only cached after a successful lookup
         self._alias_cf_enabled: dict[str, bool] = {}
+        # source marker on types discobox mints bare (e.g. source=netdisco); set by the caller
+        self.type_source_cf: Optional[str] = None
+        self.type_source_value: str = "netdisco"
+        self._cf_on_cache: dict[tuple[str, str], bool] = {}
 
     def find_device_by_ip(self, ip: str, hostname: str = "", serial: str = "") -> Optional[pynetbox.core.response.Record]:
         """
@@ -944,6 +948,29 @@ class NetboxClient:
         logger.debug("  Manufacturer created: %s", name)
         return mfr
 
+    def cf_on(self, name: Optional[str], object_type: str) -> bool:
+        """True when custom field `name` exists on object_type (cached after a successful lookup)."""
+        if not name:
+            return False
+        key = (name, object_type)
+        if key not in self._cf_on_cache:
+            try:
+                assigned: set[str] = set()
+                for cf in self.nb.extras.custom_fields.filter(name=name):
+                    assigned.update(getattr(cf, "object_types", None) or getattr(cf, "content_types", None) or [])
+            except Exception as exc:
+                logger.warning("Custom field %r lookup failed: %s", name, exc)
+                return False
+            self._cf_on_cache[key] = object_type in assigned
+        return self._cf_on_cache[key]
+
+    def _type_source_kwargs(self, object_type: str) -> dict:
+        """custom_fields for a bare type discobox creates: its source marker, if that CF exists there."""
+        cf = getattr(self, "type_source_cf", None)     # tests build clients without __init__
+        if cf and self.cf_on(cf, object_type):
+            return {"custom_fields": {cf: self.type_source_value}}
+        return {}
+
     def _alias_cf_active(self, object_type: str) -> bool:
         """True when type_alias_cf is configured and exists on object_type (e.g. "dcim.devicetype")."""
         if not self.type_alias_cf:
@@ -1117,7 +1144,8 @@ class NetboxClient:
             model=model,
             slug=slugify(model),
             part_number=part_number or model,
-            comments="Created by discobox",
+            comments=CREATED_BY_COMMENT,
+            **self._type_source_kwargs("dcim.devicetype"),
         )
         logger.debug("  DeviceType created: %s / %s", manufacturer.name, model)
         self._notify_type_created("device", manufacturer.name, model)
@@ -1175,7 +1203,8 @@ class NetboxClient:
             model=model,
             slug=slugify(model),
             part_number=model,
-            comments="Created by discobox",
+            comments=CREATED_BY_COMMENT,
+            **self._type_source_kwargs("dcim.moduletype"),
         )
         logger.debug("  ModuleType created: %s / %s", manufacturer.name, model)
         self._notify_type_created("module", manufacturer.name, model)
@@ -2436,6 +2465,7 @@ def _cf_record_id(value) -> Optional[int]:
 
 
 NULL_MAC = "00:00:00:00:00:00"
+CREATED_BY_COMMENT = "Created by discobox"   # comments of the bare types discobox mints
 
 
 DEADLOCK_RETRIES = (0.5, 1.0, 2.0)   # back-off seconds between attempts

@@ -113,10 +113,12 @@ library:                    # DeviceType enrichment from the devicetype-library 
                             # part_number/model/slug, same vendor, e.g.
                             #   "9120AX": C9120AXI-E
                             # without a mapping: exact part_number, then exact model (same manufacturer)
-  metrics_interval: 86400   # seconds: dry-run report for roles (above) that refreshes the metric
-                            # discobox_library_unmatched_devices{manufacturer,model,part_number}
-                            # (= devices using a type the library has no match for); every
-                            # /types/library call refreshes it too. 0 = only those calls
+  metrics_interval: 3600    # seconds: refresh of discobox_types_bare{kind,manufacturer,model,
+                            # part_number,library} from Netbox (types with source=netdisco, i.e.
+                            # created bare by a sync; value = devices using it). Also refreshed
+                            # right after a sync creates one and after an apply. 0 = only those
+  source_value: devicetype-library  # custom_fields.source value an apply sets on a library-filled
+                            # type (only over an empty or netdisco source, never manual/other)
 
 aps:                        # access points reported by a WLC (updated during the WLC's sync)
   prune_interfaces: true    # APs keep only GigabitEthernet0 + Dot11Radio<n>: others (import

@@ -25,11 +25,12 @@ GET, POST = SimpleNamespace(method="GET"), SimpleNamespace(method="POST")
 def calls(monkeypatch) -> list[dict]:
     seen: list[dict] = []
 
-    def fake_sync_types(nb, library, mapping, roles, types, apply=False):
-        seen.append({"roles": roles, "types": types, "apply": apply})
+    def fake_sync_types(nb, library, mapping, roles, types, apply=False, bare=False, **kw):
+        seen.append({"roles": roles, "types": types, "apply": apply, **({"bare": True} if bare else {})})
         return {"apply": apply, "summary": {}, "types": []}
 
     monkeypatch.setattr(server, "sync_types", fake_sync_types)
+    monkeypatch.setattr(server, "_refresh_types_bare_safe", lambda: None)
     monkeypatch.setattr(server, "_get_library", lambda: object())
     monkeypatch.setattr(server, "_get_netbox_client", lambda: object())
     monkeypatch.setattr(server, "_LIBRARY_ROLES", [])
@@ -236,39 +237,45 @@ def test_types_library_unknown_role_is_400(monkeypatch) -> None:
     assert exc.value.status_code == 400 and "Unknown device role" in exc.value.detail
 
 
-def test_library_unmatched_metric(monkeypatch) -> None:
-    monkeypatch.setattr(server, "_library_metric_labels", {})
-    server.library_unmatched.clear()
-    report = {"types": [
-        {"id": 1, "manufacturer": "Cisco", "model": "9120AX", "part_number": "9120AX", "devices": 937, "library": "x.yaml"},
-        {"id": 2, "manufacturer": "Cisco", "model": "CW9166I-E", "part_number": "CW9166I-E", "devices": 12, "library": None},
-    ]}
-    server._update_library_metrics(report)
 
-    def val(model, pn):
-        return server._custom_registry.get_sample_value(
-            "discobox_library_unmatched_devices", {"manufacturer": "Cisco", "model": model, "part_number": pn})
-    assert val("CW9166I-E", "CW9166I-E") == 12 and val("9120AX", "9120AX") is None
-    # later matched (e.g. after a mapping) → series gone; a report not naming it leaves others alone
-    server._update_library_metrics({"types": [dict(report["types"][1], library="y.yaml")]})
-    assert val("CW9166I-E", "CW9166I-E") is None
+class _TypeEP:
+    def __init__(self, recs):
+        self.recs, self.calls = recs, []
+
+    def filter(self, **kw):
+        self.calls.append(kw)
+        return [r for r in self.recs if r.custom_fields.get("source") == kw.get("cf_source")]
 
 
-def test_bare_type_counter_says_whether_the_library_has_it(monkeypatch) -> None:
-    class _Lib:
-        def index_for(self, vendors):
-            return {"x": {"manufacturer": "Cisco", "model": "C9120AXI-E", "part_number": "C9120AXI-E",
-                          "slug": "cisco-c9120axi-e", "_file": "f"}}
-    monkeypatch.setattr(server, "_get_library", lambda: _Lib())
-    monkeypatch.setattr(server, "match_library", lambda t, idx, m: (idx["x"], "part_number")
-                        if t["model"] == "C9120AXI-E" else (None, ""))
+def test_types_bare_metric_from_netbox(monkeypatch) -> None:
+    mfr = SimpleNamespace(name="Fortinet")
+    dts = [SimpleNamespace(model="FGT-100X", part_number="FGT-100X", manufacturer=mfr, device_count=3,
+                           custom_fields={"source": "netdisco"}),
+           SimpleNamespace(model="FGT-60F", part_number="FGT60F", manufacturer=mfr, device_count=9,
+                           custom_fields={"source": "manual"})]
+    mts = [SimpleNamespace(model="FAKE-NM", part_number="", manufacturer=mfr, module_count=2,
+                           custom_fields={"source": "netdisco"})]
+    nb = SimpleNamespace(cf_on=lambda name, ot: True,
+                         nb=SimpleNamespace(dcim=SimpleNamespace(device_types=_TypeEP(dts), module_types=_TypeEP(mts))))
+    monkeypatch.setattr(server, "_get_netbox_client", lambda: nb)
+    monkeypatch.setattr(server, "_IFACE_SOURCE_CF", "source")
+    monkeypatch.setattr(server, "_IFACE_SOURCE_VALUE", "netdisco")
+    monkeypatch.setattr(server, "_library_has", lambda m, model, pn="": "none")
+    assert server._refresh_types_bare() == 2
 
-    def val(model, lib, kind="device"):
-        return server._custom_registry.get_sample_value(
-            "discobox_types_created_total", {"kind": kind, "manufacturer": "Cisco", "model": model, "library": lib})
-    server._on_type_created("device", "Cisco", "C9120AXI-E")
-    server._on_type_created("device", "Cisco", "FAKE-MODEL-1")
-    server._on_type_created("module", "Cisco", "FAKE-NM-1")
-    assert val("C9120AXI-E", "available") == 1
-    assert val("FAKE-MODEL-1", "none") == 1
-    assert val("FAKE-NM-1", "unknown", kind="module") == 1
+    def val(kind, model, pn, lib):
+        return server._custom_registry.get_sample_value("discobox_types_bare", {
+            "kind": kind, "manufacturer": "Fortinet", "model": model, "part_number": pn, "library": lib})
+    assert val("device", "FGT-100X", "FGT-100X", "none") == 3
+    assert val("module", "FAKE-NM", "", "unknown") == 2
+    assert val("device", "FGT-60F", "FGT60F", "none") is None           # manual: not bare
+    dts[0].custom_fields["source"] = "manual"                            # fixed by hand → drops out
+    assert server._refresh_types_bare() == 1 and val("device", "FGT-100X", "FGT-100X", "none") is None
+
+
+def test_types_library_needs_a_selection_bare_counts(calls) -> None:
+    with pytest.raises(HTTPException) as exc:
+        server.types_library(GET, role=None, type=None, bare=False, apply=False)
+    assert exc.value.status_code == 400
+    server.types_library(GET, role=None, type=None, bare=True, apply=False)
+    assert calls[-1] == {"roles": [], "types": [], "apply": False, "bare": True}   # no default roles pulled in

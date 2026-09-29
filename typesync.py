@@ -228,6 +228,39 @@ def _nb_type_dict(dt) -> dict:
     }
 
 
+def _source_of(dt, source_cf: Optional[str]) -> Optional[str]:
+    """The type's source value ("" when unset); None when the CF isn't on DeviceType (or not configured)."""
+    cf = dict(getattr(dt, "custom_fields", None) or {})
+    if not source_cf or source_cf not in cf:
+        return None
+    value = cf.get(source_cf)
+    return str(getattr(value, "value", None) or (value.get("value") if isinstance(value, dict) else value) or "")
+
+
+def is_bare(dt, source_cf: Optional[str], bare_value: str) -> bool:
+    """A type discobox minted without templates: source=bare_value, or unset with discobox's creation comment."""
+    source = _source_of(dt, source_cf)
+    if source:
+        return source == bare_value
+    return CREATED_BY_DISCOBOX in (getattr(dt, "comments", "") or "")
+
+
+def plan_source(dt, matched: bool, source_cf: Optional[str], bare_value: str, library_value: str) -> Optional[str]:
+    """
+    New source for a reported type, or None to leave it: library-matched →
+    library_value, unless another source (manual, …) owns it; unmatched and
+    minted by discobox with no source yet → bare_value (the backfill).
+    """
+    source = _source_of(dt, source_cf)
+    if source is None:
+        return None
+    if matched:
+        return library_value if source in ("", bare_value) else None
+    if not source and CREATED_BY_DISCOBOX in (getattr(dt, "comments", "") or ""):
+        return bare_value
+    return None
+
+
 def resolve_roles(nb: NetboxClient, roles: list[str]) -> list[int]:
     """Device role slugs, names or ids → ids. ValueError naming the unknown ones (and the valid slugs)."""
     known = list(nb.nb.dcim.device_roles.all())
@@ -248,9 +281,20 @@ def resolve_roles(nb: NetboxClient, roles: list[str]) -> list[int]:
     return ids
 
 
-def select_types(nb: NetboxClient, roles: list[str], types: list[str]) -> list:
-    """DeviceTypes used by devices of roles (slug, name or id), plus those named in types (model/slug/part_number)."""
+def select_types(
+    nb: NetboxClient, roles: list[str], types: list[str],
+    bare: bool = False, source_cf: Optional[str] = None, bare_value: str = "netdisco",
+) -> list:
+    """
+    DeviceTypes used by devices of roles (slug, name or id), plus those named
+    in types (model/slug/part_number), plus with bare every type discobox
+    minted without templates (see is_bare).
+    """
     selected: dict[int, object] = {}
+    if bare:
+        for dt in nb.nb.dcim.device_types.all():
+            if is_bare(dt, source_cf, bare_value):
+                selected[dt.id] = dt
     if roles:
         role_ids = resolve_roles(nb, roles)
         ids = {d.device_type.id for d in nb.nb.dcim.devices.filter(role_id=role_ids) if d.device_type}
@@ -271,7 +315,10 @@ def select_types(nb: NetboxClient, roles: list[str], types: list[str]) -> list:
     return sorted(selected.values(), key=lambda dt: dt.model.lower())
 
 
-def build_report(nb: NetboxClient, library: Library, mapping: dict, dts: list) -> list[dict]:
+def build_report(
+    nb: NetboxClient, library: Library, mapping: dict, dts: list,
+    source_cf: Optional[str] = None, bare_value: str = "netdisco", library_value: str = "devicetype-library",
+) -> list[dict]:
     """One item per DeviceType: its library match and what enrichment would add."""
     # Only the vendor directories of the selected types' manufacturers are
     # parsed, so a library.device_types target must live under the same vendor.
@@ -285,6 +332,11 @@ def build_report(nb: NetboxClient, library: Library, mapping: dict, dts: list) -
             "part_number": t["part_number"], "devices": t["device_count"],
             "library": entry["_file"] if entry else None, "match": how or None,
         }
+        if _source_of(dt, source_cf) is not None:
+            item["source"] = _source_of(dt, source_cf) or None
+            new_source = plan_source(dt, bool(entry), source_cf, bare_value, library_value)
+            if new_source:
+                item["set_source"] = new_source
         if entry:
             racked = nb.nb.dcim.devices.count(device_type_id=dt.id) - \
                 nb.nb.dcim.devices.count(device_type_id=dt.id, rack_id="null")
@@ -300,12 +352,12 @@ def build_report(nb: NetboxClient, library: Library, mapping: dict, dts: list) -
     return items
 
 
-def apply_report(nb: NetboxClient, items: list[dict], dts: list) -> int:
-    """Write each item's set/add; returns the number of failed types."""
+def apply_report(nb: NetboxClient, items: list[dict], dts: list, source_cf: Optional[str] = None) -> int:
+    """Write each item's set/add, then its set_source; returns the number of failed types."""
     by_id = {dt.id: dt for dt in dts}
     errors = 0
     for item in items:
-        if not item.get("set") and not item.get("add"):
+        if not item.get("set") and not item.get("add") and not item.get("set_source"):
             continue
         dt = by_id[item["id"]]
         try:
@@ -314,6 +366,9 @@ def apply_report(nb: NetboxClient, items: list[dict], dts: list) -> int:
             for key, comps in (item.get("add") or {}).items():
                 ep = getattr(nb.nb.dcim, COMPONENTS[key][0])
                 ep.create([{**c, "device_type": dt.id} for c in comps])
+            # last: a type only counts as library-filled once the fill went through
+            if item.get("set_source") and source_cf:
+                dt.update({"custom_fields": {source_cf: item["set_source"]}})
             item["applied"] = True
         except Exception as exc:
             errors += 1
@@ -330,18 +385,21 @@ def summarize(items: list[dict]) -> dict:
         "fields": sum(len(i.get("set") or {}) for i in items),
         "templates": sum(len(v) for i in items for v in (i.get("add") or {}).values()),
         "errors": sum(1 for i in items if i.get("error")),
+        "source_changes": sum(1 for i in items if i.get("set_source")),
     }
 
 
 def sync_types(
     nb: NetboxClient, library: Library, mapping: dict,
     roles: list[str], types: list[str], apply: bool = False,
+    bare: bool = False, source_cf: Optional[str] = None,
+    bare_value: str = "netdisco", library_value: str = "devicetype-library",
 ) -> dict:
     """Select, report and (with apply) write. Shared by the HTTP API and the CLI."""
-    dts = select_types(nb, roles, types)
-    items = build_report(nb, library, mapping, dts)
+    dts = select_types(nb, roles, types, bare=bare, source_cf=source_cf, bare_value=bare_value)
+    items = build_report(nb, library, mapping, dts, source_cf, bare_value, library_value)
     if apply:
-        apply_report(nb, items, dts)
+        apply_report(nb, items, dts, source_cf)
     return {"apply": apply, "summary": summarize(items), "types": items}
 
 
@@ -350,6 +408,8 @@ def log_report(result: dict) -> None:
         label = f"{item['manufacturer']} / {item['model']} (pn={item['part_number'] or '-'}, devices={item['devices']})"
         if not item["library"]:
             log.info("%-60s no library match: add it to library.device_types or the overlay", label)
+            if item.get("set_source"):
+                log.info("    set source      %s", item["set_source"])
             continue
         log.info("%-60s → %s (%s)", label, item["library"], item["match"])
         for k, v in item["set"].items():
@@ -360,7 +420,9 @@ def log_report(result: dict) -> None:
             log.info("    not imported: %s", ", ".join(item["not_imported"]))
         if item["images_in_library"]:
             log.info("    images available in library (not imported)")
-        if not item["set"] and not item["add"]:
+        if item.get("set_source"):
+            log.info("    set source      %s", item["set_source"])
+        if not item["set"] and not item["add"] and not item.get("set_source"):
             log.info("    nothing to add")
         if item.get("error"):
             log.info("    ERROR: %s", item["error"])
@@ -369,11 +431,17 @@ def log_report(result: dict) -> None:
 
 
 def _load_config(path: str) -> dict:
+    """The library section, plus _source_cf / _source_value from custom_fields."""
     try:
         with open(path) as f:
-            return (yaml.safe_load(f) or {}).get("library") or {}
+            full = yaml.safe_load(f) or {}
     except FileNotFoundError:
-        return {}
+        full = {}
+    cfg = dict(full.get("library") or {})
+    cf = full.get("custom_fields") or {}
+    cfg["_source_cf"] = cf.get("source", "source")
+    cfg["_source_value"] = cf.get("source_value", "netdisco")
+    return cfg
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -386,6 +454,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="only DeviceTypes used by devices of this role slug (repeatable; library.roles)")
     p.add_argument("--type", action="append", default=[], dest="types",
                    help="DeviceType model/slug/part_number to include (repeatable)")
+    p.add_argument("--bare", action="store_true",
+                   help="include every type discobox created without templates (source=netdisco, or its comment)")
     p.add_argument("--apply", action="store_true", help="write changes (default: dry-run report)")
     p.add_argument("--debug", action="store_true")
     args = p.parse_args(argv)
@@ -399,7 +469,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         log.error("No library: pass --library or set library.path")
         return 2
     roles = args.role if args.role is not None else list(cfg.get("roles") or [])
-    if not roles and not args.types:
+    if not roles and not args.types and not args.bare:
         log.error("Nothing selected: pass --role and/or --type (a full-catalog run is deliberately not supported)")
         return 2
 
@@ -409,7 +479,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         token=os.environ["NETBOX_TOKEN"],
         verify_tls=os.getenv("NETBOX_TLS_VERIFY", "true").lower() != "false",
     )
-    result = sync_types(nb, library, cfg.get("device_types") or {}, roles, args.types, apply=args.apply)
+    result = sync_types(
+        nb, library, cfg.get("device_types") or {}, roles, args.types, apply=args.apply, bare=args.bare,
+        source_cf=cfg["_source_cf"], bare_value=cfg["_source_value"],
+        library_value=cfg.get("source_value") or "devicetype-library",
+    )
     log_report(result)
     return 1 if result["summary"]["errors"] else 0
 
