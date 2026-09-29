@@ -26,7 +26,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # to the new head deliberately. Back to upstream once everything is merged:
 # ARG DEVICETYPE_LIBRARY_REPO=netbox-community/devicetype-library
 ARG DEVICETYPE_LIBRARY_REPO=Bierchermuesli/devicetype-library
-ARG DEVICETYPE_LIBRARY_REF=54a45bc39159259dbf6dd2ae1401772d3569e127
+ARG DEVICETYPE_LIBRARY_REF=48ebb3ae9121547936fe8d56473c3a285a1484ff
 ARG DEVICETYPE_LIBRARY_VENDORS=Cisco,Fortinet
 RUN python - <<'PY'
 import os, tarfile, urllib.request
