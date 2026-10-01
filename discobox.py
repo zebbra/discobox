@@ -1940,17 +1940,25 @@ _AP_DESC_FIELD_RES = {
     "dot3_mac": re.compile(r"^Dot3 MAC\s+([0-9a-fA-F:]+)$", re.IGNORECASE),
     "ethernet_mac": re.compile(r"^Ethernet MAC\s+([0-9a-fA-F:]+)$", re.IGNORECASE),
 }
-_AP_DESC_UPLINK_RE = re.compile(r"^Connected via\s+(\S+)(?:\s*\(([^)]*)\))?$", re.IGNORECASE)
+# "Connected via <switch>[ <port>][ (<ip>)]" (the port since the C9800 tag-aware SNMP::Info)
+_AP_DESC_UPLINK_RE = re.compile(r"^Connected via\s+(\S+)(?:\s+([^\s(]+))?(?:\s*\(([^)]*)\))?$", re.IGNORECASE)
+# C9800 AP tags, one of each per AP: "Policy tag <x>; Site tag <y>; RF tag <z>" (each optional,
+# "default-*-tag" = no explicit assignment, kept as reported)
+_AP_DESC_TAG_RE = re.compile(r"^(Policy|Site|RF) tag\s+(.+?)\s*$", re.IGNORECASE)
+AP_TAG_KINDS = (("policy", "Policy"), ("site", "Site"), ("rf", "RF"))
 
 
 def _parse_ap_description(description: str) -> dict:
     """
     Best-effort parse of a Netdisco ap-class module description, e.g.:
       "CW9166I-E: SITE1-W216 (C2/SITE1); IP 192.0.2.10; Dot3 MAC ...;
-       Ethernet MAC ...; Connected via SWITCH.example.com[ (192.0.2.1)]"
+       Ethernet MAC ...; Connected via SWITCH.example.com[ Gi1/0/12][ (192.0.2.1)];
+       Policy tag PT-X; Site tag ST-Y; RF tag RF-Z"
 
     The "(<site tag>/<tag>)" part is split into site_tag/tag (site_tag alone
-    when there's no "/"); the uplink IP is optional.
+    when there's no "/"); the uplink port and IP are optional. The C9800
+    Policy/Site/RF tags (each optional, any order) go to tag_policy, tag_site,
+    tag_rf.
 
     Returns {} if even the hostname can't be recovered — any other field
     missing from the text is simply absent from the result.
@@ -1970,7 +1978,13 @@ def _parse_ap_description(description: str) -> dict:
         if uplink:
             result["uplink_name"] = uplink.group(1)
             if uplink.group(2):
-                result["uplink_ip"] = uplink.group(2)
+                result["uplink_port"] = uplink.group(2)
+            if uplink.group(3):
+                result["uplink_ip"] = uplink.group(3)
+            continue
+        tag = _AP_DESC_TAG_RE.match(part)
+        if tag:
+            result[f"tag_{tag.group(1).lower()}"] = tag.group(2)
             continue
         for key, rx in _AP_DESC_FIELD_RES.items():
             m = rx.match(part)
@@ -2369,6 +2383,8 @@ def _ap_note_block(
         short = uplink.split(".", 1)[0]
         href = f"/dcim/devices/{uplink_id}/" if uplink_id else f"/dcim/devices/?q={quote(short)}"
         uplink = f"[{uplink}]({href})"
+        if parsed.get("uplink_port"):
+            uplink += f" {parsed['uplink_port']}"
         if parsed.get("uplink_ip"):
             uplink += f" ({parsed['uplink_ip']})"
     controller = f"[{controller_name}](/dcim/devices/{controller_id}/)" if controller_id else controller_name
@@ -2380,6 +2396,10 @@ def _ap_note_block(
     lines = [AP_NOTE_BEGIN, "## Wireless"]
     lines += [f" - {k}: {v}" for k, v in rows if v]
     # nested lists: Python-Markdown (Netbox) needs a 4-space indent
+    tags = [(label, parsed[f"tag_{key}"]) for key, label in AP_TAG_KINDS if parsed.get(f"tag_{key}")]
+    if tags:
+        lines.append(" - Tags:")
+        lines += [f"     - {k}: {v}" for k, v in tags]
     macs = [(k, v) for k, v in (("Ethernet", parsed.get("ethernet_mac")), ("Radio", parsed.get("dot3_mac"))) if v]
     if macs:
         lines.append(" - MAC:")

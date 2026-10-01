@@ -63,3 +63,31 @@ def test_note_links_by_id_when_resolved() -> None:
     parsed = {"uplink_name": "sw-c.example.net", "uplink_ip": "192.0.2.9"}
     assert "[sw-c.example.net](/dcim/devices/3/) (192.0.2.9)" in _ap_note_block(parsed, "wlc", [], uplink_id=3)
     assert "[sw-c.example.net](/dcim/devices/?q=sw-c)" in _ap_note_block(parsed, "wlc", [])
+
+
+def test_parse_uplink_port_and_c9800_tags() -> None:
+    from discobox import _parse_ap_description
+    d = ("C9120AXI: AP-TEST-1 (C2/SITE1); IP 192.0.2.10; Dot3 MAC 02:00:00:00:00:01; "
+         "Ethernet MAC 02:00:00:00:00:02; Connected via sw-c.example.net Gi1/0/12 (192.0.2.9); "
+         "Policy tag PT-OFFICE; Site tag default-site-tag; RF tag RF-HD")
+    p = _parse_ap_description(d)
+    assert (p["uplink_name"], p["uplink_port"], p["uplink_ip"]) == ("sw-c.example.net", "Gi1/0/12", "192.0.2.9")
+    assert (p["tag_policy"], p["tag_site"], p["tag_rf"]) == ("PT-OFFICE", "default-site-tag", "RF-HD")
+    assert p["site_tag"] == "C2" and p["tag"] == "SITE1"                 # location part unchanged
+    # older formats still parse
+    assert _parse_ap_description("M: AP (L); Connected via sw1 (192.0.2.1)")["uplink_ip"] == "192.0.2.1"
+    old = _parse_ap_description("M: AP (L); Connected via sw1")
+    assert old["uplink_name"] == "sw1" and "uplink_port" not in old and "tag_rf" not in old
+    # tags in any order, some missing
+    p2 = _parse_ap_description("M: AP (L); RF tag RF-1; Policy tag PT-1")
+    assert p2["tag_rf"] == "RF-1" and p2["tag_policy"] == "PT-1" and "tag_site" not in p2
+
+
+def test_note_block_tags_and_port() -> None:
+    parsed = {"uplink_name": "sw-c", "uplink_port": "Gi1/0/12", "uplink_ip": "192.0.2.9",
+              "tag_policy": "PT-OFFICE", "tag_site": "default-site-tag", "tag_rf": "RF-HD",
+              "ethernet_mac": "02:00:00:00:00:02"}
+    block = _ap_note_block(parsed, "wlc", [], uplink_id=3)
+    assert " - Uplink: [sw-c](/dcim/devices/3/) Gi1/0/12 (192.0.2.9)" in block
+    assert " - Tags:\n     - Policy: PT-OFFICE\n     - Site: default-site-tag\n     - RF: RF-HD\n - MAC:" in block
+    assert "Tags" not in _ap_note_block({"uplink_name": "sw-c"}, "wlc", [])
