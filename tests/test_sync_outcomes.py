@@ -1,7 +1,7 @@
-"""A hook for a device in Netdisco but not in Netbox is its own outcome, not an error.
+"""How _run_sync counts sync outcomes: not_in_netbox / not_in_netdisco (gaps, not errors), skip reasons.
 
 Run with `pytest tests/` or directly:
-    python tests/test_sync_not_in_netbox.py
+    python tests/test_sync_outcomes.py
 """
 from __future__ import annotations
 
@@ -82,6 +82,26 @@ def test_not_in_netdisco_is_its_own_status(monkeypatch, tmp_path) -> None:
     _run(monkeypatch, tmp_path, {"ok": False, "reason": "not_in_netdisco"})
     assert statuses == ["not_in_netdisco"]
     assert not server._is_paused()
+
+
+def test_sync_level_skip_counts_with_reason(monkeypatch, tmp_path) -> None:
+    reasons = []
+    monkeypatch.setattr(server.syncs_skipped_total, "labels", lambda reason: reasons.append(reason) or _Noop())
+    _run(monkeypatch, tmp_path, {"ok": True, "reason": "recently_touched", "hostname": "sw-test.example.net"})
+    _run(monkeypatch, tmp_path, {"ok": False, "reason": "discovery_incomplete", "hostname": "sw-test.example.net"})
+    assert reasons == ["recently_touched", "discovery_incomplete"]
+
+
+def test_hook_level_skips_count_with_reason(monkeypatch) -> None:
+    reasons = []
+    monkeypatch.setattr(server.syncs_skipped_total, "labels", lambda reason: reasons.append(reason) or _Noop())
+    monkeypatch.setattr(server, "_recently_synced", lambda host: host == "192.0.2.1")
+    monkeypatch.setattr(server, "_claim_host", lambda host: False)
+    monkeypatch.setattr(server, "_MAX_QUEUE", 10_000)
+    server._in_flight.clear()
+    counts = server._enqueue_all(["192.0.2.1", "192.0.2.2"], submit=lambda host: None)
+    assert reasons == ["cooldown", "in_progress"]
+    assert counts["cooldown"] == 1 and counts["in_progress"] == 1
 
 
 class _Noop:

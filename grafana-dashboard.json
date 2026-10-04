@@ -406,8 +406,8 @@
         },
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "rate(discobox_syncs_skipped_total[$__rate_interval]) * 60",
-          "legendFormat": "skipped",
+          "expr": "sum by (reason) (rate(discobox_syncs_skipped_total[$__rate_interval])) * 60",
+          "legendFormat": "skipped: {{reason}}",
           "refId": "C"
         }
       ]

@@ -213,7 +213,10 @@ device_sync_errors = Gauge(
 )
 syncs_skipped_total = Counter(
     "discobox_syncs_skipped_total",
-    "Sync requests dropped because the host was already being synced",
+    "Syncs not done, by reason: cooldown | in_progress | queue_full (hook dropped before queuing; "
+    "queue_full means the device waits for its next hook or reconcile), discovery_incomplete | "
+    "recently_touched (sync started, then skipped; also in discobox_syncs_total{status=\"skipped\"})",
+    ["reason"],
     **_reg,
 )
 ha_vip_total = Counter(
@@ -1294,6 +1297,8 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             orphan_delete_max_percent=_ORPHAN_DELETE_MAX_PERCENT,
         )
         status = "success" if result.get("ok") else "error"
+        if result.get("reason") in ("discovery_incomplete", "recently_touched"):
+            syncs_skipped_total.labels(reason=result["reason"]).inc()
         if result.get("reason") == "discovery_incomplete":
             # Transient: Netdisco still shows ifIndex placeholders as port names.
             # Not an error (no failed flag, no auto-pause) and no cooldown mark,
@@ -1447,17 +1452,17 @@ async def sync(
 
     if not force and _recently_synced(resolved_host):
         logger.debug("hook from %s: %s  cooldown active: skipping", caller, resolved_host)
-        syncs_skipped_total.inc()
+        syncs_skipped_total.labels(reason="cooldown").inc()
         return SyncResponse(status="skipped", host=resolved_host, reason="cooldown")
 
     with _in_flight_lock:
         if len(_in_flight) >= _MAX_QUEUE:
             logger.warning("hook from %s: %s  queue full (%d/%d): dropping", caller, resolved_host, len(_in_flight), _MAX_QUEUE)
-            syncs_skipped_total.inc()
+            syncs_skipped_total.labels(reason="queue_full").inc()
             return SyncResponse(status="skipped", host=resolved_host, reason="queue full")
         if not _claim_host(resolved_host):
             logger.info("hook from %s: %s  already in progress: dropping", caller, resolved_host)
-            syncs_skipped_total.inc()
+            syncs_skipped_total.labels(reason="in_progress").inc()
             return SyncResponse(status="skipped", host=resolved_host, reason="already in progress")
         _in_flight.add(resolved_host)
 
@@ -1636,16 +1641,16 @@ def _enqueue_all(hosts: list, submit, limit: Optional[int] = None, force: bool =
             continue
         if not force and _recently_synced(host):
             counts["cooldown"] += 1
-            syncs_skipped_total.inc()
+            syncs_skipped_total.labels(reason="cooldown").inc()
             continue
         with _in_flight_lock:
             if len(_in_flight) >= _MAX_QUEUE:
                 counts["queue_full"] += 1
-                syncs_skipped_total.inc()
+                syncs_skipped_total.labels(reason="queue_full").inc()
                 continue
             if not _claim_host(host):
                 counts["in_progress"] += 1
-                syncs_skipped_total.inc()
+                syncs_skipped_total.labels(reason="in_progress").inc()
                 continue
             _in_flight.add(host)
         sync_in_progress.inc()
