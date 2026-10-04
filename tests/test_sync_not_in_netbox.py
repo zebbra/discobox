@@ -74,6 +74,16 @@ def test_old_entries_age_out(monkeypatch, tmp_path) -> None:
     assert list(server._load_unknown_devices()) == ["192.0.2.2"]
 
 
+def test_not_in_netdisco_is_its_own_status(monkeypatch, tmp_path) -> None:
+    statuses = []
+    monkeypatch.setattr(server.syncs_total, "labels", lambda status: statuses.append(status) or _Noop())
+    monkeypatch.setattr(server, "_PAUSE_ON_ERROR", True)
+    monkeypatch.setattr(server, "_PAUSE_FILE", str(tmp_path / "paused"))
+    _run(monkeypatch, tmp_path, {"ok": False, "reason": "not_in_netdisco"})
+    assert statuses == ["not_in_netdisco"]
+    assert not server._is_paused()
+
+
 class _Noop:
     def inc(self, *a) -> None: ...
     def set(self, *a) -> None: ...

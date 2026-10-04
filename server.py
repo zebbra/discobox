@@ -144,7 +144,7 @@ hooks_received_total = Counter(
 syncs_total = Counter(
     "discobox_syncs_total",
     "Completed device syncs",
-    ["status"],   # success | error | skipped | not_in_netbox
+    ["status"],   # success | error | skipped | not_in_netbox | not_in_netdisco
     **_reg,
 )
 sync_duration = Histogram(
@@ -1304,6 +1304,11 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             # window: not an error, and no local cooldown mark needed since the
             # touch field itself is the throttle signal for the next attempt.
             status = "skipped"
+        if result.get("reason") == "not_in_netdisco":
+            # Netdisco 404s the IP (a /sync for a Netbox device Netdisco doesn't
+            # know): an inventory gap like the one below, not a failed sync.
+            # The reconcile lists these on /not-in-netdisco.
+            status = "not_in_netdisco"
         if result.get("reason") == "device_not_found":
             # In Netdisco, not in Netbox: an inventory gap, not a failed sync.
             # Own status (no failed flag, no auto-pause, no cooldown mark), and

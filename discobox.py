@@ -4111,7 +4111,12 @@ def _sync_device(
         nd_ports = nd.get_ports(nd_ip)
     except requests.HTTPError as exc:
         _reraise_if_gateway_error(exc)
-        resolved = nd.find_canonical_ip(ip) if exc.response is not None and exc.response.status_code == 404 else None
+        not_found = exc.response is not None and exc.response.status_code == 404
+        resolved = nd.find_canonical_ip(ip) if not_found else None
+        if not_found and not resolved:
+            log.info("Not in Netdisco (it 404s the IP, no other IP of a device matches): nothing to sync")
+            return {"ok": False, "reason": "not_in_netdisco",
+                    "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
         if not resolved or resolved == ip:
             log.error("Netdisco request failed: %s", exc)
             return {"ok": False, "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
