@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import server  # noqa: E402
 
+
 def test_device_not_found_is_not_an_error(monkeypatch, tmp_path) -> None:
     host = "192.0.2.47"
     monkeypatch.setattr(server, "_get_netdisco_client", lambda: None)
