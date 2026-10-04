@@ -4155,7 +4155,7 @@ def _sync_device(
 
     nb_device = nb.find_device_by_ip(ip, hostname=nd_hostname, serial=nd_serial)
     if not nb_device:
-        log.error("No Netbox device found for IP %s or hostname %r: skipping", ip, nd_hostname)
+        log.info("In Netdisco, not in Netbox (IP %s, hostname %r): nothing to sync", ip, nd_hostname)
         return {"ok": False, "reason": "device_not_found", "hostname": nd_hostname,
                 "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
 

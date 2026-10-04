@@ -339,7 +339,7 @@ CDP/LLDP neighbor data from Netdisco, written on every interface sync. Text fiel
 | `/reconcile` | GET | yes | The last Netbox↔Netdisco compare's gaps as JSON, answered immediately (read-only: no discover jobs, no auto-create). `?refresh=true` starts a new compare in the background (`running` shows it's in progress; the first call without a result starts one too), `?lists=true` adds the device lists, `?wait=true` runs it synchronously (may exceed proxy timeouts). Reconcile-loop and `/reconcile/enqueue` runs update the result too (`mode`) |
 | `/reconcile/enqueue` | GET, POST | yes | Reconcile and act: enqueue discovers for missing devices (and auto-create) in the background; optional `?max_enqueue=N&offset=N` |
 | `/discover` | GET, POST | yes | Enqueue a Netdisco discover for one device: `?host=<ip or Netbox name>`, tag hint from `snmp_auth_profile` and per-request SNMP timeout derived from `snmp_polling_timeout` (`netdisco.discover_snmptimeout`), or `&tag=` / `&timeout=` (per-request, used as-is) |
-| `/unknown-devices` | GET | no | Devices seen in Netdisco webhooks but not found in Netbox (JSON) |
+| `/unknown-devices` | GET | no | Devices Netdisco sent a sync hook for but not in Netbox (JSON) |
 | `/metrics` | GET | no | Prometheus metrics |
 | `/health` | GET | no | Liveness check + in-flight hosts |
 | `/docs` | GET | no | Swagger UI |
@@ -383,6 +383,7 @@ When a sync times out but the circuit breaker has **not** tripped (isolated fail
 - If the queue is full when a retry becomes due, it is deferred 60s and re-attempted
   (the attempt is not consumed) rather than dropped
 - Metric: `discobox_sync_retries_total`
+- A hook for a device that is in Netdisco but not in Netbox is no error and no skip: it counts as `discobox_syncs_total{status="not_in_netbox"}` (plus `discobox_unknown_devices_total`), sets no failed flag, doesn't auto-pause, and lists the device on `/` and `/unknown-devices`
 - Errors inside a sync that still completes (an AP, IP, module, … that failed; `errors=` in the `sync done` line) don't make it an `error` in `discobox_syncs_total`: they count in `discobox_sync_errors_total` and per device in `discobox_device_last_sync_errors{instance}`; APs also in `discobox_aps_total{action}`. The errors are every ERROR line a sync logs (plus counted ones not logged as errors), so a failed note, fan or PSU update counts too. `/rebuild` outcomes: `discobox_rebuilds_total{status=success|error|skipped,dry_run}`. Reads (GET/HEAD) to Netbox and Netdisco are retried up to 3 times on a dropped connection or a 500/502/503, after 2, 4 and 8 s (plus up to 1 s jitter), never on 504 (a gateway timeout usually repeats) and never for writes
 
 ---

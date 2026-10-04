@@ -291,7 +291,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "sum(discobox_syncs_total{status=\"success\"}) / sum(discobox_syncs_total) * 100",
+          "expr": "sum(discobox_syncs_total{status=\"success\"}) / sum(discobox_syncs_total{status=~\"success|error\"}) * 100",
           "instant": true,
           "legendFormat": "__auto",
           "refId": "A"
@@ -841,7 +841,7 @@
 
     {
       "id": 21,
-      "title": "Unknown Devices",
+      "title": "Hooks Not in Netbox",
       "type": "stat",
       "gridPos": {"h": 4, "w": 3, "x": 18, "y": 21},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},

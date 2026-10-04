@@ -144,7 +144,7 @@ hooks_received_total = Counter(
 syncs_total = Counter(
     "discobox_syncs_total",
     "Completed device syncs",
-    ["status"],   # success | error
+    ["status"],   # success | error | skipped | not_in_netbox
     **_reg,
 )
 sync_duration = Histogram(
@@ -277,7 +277,7 @@ reconcile_aborted_total = Counter(
 )
 unknown_devices_total = Counter(
     "discobox_unknown_devices_total",
-    "Sync webhooks received for devices not found in Netbox",
+    "Sync webhooks received for devices in Netdisco but not in Netbox",
     **_reg,
 )
 reconcile_not_in_netdisco = Gauge(
@@ -1292,6 +1292,10 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             # touch field itself is the throttle signal for the next attempt.
             status = "skipped"
         if result.get("reason") == "device_not_found":
+            # In Netdisco, not in Netbox: an inventory gap, not a failed sync.
+            # Own status (no failed flag, no auto-pause, no cooldown mark), and
+            # the device goes on the list shown on / and /unknown-devices.
+            status = "not_in_netbox"
             unknown_devices_total.inc()
             with _unknown_devices_lock:
                 devices = _load_unknown_devices()
@@ -1336,7 +1340,7 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
         # failing device goes stale and timestamp-based alerts fire correctly.
         # device_sync_failed is always updated so failure is immediately visible.
         instance = result.get("hostname") or host
-        if status != "skipped":
+        if status in ("success", "error"):
             device_sync_failed.labels(instance=instance).set(0 if status == "success" else 1)
         if status == "error" and _PAUSE_ON_ERROR and not _is_paused():
             _set_paused(True)
@@ -1779,9 +1783,9 @@ async def index() -> str:
             ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(d["last_seen"]))
             unknown_rows += f"<tr><td>{d['ip']}</td><td>{d['hostname']}</td><td>{ts}</td></tr>"
     unknown_section = f"""
-    <h2>Unknown devices ({unknown_count})</h2>
+    <h2>Hooks for devices not in Netbox ({unknown_count})</h2>
     <table><tr><th>IP</th><th>Hostname</th><th>Last seen</th></tr>{unknown_rows}</table>
-    """ if unknown_count else "<h2>Unknown devices</h2><p>None</p>"
+    """ if unknown_count else "<h2>Hooks for devices not in Netbox</h2><p>None</p>"
 
     with _reconcile_gaps_lock:
         not_in_netdisco_list = _load_gap(_NOT_IN_NETDISCO_FILE)
@@ -1860,7 +1864,7 @@ async def index() -> str:
 <h1>discobox <small style="color:#888;font-size:.5em">v{__version__}</small></h1>
 <p>Status: <span class="badge">{status_label}</span>
 &nbsp; In-flight: <b>{len(in_flight)}</b>
-&nbsp; Unknown devices: <b>{unknown_count}</b>
+&nbsp; Hooks not in Netbox: <b>{unknown_count}</b>
 &nbsp; Last reconcile: <b>{last_reconcile_str}</b>
 &nbsp; Liveness (vmselect): <b>{liveness_str}</b></p>
 
@@ -1876,7 +1880,7 @@ async def index() -> str:
   <tr><td>GET/POST</td><td><a href=/reconcile/fix-tags>/reconcile/fix-tags</a></td><td>Re-enqueue discovery (with Netbox's expected auth tag as a hint) for the last reconcile's tag mismatches</td></tr>
   <tr><td>GET</td><td><a href=/reconcile>/reconcile</a></td><td>The last Netbox↔Netdisco compare: the gaps as JSON (read-only; ?refresh=true re-runs it in the background, ?lists=true adds the device lists)</td></tr>
   <tr><td>GET/POST</td><td>/discover?host=…</td><td>Enqueue a Netdisco discover for one device, with its Netbox snmp_auth_profile / snmp_polling_timeout (or &amp;tag= / &amp;timeout=)</td></tr>
-  <tr><td>GET</td><td><a href=/unknown-devices>/unknown-devices</a></td><td>Devices seen via LLDP but not found in Netbox (JSON)</td></tr>
+  <tr><td>GET</td><td><a href=/unknown-devices>/unknown-devices</a></td><td>Devices Netdisco sent a sync hook for but not in Netbox (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/not-in-netdisco>/not-in-netdisco</a></td><td>Active Netbox devices not in Netdisco (JSON)</td></tr>
   <tr><td>GET/POST</td><td>/types/library?role=…</td><td>DeviceType enrichment from the devicetype-library (dry-run; POST apply=true writes)</td></tr>
   <tr><td>GET</td><td><a href=/not-in-netbox>/not-in-netbox</a></td><td>Netdisco devices not in Netbox (JSON)</td></tr>
@@ -2160,7 +2164,7 @@ async def _types_bare_loop() -> None:
         await asyncio.sleep(_LIBRARY_METRICS_INTERVAL)
 
 
-@app.get("/unknown-devices", summary="Devices seen in Netdisco webhooks but not found in Netbox")
+@app.get("/unknown-devices", summary="Devices Netdisco sent a sync hook for but not in Netbox")
 async def unknown_devices() -> list:
     with _unknown_devices_lock:
         devices = _load_unknown_devices()
