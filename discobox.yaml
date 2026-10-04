@@ -150,6 +150,10 @@ reconcile:
                              # is still queued/in-flight, instead of piling more work on top of
                              # a backlog (e.g. a large hook burst) that's still draining
   defer_seconds: 3600
+  not_in_netbox_stale_hours: 24   # Netdisco devices not in Netbox whose last discovery lags Netdisco's
+                             # newest by more than this are gone or unreachable: listed as stale
+                             # (/not-in-netbox, collapsed on /), not counted in
+                             # discobox_reconcile_not_in_netbox, never auto-created. 0 = off
   liveness:                 # skip enqueueing devices a metrics store reports as down
     url: null               # Prometheus-compatible query API incl. tenant prefix, e.g.
                             # http://vmselect:8481/select/0/prometheus — null disables

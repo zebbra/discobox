@@ -316,3 +316,49 @@ def test_sessions_retry_reads_not_writes() -> None:
         assert retry.total == 3 and retry._is_method_retryable("GET")
         assert not retry._is_method_retryable("POST") and not retry._is_method_retryable("PATCH")
         assert not retry._is_method_retryable("DELETE")
+
+
+# ── reconcile: stale not-in-Netbox devices ─────────────────────────────────────
+
+class FakeNDInventory(FakeND):
+    def __init__(self, devices):
+        super().__init__()
+        self._devices = devices
+
+    def get_all_devices(self):
+        return self._devices
+
+    def get_device(self, ip):
+        return {"ip": ip}
+
+
+ND_INVENTORY = [
+    {"ip": "10.0.0.1", "name": "sw-up", "last_discover": "2026-10-04 06:00:00.12"},    # in Netbox
+    {"ip": "10.9.0.1", "name": "sw-new", "last_discover": "2026-10-03 08:00:00.5"},   # 22h behind newest
+    {"ip": "10.9.0.2", "name": "sw-gone", "last_discover": "2026-09-01 08:00:00"},
+    {"ip": "10.9.0.3", "name": "sw-never", "last_discover": None},
+]
+
+
+def test_reconcile_lists_stale_not_in_netbox_but_does_not_count_them() -> None:
+    counts = reconcile_devices(FakeNDInventory(ND_INVENTORY), FakeNB(DEVICES[:1]),
+                               max_queued=None, max_failed=None, max_enqueue=0)
+    stale = {e["ip"]: e["stale"] for e in counts["not_in_netbox_list"]}
+    assert stale == {"10.9.0.1": False, "10.9.0.2": True, "10.9.0.3": True}
+    assert counts["not_in_netbox"] == 1 and counts["not_in_netbox_stale"] == 2
+    assert counts["not_in_netbox_list"][0]["last_discover"] == "2026-10-03 08:00"
+
+
+def test_reconcile_stale_hours_off_counts_everything() -> None:
+    counts = reconcile_devices(FakeNDInventory(ND_INVENTORY), FakeNB(DEVICES[:1]),
+                               max_queued=None, max_failed=None, max_enqueue=0, not_in_netbox_stale_hours=0)
+    assert counts["not_in_netbox"] == 3 and counts["not_in_netbox_stale"] == 0
+
+
+def test_reconcile_never_auto_creates_stale_devices(monkeypatch) -> None:
+    created: list[str] = []
+    monkeypatch.setattr(discobox, "_create_device_from_nd",
+                        lambda nb, nd, ip, dev, **kw: created.append(ip) or True)
+    reconcile_devices(FakeNDInventory(ND_INVENTORY), FakeNB(DEVICES[:1]), max_queued=None, max_failed=None,
+                      max_enqueue=0, auto_create_role="switch", auto_create_site="lab")
+    assert created == ["10.9.0.1"]

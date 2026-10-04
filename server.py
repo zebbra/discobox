@@ -315,7 +315,13 @@ liveness_query_up = Gauge(
 
 reconcile_not_in_netbox = Gauge(
     "discobox_reconcile_not_in_netbox",
-    "Netdisco devices not found in Netbox (last reconcile)",
+    "Netdisco devices not found in Netbox, excluding stale ones (last reconcile)",
+    **_reg,
+)
+reconcile_not_in_netbox_stale = Gauge(
+    "discobox_reconcile_not_in_netbox_stale",
+    "Netdisco devices not in Netbox whose last discovery lags Netdisco's newest by more than "
+    "reconcile.not_in_netbox_stale_hours: listed, not counted (last reconcile)",
     **_reg,
 )
 reconcile_tag_mismatches = Gauge(
@@ -537,6 +543,9 @@ _RECONCILE_REQUIRE_AUTH_TAG: bool       = _cbool(_CFG, "reconcile", "require_aut
 # defer_seconds until the queue clears, so it still always eventually runs.
 _RECONCILE_DEFER_IF_QUEUED: bool         = _cbool(_CFG, "reconcile", "defer_if_queued", default=True)
 _RECONCILE_DEFER_SECONDS:   int          = int(_c(_CFG, "reconcile", "defer_seconds", default=3600))
+# Netdisco devices not in Netbox whose last discovery lags Netdisco's newest by
+# more than this are listed as stale, not counted (and never auto-created).
+_NOT_IN_NETBOX_STALE_HOURS: Optional[float] = _c(_CFG, "reconcile", "not_in_netbox_stale_hours", default=24)
 
 # Liveness gate: before enqueueing discovery, ask a Prometheus-compatible API
 # (VictoriaMetrics vmselect) which devices actually respond, and skip the dead
@@ -778,6 +787,7 @@ def _reconcile_once(max_enqueue: Optional[int], offset: Optional[int], compare_o
         iface_source_value=_IFACE_SOURCE_VALUE,
         liveness=liveness,
         liveness_key=_LIVENESS_KEY,
+        not_in_netbox_stale_hours=_NOT_IN_NETBOX_STALE_HOURS,
     )
     if counts.get("aborted"):
         reconcile_aborted_total.inc()
@@ -787,6 +797,7 @@ def _reconcile_once(max_enqueue: Optional[int], offset: Optional[int], compare_o
     reconcile_enqueued_total.inc(counts.get("enqueued", 0))
     reconcile_not_in_netdisco.set(counts.get("not_in_netdisco", 0))
     reconcile_not_in_netbox.set(counts.get("not_in_netbox", 0))
+    reconcile_not_in_netbox_stale.set(counts.get("not_in_netbox_stale", 0))
     reconcile_tag_mismatches.set(counts.get("tag_mismatches", 0))
     reconcile_skipped_offline.set(counts.get("skipped_offline", 0))
     with _reconcile_gaps_lock:
@@ -1833,13 +1844,17 @@ async def index() -> str:
 
     def _gap_table(devices: list[dict]) -> str:
         has_status = any("status" in d for d in devices)
-        header = "<tr><th>IP</th><th>Name</th>" + ("<th>Liveness</th>" if has_status else "") + "</tr>"
+        has_discover = any("last_discover" in d for d in devices)
+        header = ("<tr><th>IP</th><th>Name</th>" + ("<th>Liveness</th>" if has_status else "")
+                  + ("<th>Last discover</th>" if has_discover else "") + "</tr>")
         rows = ""
         for d in devices:
             cell = ""
             if has_status:
                 s = d.get("status", "unknown")
                 cell = f'<td style="color:{_STATUS_COLORS.get(s, "#888")}">{s}</td>'
+            if has_discover:
+                cell += f"<td>{d.get('last_discover') or 'never'}</td>"
             rows += f"<tr><td>{d['ip']}</td><td>{d['name']}</td>{cell}</tr>"
         return f"<table>{header}{rows}</table>"
 
@@ -1854,10 +1869,17 @@ async def index() -> str:
             f"<details><summary>Offline per liveness, ignored ({len(offline_list)})</summary>"
             f"{_gap_table(offline_list)}</details>"
         )
+    stale_list = [d for d in not_in_netbox_list if d.get("stale")]
+    current_list = [d for d in not_in_netbox_list if not d.get("stale")]
     not_in_netbox_section = (
-        f"<h2>In Netdisco, not in Netbox ({len(not_in_netbox_list)})</h2>{_gap_table(not_in_netbox_list)}"
-        if not_in_netbox_list else "<h2>In Netdisco, not in Netbox</h2><p>None</p>"
+        f"<h2>In Netdisco, not in Netbox ({len(current_list)})</h2>{_gap_table(current_list)}"
+        if current_list else "<h2>In Netdisco, not in Netbox</h2><p>None</p>"
     )
+    if stale_list:
+        not_in_netbox_section += (
+            f"<details><summary>Not discovered for {_NOT_IN_NETBOX_STALE_HOURS:g}h+, ignored ({len(stale_list)})</summary>"
+            f"{_gap_table(stale_list)}</details>"
+        )
 
     def _tag_mismatch_table(devices: list[dict]) -> str:
         header = "<tr><th>IP</th><th>Name</th><th>Netbox tag</th><th>Netdisco tag</th><th>Reason</th></tr>"
@@ -1908,7 +1930,7 @@ async def index() -> str:
   <tr><td>GET</td><td><a href=/unknown-devices>/unknown-devices</a></td><td>Devices Netdisco sent a sync hook for but not in Netbox (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/not-in-netdisco>/not-in-netdisco</a></td><td>Active Netbox devices not in Netdisco (JSON)</td></tr>
   <tr><td>GET/POST</td><td>/types/library?role=…</td><td>DeviceType enrichment from the devicetype-library (dry-run; POST apply=true writes)</td></tr>
-  <tr><td>GET</td><td><a href=/not-in-netbox>/not-in-netbox</a></td><td>Netdisco devices not in Netbox (JSON)</td></tr>
+  <tr><td>GET</td><td><a href=/not-in-netbox>/not-in-netbox</a></td><td>Netdisco devices not in Netbox, stale ones marked (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/tag-mismatches>/tag-mismatches</a></td><td>Devices with a missing or Netbox-mismatched auth tag (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/metrics>/metrics</a></td><td>Prometheus metrics</td></tr>
   <tr><td>GET</td><td><a href=/health>/health</a></td><td>Liveness check</td></tr>
@@ -1933,7 +1955,7 @@ async def stats() -> dict:
         unknown_devices_count = len(_load_unknown_devices())
     with _reconcile_gaps_lock:
         not_in_netdisco_list = _load_gap(_NOT_IN_NETDISCO_FILE)
-        not_in_netbox_count = len(_load_gap(_NOT_IN_NETBOX_FILE))
+        not_in_netbox_list = _load_gap(_NOT_IN_NETBOX_FILE)
         tag_mismatches_count = len(_load_gap(_TAG_MISMATCHES_FILE))
     last_reconcile = reconcile_last_run_timestamp._value.get() if hasattr(reconcile_last_run_timestamp, "_value") else 0
     return {
@@ -1944,7 +1966,8 @@ async def stats() -> dict:
         "unknown_devices_count": unknown_devices_count,
         "not_in_netdisco_count": sum(1 for d in not_in_netdisco_list if d.get("status") != "down"),
         "not_in_netdisco_offline_count": sum(1 for d in not_in_netdisco_list if d.get("status") == "down"),
-        "not_in_netbox_count": not_in_netbox_count,
+        "not_in_netbox_count": sum(1 for d in not_in_netbox_list if not d.get("stale")),
+        "not_in_netbox_stale_count": sum(1 for d in not_in_netbox_list if d.get("stale")),
         "tag_mismatches_count": tag_mismatches_count,
         "liveness_enabled": bool(_LIVENESS_URL),
         "liveness": _load_liveness_status() or None,
@@ -2043,7 +2066,7 @@ async def trigger_reconcile(
 
 
 _DIFF_KEYS = ("netbox_total", "netdisco_total", "already_known", "not_in_netdisco", "skipped_offline",
-              "not_in_netbox", "tag_mismatches")
+              "not_in_netbox", "not_in_netbox_stale", "tag_mismatches")
 
 
 @app.get(
@@ -2202,7 +2225,7 @@ async def not_in_netdisco() -> list:
         return _load_gap(_NOT_IN_NETDISCO_FILE)
 
 
-@app.get("/not-in-netbox", summary="Netdisco devices not found in Netbox (last reconcile)")
+@app.get("/not-in-netbox", summary="Netdisco devices not found in Netbox (last reconcile), with last_discover and stale")
 async def not_in_netbox() -> list:
     with _reconcile_gaps_lock:
         return _load_gap(_NOT_IN_NETBOX_FILE)
