@@ -1011,19 +1011,32 @@ def _mark_synced(host: str) -> None:
     except OSError:
         pass
 
-# Devices seen in Netdisco webhooks but not found in Netbox
-# Unknown devices: file-backed so all workers share state.
+# Devices Netdisco sent a sync hook for but not in Netbox: file-backed so all
+# workers share state. An entry goes once a sync finds the device in Netbox, or
+# when no hook has come for it in _UNKNOWN_MAX_AGE_S (gone from Netdisco too).
 _UNKNOWN_DEVICES_FILE: str = os.path.join(
     _STATE_DIR, "discobox.unknown.json"
 )
+_UNKNOWN_MAX_AGE_S = 14 * 86400
 _unknown_devices_lock = threading.Lock()
 
 def _load_unknown_devices() -> dict[str, dict]:
     try:
         with open(_UNKNOWN_DEVICES_FILE) as f:
-            return json.load(f)
+            devices = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
+    cutoff = time.time() - _UNKNOWN_MAX_AGE_S
+    return {k: d for k, d in devices.items() if d.get("last_seen", 0) >= cutoff}
+
+def _forget_unknown_device(host: str, hostname: str) -> None:
+    """Drop host (and any entry with the same hostname) once Netbox has the device."""
+    with _unknown_devices_lock:
+        devices = _load_unknown_devices()
+        keep = {k: d for k, d in devices.items()
+                if k != host and not (hostname and d.get("hostname") == hostname)}
+        if len(keep) != len(devices):
+            _save_unknown_devices(keep)
 
 def _save_unknown_devices(devices: dict[str, dict]) -> None:
     with open(_UNKNOWN_DEVICES_FILE, "w") as f:
@@ -1346,6 +1359,8 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             _set_paused(True)
             sync_paused.set(1)
             logger.warning("Sync error for %s: auto-pausing intake (DISCOBOX_PAUSE_ON_ERROR)", host)
+        if result.get("ok"):
+            _forget_unknown_device(host, result.get("hostname") or "")
         if status == "success":
             _mark_synced(host)
             device_sync_duration.labels(instance=instance).set(elapsed)

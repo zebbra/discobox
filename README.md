@@ -383,7 +383,7 @@ When a sync times out but the circuit breaker has **not** tripped (isolated fail
 - If the queue is full when a retry becomes due, it is deferred 60s and re-attempted
   (the attempt is not consumed) rather than dropped
 - Metric: `discobox_sync_retries_total`
-- A hook for a device that is in Netdisco but not in Netbox is no error and no skip: it counts as `discobox_syncs_total{status="not_in_netbox"}` (plus `discobox_unknown_devices_total`), sets no failed flag, doesn't auto-pause, and lists the device on `/` and `/unknown-devices`
+- A hook for a device that is in Netdisco but not in Netbox is no error and no skip: it counts as `discobox_syncs_total{status="not_in_netbox"}` (plus `discobox_unknown_devices_total`), sets no failed flag, doesn't auto-pause, and lists the device on `/` and `/unknown-devices` until a sync finds it in Netbox (or no hook came for it in 14 days)
 - Errors inside a sync that still completes (an AP, IP, module, … that failed; `errors=` in the `sync done` line) don't make it an `error` in `discobox_syncs_total`: they count in `discobox_sync_errors_total` and per device in `discobox_device_last_sync_errors{instance}`; APs also in `discobox_aps_total{action}`. The errors are every ERROR line a sync logs (plus counted ones not logged as errors), so a failed note, fan or PSU update counts too. `/rebuild` outcomes: `discobox_rebuilds_total{status=success|error|skipped,dry_run}`. Reads (GET/HEAD) to Netbox and Netdisco are retried up to 3 times on a dropped connection or a 500/502/503, after 2, 4 and 8 s (plus up to 1 s jitter), never on 504 (a gateway timeout usually repeats) and never for writes
 
 ---
