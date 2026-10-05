@@ -211,6 +211,20 @@ device_sync_errors = Gauge(
     ["instance"],
     **_reg,
 )
+orphans_total = Counter(
+    "discobox_orphans_total",
+    "Orphaned interfaces (in Netbox, not in Netdisco): removed, or braked (kept by the "
+    "mass-deletion brake, sync.orphan_delete_max_percent; counted again on every sync of that device)",
+    ["action"],   # removed | braked
+    **_reg,
+)
+device_orphans_braked = Gauge(
+    "discobox_device_orphans_braked",
+    "Orphaned interfaces the mass-deletion brake kept in the last sync of each device (0 = none; "
+    "> 0: Netdisco discovery incomplete, or Netbox stale — check the device or run a rebuild)",
+    ["instance"],
+    **_reg,
+)
 syncs_skipped_total = Counter(
     "discobox_syncs_skipped_total",
     "Syncs not done, by reason: cooldown | in_progress | queue_full (hook dropped before queuing; "
@@ -1400,6 +1414,10 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
         if "errors" in result:
             sync_errors_total.inc(result["errors"])
             device_sync_errors.labels(instance=instance).set(result["errors"])
+        if "orphans" in result:
+            for action, count in result["orphans"].items():
+                orphans_total.labels(action=action).inc(count)
+            device_orphans_braked.labels(instance=instance).set(result["orphans"]["braked"])
         if result.get("ha_vip"):
             ha_vip_total.inc()
         logger.info("Sync %s for %s in %.1fs", status, instance, elapsed)
@@ -1621,6 +1639,10 @@ async def rebuild(
     if "errors" in result and result.get("hostname"):
         sync_errors_total.inc(result["errors"])
         device_sync_errors.labels(instance=result["hostname"]).set(result["errors"])
+    if "orphans" in result and result.get("hostname") and not dry_run:
+        orphans_total.labels(action="removed").inc(result["orphans"]["removed"])
+        # the prune pass deletes the braked own ones (source-less ones stay; the next sync re-reports them)
+        device_orphans_braked.labels(instance=result["hostname"]).set(0)
     prune_result = result.get("prune", {})
     logger.info(
         "rebuild %s for %s%s: %s", status, resolved_host, " [dry-run]" if dry_run else "",

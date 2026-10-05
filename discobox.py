@@ -2074,7 +2074,7 @@ ORPHAN_DELETE_MIN_ALLOWED = 5    # small devices: this many orphans are always f
 def _remove_orphaned_interfaces(
     nb, existing: dict, nd_names: set, nd_port_count: int,
     source_cf: Optional[str], source_value: str, max_percent: int, log,
-    include_unowned: bool = False,
+    include_unowned: bool = False, stats: Optional[dict] = None,
 ) -> list[str]:
     """
     Delete Netbox interfaces Netdisco doesn't report ("orphans"), returning
@@ -2087,9 +2087,16 @@ def _remove_orphaned_interfaces(
     all, or when the deletable orphans exceed max_percent of the device's
     interfaces (and ORPHAN_DELETE_MIN_ALLOWED) — a failed or partial discovery
     must not wipe a device.
+    Exempt from the brake: discobox's own digit-only names ("17", an ifIndex
+    from a failed ifName walk) when Netdisco reports ports and none of them
+    digit-only — on devices that really name ports "1".."48" (HP/Aruba) the
+    brake still holds.
+    stats, if given, gets "braked": the orphans the brake kept.
     """
     nd_lower = {str(n).lower() for n in nd_names if n}
+    nd_digit_names = any(str(n).strip().isdigit() for n in nd_names if n)
     candidates = []
+    ifindex_junk = []
     unowned_kept: list[str] = []
     for name, iface in existing.items():
         lname = name.lower()
@@ -2109,6 +2116,10 @@ def _remove_orphaned_interfaces(
         if getattr(iface, "cable", None):
             log.debug("  %-40s orphan kept: has a cable", name)
             continue
+        if (source_cf and nd_port_count and not nd_digit_names and name.strip().isdigit()
+                and (dict(getattr(iface, "custom_fields", {}) or {}).get(source_cf) or "") == source_value):
+            ifindex_junk.append((name, iface))
+            continue
         candidates.append((name, iface))
     if unowned_kept:
         # preview for sync.remove_orphaned_interfaces: what it would remove here
@@ -2117,18 +2128,22 @@ def _remove_orphaned_interfaces(
             "  %d source-less orphan(s) kept (sync.remove_orphaned_interfaces would remove them): %s",
             len(unowned_kept), ", ".join(sorted(unowned_kept)[:10]) + (" …" if len(unowned_kept) > 10 else ""),
         )
-    if not candidates:
-        return []
     limit = max(ORPHAN_DELETE_MIN_ALLOWED, len(existing) * max_percent // 100)
-    if nd_port_count == 0 or len(candidates) > limit:
+    if candidates and (nd_port_count == 0 or len(candidates) > limit):
         log.warning(
             "  Orphan cleanup skipped: %d of %d interfaces would go (Netdisco ports: %d, limit %d) — "
             "discovery incomplete? Check the device, or run a rebuild",
             len(candidates), len(existing), nd_port_count, limit,
         )
-        return []
+        if stats is not None:
+            stats["braked"] = stats.get("braked", 0) + len(candidates)
+        candidates = []
+    if ifindex_junk:
+        log.info("  %d digit-only orphan(s) (ifIndex as name?), not braked: %s", len(ifindex_junk),
+                 ", ".join(sorted((n for n, _ in ifindex_junk), key=lambda n: int(n))[:10])
+                 + (" …" if len(ifindex_junk) > 10 else ""))
     deleted: list[str] = []
-    for name, iface in candidates:
+    for name, iface in ifindex_junk + candidates:
         # Netbox cascades an interface delete to its IPs: the device would lose them
         if list(nb.nb.ipam.ip_addresses.filter(assigned_object_type="dcim.interface", assigned_object_id=iface.id)):
             log.warning("  %-40s not in Netdisco but has IP(s) assigned: keeping", name)
@@ -4180,6 +4195,7 @@ def _sync_device(
 
     remove_orphans = housekeeping if remove_orphaned_interfaces is None else remove_orphaned_interfaces
     orphans_removed = 0
+    orphan_stats: dict = {"braked": 0}
     ap_radio_ports = [p for p in nd_ports if _is_ap_port(p)]
     ap_port_count = len(ap_radio_ports)
     if ap_port_count:
@@ -5179,7 +5195,7 @@ def _sync_device(
         # own orphans always; source-less ones only with remove_orphans
         for name in _remove_orphaned_interfaces(
             nb, all_existing, nd_names, len(nd_ports), iface_source_cf, iface_source_value,
-            orphan_delete_max_percent, log, include_unowned=remove_orphans,
+            orphan_delete_max_percent, log, include_unowned=remove_orphans, stats=orphan_stats,
         ):
             orphans_removed += 1
             device_changed = True
@@ -5333,7 +5349,7 @@ def _sync_device(
         # own orphans always; source-less ones only with remove_orphans
         for name in _remove_orphaned_interfaces(
             nb, all_existing, nd_names, len(nd_ports), iface_source_cf, iface_source_value,
-            orphan_delete_max_percent, log, include_unowned=remove_orphans,
+            orphan_delete_max_percent, log, include_unowned=remove_orphans, stats=orphan_stats,
         ):
             orphans_removed += 1
             device_changed = True
@@ -5911,6 +5927,7 @@ def _sync_device(
         "sfps": sfp_counts if sync_sfp else {},
         "aps": ap_counts if sync_modules else {},
         "ha_vip": vip_device is not None,
+        "orphans": {"removed": orphans_removed, "braked": orphan_stats["braked"]},
         **({"prune": prune_counts} if prune else {}),
     }
 

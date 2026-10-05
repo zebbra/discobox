@@ -147,5 +147,38 @@ def test_orphan_brake_on_empty_or_mass_deletion() -> None:
     assert _remove_orphaned_interfaces(_nb(), existing, set(), 0, "source", "netdisco", 25, logging.getLogger()) == []
     assert not any(i.deleted for i in existing.values())
     # 16 own orphans of 20 interfaces (80% > 25%, > the 5 always allowed): brake
+    stats: dict = {}
     assert _remove_orphaned_interfaces(_nb(), existing, {"Gi1/0/2"}, 1, "source", "netdisco", 25,
+                                       logging.getLogger(), stats=stats) == []
+    assert stats == {"braked": 17}   # own uncabled orphans: Gi1/0/1, Gi1/0/5, 15 Te
+
+
+def test_orphan_digit_names_bypass_brake_unless_netdisco_has_digit_ports() -> None:
+    from discobox import _remove_orphaned_interfaces
+    def setup():
+        existing = {f"Gi1/0/{n}": _If(n, f"Gi1/0/{n}", source="netdisco") for n in range(1, 11)}
+        existing.update({str(n): _If(100 + n, str(n), source="netdisco") for n in range(1, 21)})   # ifIndex junk
+        existing.update({f"Te1/1/{n}": _If(200 + n, f"Te1/1/{n}", source="netdisco") for n in range(1, 5)})
+        existing["21"] = _If(121, "21")                                       # source-less: kept
+        existing["22"] = _If(122, "22", source="netdisco", cable=SimpleNamespace(id=1))   # cabled: kept
+        existing["23"] = _If(123, "23", source="netdisco")                    # has IP: kept
+        return existing
+    nd = {f"Gi1/0/{n}" for n in range(1, 11)}
+    # 20 digit orphans (not braked) + 4 Te orphans (<= the 5 always allowed): all go
+    existing = setup()
+    deleted = _remove_orphaned_interfaces(_nb(ips_on={123}), existing, nd, 10, "source", "netdisco", 25,
+                                          logging.getLogger())
+    assert sorted(deleted) == sorted([str(n) for n in range(1, 21)] + [f"Te1/1/{n}" for n in range(1, 5)])
+    # the brake on the rest still holds: 13 non-digit orphans > limit 9, only the digit ones go
+    existing = setup()
+    deleted = _remove_orphaned_interfaces(_nb(ips_on={123}), existing, {"Gi1/0/1"}, 1, "source", "netdisco", 25,
+                                          logging.getLogger())
+    assert sorted(deleted) == sorted(str(n) for n in range(1, 21))
+    # Netdisco itself reports digit-only ports (HP/Aruba): no exemption, brake applies to all
+    existing = setup()
+    assert _remove_orphaned_interfaces(_nb(), existing, {"1"}, 1, "source", "netdisco", 25,
+                                       logging.getLogger()) == []
+    # no Netdisco ports at all: nothing
+    existing = setup()
+    assert _remove_orphaned_interfaces(_nb(), existing, set(), 0, "source", "netdisco", 25,
                                        logging.getLogger()) == []
