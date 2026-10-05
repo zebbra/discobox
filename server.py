@@ -1929,12 +1929,14 @@ async def index() -> str:
   th {{ color: #a29bfe; }}
   .endpoints td:first-child {{ color: #55efc4; }} .endpoints td:nth-child(2) {{ color: #fdcb6e; }}
   a {{ color: #74b9ff; }}
+  .btn {{ display:inline-block; padding: .1em .6em; border: 1px solid #74b9ff; border-radius: 4px; text-decoration: none; }}
+  .btn:hover {{ background: #74b9ff; color: #1a1a2e; }}
 </style></head><body>
 <h1>discobox <small style="color:#888;font-size:.5em">v{__version__}</small></h1>
 <p>Status: <span class="badge">{status_label}</span>
 &nbsp; In-flight: <b>{len(in_flight)}</b>
 &nbsp; Hooks not in Netbox: <b>{unknown_count}</b>
-&nbsp; Last reconcile: <b>{last_reconcile_str}</b>
+&nbsp; Last reconcile: <b>{last_reconcile_str}</b> <a class=btn href="/reconcile?refresh=true">refresh</a>
 &nbsp; Liveness (vmselect): <b>{liveness_str}</b></p>
 
 <h2>Endpoints</h2>
