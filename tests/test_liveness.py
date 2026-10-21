@@ -97,37 +97,37 @@ def test_fetch_liveness_error_status_raises(monkeypatch) -> None:
 
 def test_resolve_ha_member_ip_returns_target_label(monkeypatch) -> None:
     payload = _vm_payload(
-        ({"fgHaStatsHostname": "PrimusA1", "netbox_primary_ip": "10.219.123.11"}, 1),
+        ({"fgHaStatsHostname": "ClusterA1", "netbox_primary_ip": "198.51.100.11"}, 1),
     )
     calls = _patch_get(monkeypatch, payload)
-    got = _resolve_ha_member_ip("http://vmselect:8481/select/0/prometheus/", "PrimusA1")
-    assert got == "10.219.123.11"
+    got = _resolve_ha_member_ip("http://vmselect:8481/select/0/prometheus/", "ClusterA1")
+    assert got == "198.51.100.11"
     assert calls["url"] == "http://vmselect:8481/select/0/prometheus/api/v1/query"
-    assert calls["params"] == {"query": 'fgHaStatsSyncStatus_info{fgHaStatsHostname="PrimusA1"}'}
+    assert calls["params"] == {"query": 'fgHaStatsSyncStatus_info{fgHaStatsHostname="ClusterA1"}'}
 
 
 def test_resolve_ha_member_ip_strips_cidr(monkeypatch) -> None:
-    payload = _vm_payload(({"fgHaStatsHostname": "PrimusA1", "netbox_primary_ip": "10.219.123.11/24"}, 1))
+    payload = _vm_payload(({"fgHaStatsHostname": "ClusterA1", "netbox_primary_ip": "198.51.100.11/24"}, 1))
     _patch_get(monkeypatch, payload)
-    got = _resolve_ha_member_ip("http://vm", "PrimusA1")
-    assert got == "10.219.123.11"
+    got = _resolve_ha_member_ip("http://vm", "ClusterA1")
+    assert got == "198.51.100.11"
 
 
 def test_resolve_ha_member_ip_no_match_returns_none(monkeypatch) -> None:
     _patch_get(monkeypatch, _vm_payload())
-    got = _resolve_ha_member_ip("http://vm", "PrimusA1")
+    got = _resolve_ha_member_ip("http://vm", "ClusterA1")
     assert got is None
 
 
 def test_resolve_ha_member_ip_custom_metric_and_labels(monkeypatch) -> None:
-    payload = _vm_payload(({"unit_name": "PrimusA1", "target_ip": "10.219.123.11"}, 1))
+    payload = _vm_payload(({"unit_name": "ClusterA1", "target_ip": "198.51.100.11"}, 1))
     calls = _patch_get(monkeypatch, payload)
     got = _resolve_ha_member_ip(
-        "http://vm", "PrimusA1",
+        "http://vm", "ClusterA1",
         metric="my_ha_info", hostname_label="unit_name", target_label="target_ip",
     )
-    assert got == "10.219.123.11"
-    assert calls["params"] == {"query": 'my_ha_info{unit_name="PrimusA1"}'}
+    assert got == "198.51.100.11"
+    assert calls["params"] == {"query": 'my_ha_info{unit_name="ClusterA1"}'}
 
 
 def test_resolve_ha_member_ip_escapes_hostname_quotes(monkeypatch) -> None:
@@ -139,7 +139,7 @@ def test_resolve_ha_member_ip_escapes_hostname_quotes(monkeypatch) -> None:
 def test_resolve_ha_member_ip_error_status_raises(monkeypatch) -> None:
     _patch_get(monkeypatch, {"status": "error", "error": "boom"})
     with pytest.raises(RuntimeError, match="boom"):
-        _resolve_ha_member_ip("http://vm", "PrimusA1")
+        _resolve_ha_member_ip("http://vm", "ClusterA1")
 
 
 # ── reconcile_devices with liveness gate ───────────────────────────────────────

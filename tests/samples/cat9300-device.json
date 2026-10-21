@@ -29,7 +29,7 @@
   "ip": "192.0.2.114",
   "os_ver": "17.9.5",
   "creation": "2026-04-02 06:01:18.960337",
-  "vtp_domain": "CA4BERFLL15A-INT",
+  "vtp_domain": "VTPDOM02-INT",
   "location": "",
   "custom_fields": "{}",
   "vendor": "cisco",

@@ -1738,7 +1738,7 @@ def _sync_device(
     if parent_updated:
         log.debug("Subinterfaces: linked %d parent(s)", parent_updated)
 
-    # Wire up LAG bonding from Netdisco "slave_of" (e.g. Fortinet: port3 slave_of LAG-ecn).
+    # Wire up LAG bonding from Netdisco "slave_of" (e.g. Fortinet: port3 slave_of LAG-a).
     # Physical members → Netbox `lag` field; virtual children (l2vlan, etc.) → `parent`.
     flat_ifaces: dict = {}
     for m in member_iface_maps:

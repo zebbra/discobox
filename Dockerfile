@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # so the container needs no internet access. Pinned: bump the ref deliberately
 # so enrichment results are reproducible. VENDORS = vendor directories to keep
 # (comma-separated, as named in the library); empty keeps all (~11 MB).
-# TEMPORARY: the user's fork, branch "prerelease" = upstream master plus our
+# TEMPORARY: the maintainer's fork, branch "prerelease" = upstream master plus our
 # pending PRs (#4637-#4644 merged; pending: netbox-community/devicetype-library#4714,
 # Fortinet FAC-3000F).
 # Pin its head SHA, not the branch name: an unchanged build arg would keep the

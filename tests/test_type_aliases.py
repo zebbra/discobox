@@ -140,7 +140,7 @@ def test_create_false_is_lookup_only():
 
 
 def test_alias_to_model_of_type_without_part_number():
-    # prod AP types: model "9120AX" / "Catalyst 9120AXI-E", part_number null
+    # AP types as seen: model "9120AX" / "Catalyst 9120AXI-E", part_number null
     cisco = SimpleNamespace(id=1, name="Cisco")
     axe = FakeType(id=131, model="9120AX", part_number=None, slug="9120ax", manufacturer=cisco, custom_fields={})
     axi = FakeType(id=132, model="Catalyst 9120AXI-E", part_number=None, slug="catalyst-9120axi-e",

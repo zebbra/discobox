@@ -62,19 +62,19 @@ def test_mac_only_neighbor_without_ip() -> None:
 def test_name_chassis_id_resolves_by_short_name_and_abbreviated_port() -> None:
     # CDP/LLDP device ID is the AP's hostname (DHCP IP not in Netbox, no MAC match)
     dev, iface, mac = _ap()
-    dev.name = "bern-w052.example.com"
+    dev.name = "site-w052.example.com"
     nb = _nb(devices=[dev], ifaces=[iface])
-    assert _resolve_neighbor(nb, "192.0.2.39", "Gi0", "BERN-W052") == (52, 520)
-    assert _resolve_neighbor(nb, "192.0.2.39", "GigabitEthernet0", "bern-w052.example.com") == (52, 520)
+    assert _resolve_neighbor(nb, "192.0.2.39", "Gi0", "SITE-W052") == (52, 520)
+    assert _resolve_neighbor(nb, "192.0.2.39", "GigabitEthernet0", "site-w052.example.com") == (52, 520)
     # device found but port unknown → device only (no cable, neighbor_device still set)
-    assert _resolve_neighbor(nb, "", "eth7", "BERN-W052") == (52, None)
+    assert _resolve_neighbor(nb, "", "eth7", "SITE-W052") == (52, None)
     assert _resolve_neighbor(nb, "", "Gi0", "OTHER-W1") == (None, None)
 
 
 def test_ambiguous_name_is_not_used() -> None:
-    a = SimpleNamespace(id=1, name="bern-w052.example.com", primary_ip4=None)
-    b = SimpleNamespace(id=2, name="bern-w052.other.example", primary_ip4=None)
-    assert _resolve_neighbor(_nb(devices=[a, b]), "", "Gi0", "BERN-W052") == (None, None)
+    a = SimpleNamespace(id=1, name="site-w052.example.com", primary_ip4=None)
+    b = SimpleNamespace(id=2, name="site-w052.other.example", primary_ip4=None)
+    assert _resolve_neighbor(_nb(devices=[a, b]), "", "Gi0", "SITE-W052") == (None, None)
 
 
 def test_ambiguous_mac_is_not_used() -> None:

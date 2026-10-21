@@ -62,9 +62,9 @@ def _ha_node_info(short: str) -> Optional[tuple[int, str, str]]:
     """Parse an HA node indicator from a short hostname.
 
     Returns (node_num, vc_base, vip_short) or None when no indicator matches:
-      "zcgate0005p1h" → (1, "zcgate0005", "zcgate0005p0h")
+      "fwha0001p1h" → (1, "fwha0001", "fwha0001p0h")
       "fw-node2"      → (2, "fw", "fw-node0")
-      "zcmgt0004p1v"  → (1, "zcmgt0004", "zcmgt0004p0v")
+      "mgmtha0001p1v"  → (1, "mgmtha0001", "mgmtha0001p0v")
     """
     m = re.search(r"(p|node|-)([12])([a-z]?)", short, re.IGNORECASE)
     if not m:

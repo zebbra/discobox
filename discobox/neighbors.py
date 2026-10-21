@@ -36,7 +36,7 @@ def _resolve_neighbor(
        on exactly one Netbox interface (see _resolve_neighbor_by_mac); it only
        replaces an IP hit when it lands on the same device.
     4. Otherwise, a non-MAC chassis/device ID (CDP device ID, LLDP system
-       name, e.g. an AP on DHCP announcing "BERN-W32") as the name of exactly
+       name, e.g. an AP on DHCP announcing "SITE-W32") as the name of exactly
        one Netbox device, full or short name (see _resolve_neighbor_by_name).
     Interface names also match in abbreviated form ("Gi0" → GigabitEthernet0).
     Either value may be None independently.
@@ -104,8 +104,8 @@ def _neighbor_iface_on_device(nb: "NetboxClient", device_id: int, remote_port: s
 def _resolve_neighbor_by_name(nb: "NetboxClient", remote_id: str, remote_port: str) -> tuple[Optional[int], Optional[int]]:
     """
     (device_id, interface_id) of the one Netbox device named remote_id: an exact
-    (case-insensitive) name first, then the short name ("bern-w32" matches
-    "bern-w32.example.com"). More than one candidate: ambiguous, (None, None).
+    (case-insensitive) name first, then the short name ("site-w32" matches
+    "site-w32.example.com"). More than one candidate: ambiguous, (None, None).
     """
     name = (remote_id or "").strip()
     if not name:

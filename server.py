@@ -683,8 +683,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Actions are POST. GET still works on /sync and /rebuild until netbox-lens
-# calls them with POST: deprecated, so logged, counted and marked.
+# Actions are POST. GET still works on /sync and /rebuild until their callers
+# use POST: deprecated, so logged, counted and marked.
 _GET_DEPRECATED_PATHS = frozenset({"/sync", "/rebuild"})
 
 

@@ -21,12 +21,12 @@ def _fake_self(search_result):
 
 
 def test_find_canonical_ip_unique_match() -> None:
-    result = [{"name": "zcmgt0004p1v", "ip": "10.176.136.21"}]
-    assert NetdiscoClient.find_canonical_ip(_fake_self(result), "10.176.136.20") == "10.176.136.21"
+    result = [{"name": "mgmtha0001p1v", "ip": "192.0.2.21"}]
+    assert NetdiscoClient.find_canonical_ip(_fake_self(result), "192.0.2.20") == "192.0.2.21"
 
 
 def test_find_canonical_ip_no_match() -> None:
-    assert NetdiscoClient.find_canonical_ip(_fake_self([]), "10.176.136.20") is None
+    assert NetdiscoClient.find_canonical_ip(_fake_self([]), "192.0.2.20") is None
 
 
 def test_find_canonical_ip_ambiguous_match_not_guessed() -> None:
@@ -34,7 +34,7 @@ def test_find_canonical_ip_ambiguous_match_not_guessed() -> None:
         {"name": "dev-a", "ip": "10.0.0.1"},
         {"name": "dev-b", "ip": "10.0.0.2"},
     ]
-    assert NetdiscoClient.find_canonical_ip(_fake_self(result), "10.176.136.20") is None
+    assert NetdiscoClient.find_canonical_ip(_fake_self(result), "192.0.2.20") is None
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@
   "snmp_ver": 3,
   "snmp_engineid": "9a956d62f02f87e33a6dd5dcc92f2e8accdbf00f",
   "ip": "192.0.2.16",
-  "vtp_domain": "CA1BERFLL15A",
+  "vtp_domain": "VTPDOM01",
   "layers": "00000110",
   "name": "device-515",
   "last_arpnip": "2026-04-11 09:55:05.927587",

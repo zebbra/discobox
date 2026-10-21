@@ -122,6 +122,32 @@ map_host        = _make_mapper(_gen_host)
 map_location    = _make_mapper(_gen_location)
 map_engineid    = _make_mapper(_gen_engineid)
 map_chassis_id  = _make_mapper(_gen_chassis_id)
+map_vtp_domain  = _make_mapper(lambda real: f"VTPDOM{int(_h(real, 4), 16) % 100:02d}")
+
+# Environment-specific names the generic rules can't know (VDOMs, VPN tunnels,
+# firewall interface ids, ...): {"real substring": "fake"}, applied to every
+# string. Kept next to the raw dumps (samples/, gitignored), never committed.
+LOCAL_REPLACEMENTS = SRC / "anonymize.local.json"
+
+
+def _load_local_replacements() -> dict[str, str]:
+    try:
+        return json.loads(LOCAL_REPLACEMENTS.read_text())
+    except FileNotFoundError:
+        return {}
+
+
+def apply_local(value, table: dict[str, str]):
+    """Replace every table key in every string of value (longest key first)."""
+    if isinstance(value, str):
+        for real in sorted(table, key=len, reverse=True):
+            value = value.replace(real, table[real])
+        return value
+    if isinstance(value, list):
+        return [apply_local(v, table) for v in value]
+    if isinstance(value, dict):
+        return {k: apply_local(v, table) for k, v in value.items()}
+    return value
 
 
 # ── description / free-text scrubbing ──────────────────────────────────────────
@@ -181,6 +207,7 @@ def transform_device(d: dict) -> dict:
     if "snmp_comm" in out:      out["snmp_comm"] = None
     if out.get("contact"):      out["contact"] = "noc@example.com"
     if out.get("description"):  out["description"] = scrub_text(out["description"])
+    if out.get("vtp_domain"):   out["vtp_domain"] = map_vtp_domain(out["vtp_domain"])
     return out
 
 
@@ -242,7 +269,10 @@ def main() -> int:
         print(f"ERROR: {SRC} not found", file=sys.stderr)
         return 1
     DST.mkdir(parents=True, exist_ok=True)
+    local = _load_local_replacements()
     for src in sorted(SRC.glob("*.json")):
+        if src == LOCAL_REPLACEMENTS:
+            continue
         if src.name in SKIP:
             print(f"  SKIP   {src.name}  (search-shape, dropped)")
             continue
@@ -255,6 +285,7 @@ def main() -> int:
             data = json.load(f)
         transformer = TRANSFORMERS[shape]
         anon = [transformer(e) for e in data] if isinstance(data, list) else transformer(data)
+        anon = apply_local(anon, local)
         with (DST / out_name).open("w") as f:
             json.dump(anon, f, indent=2)
         n = len(anon) if isinstance(anon, list) else 1

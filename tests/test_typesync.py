@@ -95,7 +95,7 @@ def test_match_by_mapping_then_part_number(library: Path) -> None:
     assert match_library(_nb_type(part_number="C9120AXI-E", manufacturer="Meraki"), index) == (None, "")
     # a mapping to a missing library entry doesn't fall through to part_number
     assert match_library(_nb_type(part_number="C9120AXI-E"), index, {"9120AX": "nope"}) == (None, "")
-    # exact library model name (prod "Catalyst 9120AXI-E", part_number null), vendor case ignored
+    # exact library model name ("Catalyst 9120AXI-E", part_number null), vendor case ignored
     entry, how = match_library(_nb_type(model="Catalyst 9120AXI-E", manufacturer="cisco"), index)
     assert how == "model" and entry["part_number"] == "C9120AXI-E"
     assert match_library(_nb_type(model="Catalyst 9120AXI-E", manufacturer="Meraki"), index) == (None, "")

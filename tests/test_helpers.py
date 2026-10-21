@@ -63,11 +63,11 @@ IFTYPE_CASES: list[tuple[str, str, str]] = [
     ("port4",            "ethernetCsmacd",  "1000base-t"),
 
     # FortiProxy LAGs — caught via SNMP ifType.
-    ("LAG-ecn",          "ieee8023adLag",   "lag"),
-    ("LAG-dcn",          "ieee8023adLag",   "lag"),
+    ("LAG-a",          "ieee8023adLag",   "lag"),
+    ("LAG-b",          "ieee8023adLag",   "lag"),
 
     # FortiProxy l2vlan sub-interfaces and SSL VPN tunnels.
-    ("if-pro-ecn-1628",  "l2vlan",          "virtual"),
+    ("if-pro-n12-1628",  "l2vlan",          "virtual"),
     ("ssl.root",         "tunnel",          "virtual"),
 
     # Cisco port-channel shorthand and full form — still classify as lag.
@@ -115,7 +115,7 @@ def test_map_iftype() -> None:
 def test_map_iftype_null_iftype_has_no_opinion() -> None:
     # FortiGate devices can report ifType=null on every port. With default=None
     # the mapping must express "no opinion" so the existing Netbox type is kept.
-    assert map_iftype(None, "if-roo-sbc-164", default=None) is None
+    assert map_iftype(None, "if-roo-n01-164", default=None) is None
     assert map_iftype(None, "port1", default=None) is None
     assert map_iftype(None, "LAG-internal", default=None) is None
     # Name rules still win over a missing ifType
@@ -132,10 +132,10 @@ def test_slave_link_field() -> None:
     # Dot-notation subinterface → parent, regardless of types
     assert _slave_link_field("Gi0/0/1.100", "ethernetCsmacd", None) == "parent"
     # Netdisco says virtual (FortiProxy l2vlan) → parent
-    assert _slave_link_field("if-pro-ecn-1628", "l2vlan", None) == "parent"
+    assert _slave_link_field("if-pro-n12-1628", "l2vlan", None) == "parent"
     # Netdisco has no ifType but Netbox already knows it's virtual → parent
     # (regression: was mis-wired as `lag` and rejected with 400)
-    assert _slave_link_field("if-roo-sbc-164", None, "virtual") == "parent"
+    assert _slave_link_field("if-roo-n01-164", None, "virtual") == "parent"
     # Physical LAG members stay lag, with or without ifType
     assert _slave_link_field("port3", "ethernetCsmacd", "1000base-t") == "lag"
     assert _slave_link_field("port11", None, "1000base-t") == "lag"
@@ -395,18 +395,18 @@ def test_slot_from_iface() -> None:
     # Names without N/N/N pattern
     assert _slot_from_iface("stack", "Po1") is None
     assert _slot_from_iface("stack", "port1") is None
-    assert _slot_from_iface("stack", "LAG-ecn") is None
+    assert _slot_from_iface("stack", "LAG-a") is None
 
 
 # ── _ha_node_info ──────────────────────────────────────────────────────────────
 
 def test_ha_node_info() -> None:
     # Fortinet pNh convention
-    assert _ha_node_info("zcgate0005p1h") == (1, "zcgate0005", "zcgate0005p0h")
-    assert _ha_node_info("zcgate0005p2h") == (2, "zcgate0005", "zcgate0005p0h")
+    assert _ha_node_info("fwha0001p1h") == (1, "fwha0001", "fwha0001p0h")
+    assert _ha_node_info("fwha0001p2h") == (2, "fwha0001", "fwha0001p0h")
     # pNv cluster convention (e.g. FortiAnalyzer VM cluster) — same shape, different suffix letter
-    assert _ha_node_info("zcmgt0004p1v") == (1, "zcmgt0004", "zcmgt0004p0v")
-    assert _ha_node_info("zcmgt0004p2v") == (2, "zcmgt0004", "zcmgt0004p0v")
+    assert _ha_node_info("mgmtha0001p1v") == (1, "mgmtha0001", "mgmtha0001p0v")
+    assert _ha_node_info("mgmtha0001p2v") == (2, "mgmtha0001", "mgmtha0001p0v")
     # nodeN and -N conventions
     assert _ha_node_info("fw-node2") == (2, "fw", "fw-node0")
     assert _ha_node_info("gw-1") == (1, "gw", "gw-0")
@@ -531,20 +531,20 @@ def test_upsert_virtual_chassis_updates_member() -> None:
 
 
 def test_upsert_virtual_chassis_adopts_legacy_named_vc() -> None:
-    # Pair lives in a base-named VC ("zwgate0089") from the old naming scheme,
+    # Pair lives in a base-named VC ("fwold0002") from the old naming scheme,
     # partner is its master; target name doesn't exist. Creating a second VC
     # with the same master 400s in Netbox — the legacy VC must be adopted and
     # renamed in place, with no member moves.
-    legacy_vc = _FakeVC(id=7, name="zwgate0089")
-    dev = _FakeDevice("zwgate0089p2h", virtual_chassis=legacy_vc, vc_position=2)
-    partner = _FakeDevice("zwgate0089p1h", virtual_chassis=legacy_vc, vc_position=1)
+    legacy_vc = _FakeVC(id=7, name="fwold0002")
+    dev = _FakeDevice("fwold0002p2h", virtual_chassis=legacy_vc, vc_position=2)
+    partner = _FakeDevice("fwold0002p1h", virtual_chassis=legacy_vc, vc_position=1)
     legacy_vc.master = dev
     client = _make_client([legacy_vc], [dev, partner])
     action, vc = client.upsert_virtual_chassis(
-        "zwgate0089p0h", [(dev, 2), (partner, 1)],
+        "fwold0002p0h", [(dev, 2), (partner, 1)],
     )
     assert vc is legacy_vc
-    assert legacy_vc.name == "zwgate0089p0h"
+    assert legacy_vc.name == "fwold0002p0h"
     assert action == "renamed"
     assert not legacy_vc.deleted
     # No member churn
@@ -565,14 +565,14 @@ def test_upsert_virtual_chassis_creates_when_no_adoptable_vc() -> None:
 
 def test_upsert_virtual_chassis_absorbs_stale_single_member_vc() -> None:
     # Residue from the earlier VC-name mismatch: the partner sits alone in a
-    # junk VC ("zcgate0005") as its master. Moving it must release the master,
+    # junk VC ("fwha0001") as its master. Moving it must release the master,
     # move the device, and delete the empty shell.
-    target_vc = _FakeVC(id=5, name="zcgate0005p0h")
-    stale_vc = _FakeVC(id=9, name="zcgate0005")
-    dev = _FakeDevice("zcgate0005p2h", virtual_chassis=stale_vc, vc_position=2)
+    target_vc = _FakeVC(id=5, name="fwha0001p0h")
+    stale_vc = _FakeVC(id=9, name="fwha0001")
+    dev = _FakeDevice("fwha0001p2h", virtual_chassis=stale_vc, vc_position=2)
     stale_vc.master = dev
     client = _make_client([target_vc, stale_vc], [dev])
-    action, _ = client.upsert_virtual_chassis("zcgate0005p0h", [(dev, 2)])
+    action, _ = client.upsert_virtual_chassis("fwha0001p0h", [(dev, 2)])
     assert action == "updated"
     assert dev.virtual_chassis == 5
     assert stale_vc.updates == [{"master": None}]
@@ -633,14 +633,14 @@ def test_port_to_netbox_fortigate_null_types() -> None:
     by_name = {p["port"]: port_to_netbox(p) for p in ports}
     # VLAN subif on a LAG, physical member, and the LAG itself: no opinion on
     # type (None) so the existing Netbox type survives the diff.
-    assert by_name["if-roo-sbc-164"]["type"] is None
+    assert by_name["if-roo-n01-164"]["type"] is None
     assert by_name["port11"]["type"] is None
     assert by_name["LAG-internal"]["type"] is None
     # Name rule still applies without ifType
     assert by_name["mgmt"]["type"] == "1000base-t"
     # Everything else still parses
-    assert by_name["if-roo-sbc-164"]["speed"] == 2_000_000
-    assert by_name["if-roo-sbc-164"]["enabled"] is True
+    assert by_name["if-roo-n01-164"]["speed"] == 2_000_000
+    assert by_name["if-roo-n01-164"]["enabled"] is True
 
 
 # ── port_to_netbox (covers map_iftype + parse_speed_kbps + clean_mac) ──────────
@@ -666,29 +666,29 @@ def test_port_to_netbox_fortiproxy_physical() -> None:
 
 def test_port_to_netbox_fortiproxy_lag() -> None:
     port = {
-        "port": "LAG-ecn", "name": "LAG-ecn", "descr": "",
+        "port": "LAG-a", "name": "LAG-a", "descr": "",
         "type": "ieee8023adLag", "up_admin": "up",
         "speed": "1.0 Gbps", "duplex": None, "duplex_admin": None,
         "mac": "10:ff:e0:3d:63:c4", "mtu": 1500,
     }
     out = port_to_netbox(port)
-    assert out["name"] == "LAG-ecn"
+    assert out["name"] == "LAG-a"
     assert out["type"] == "lag"
     assert out["description"] == ""        # name == port → no description
     assert out["mac_address"] == "10:FF:E0:3D:63:C4"
 
 
 def test_port_to_netbox_fortiproxy_l2vlan() -> None:
-    # if-pro-ecn-1628 — VLAN sub-interface stacked on a LAG (slave_of is wired
-    # up later by the LAG-bonding pass; type comes from l2vlan ifType).
+    # if-pro-n12-1628 — VLAN sub-interface stacked on a LAG (slave_of is wired
+    # up later by the LAG-cding pass; type comes from l2vlan ifType).
     port = {
-        "port": "if-pro-ecn-1628", "name": "External to ECN", "descr": "",
+        "port": "if-pro-n12-1628", "name": "External to ECN", "descr": "",
         "type": "l2vlan", "up_admin": "up",
         "speed": "1.0 Gbps", "duplex": None, "duplex_admin": None,
         "mac": "10:ff:e0:3d:63:c4", "mtu": 1500,
     }
     out = port_to_netbox(port)
-    assert out["name"] == "if-pro-ecn-1628"
+    assert out["name"] == "if-pro-n12-1628"
     assert out["type"] == "virtual"
     assert out["description"] == "External to ECN"
 
