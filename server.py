@@ -986,6 +986,30 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Actions are POST; their GET form still works for one release (v2.x) but is
+# deprecated: logged, counted and marked with a Deprecation header.
+_GET_DEPRECATED_PATHS = frozenset({
+    "/sync", "/sync/all", "/sync/pause", "/sync/resume", "/rebuild", "/discover",
+    "/reconcile/enqueue", "/reconcile/fix-tags",
+})
+deprecated_requests_total = Counter(
+    "discobox_deprecated_requests_total",
+    "Requests using a deprecated form (GET on an action endpoint), by path",
+    ["path"],
+    **_reg,
+)
+
+
+@app.middleware("http")
+async def _deprecated_get(request: Request, call_next):
+    if request.method == "GET" and request.url.path in _GET_DEPRECATED_PATHS:
+        deprecated_requests_total.labels(request.url.path).inc()
+        logger.warning("Deprecated: GET %s, use POST (GET goes away in a later v2 release)", request.url.path)
+        response = await call_next(request)
+        response.headers["Deprecation"] = "true"
+        return response
+    return await call_next(request)
+
 # Hosts currently being synced.
 # _in_flight is per-process (queue-size tracking / listing only).
 # _claim_host / _release_host use O_CREAT|O_EXCL files for cross-worker dedup.
