@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 import discobox
-from discobox import fetch_liveness, reconcile_devices
+from discobox import discover_missing, fetch_liveness, find_gaps
 from discobox.ha import _resolve_ha_member_ip
 
 # ── fetch_liveness ─────────────────────────────────────────────────────────────
@@ -142,7 +142,17 @@ def test_resolve_ha_member_ip_error_status_raises(monkeypatch) -> None:
         _resolve_ha_member_ip("http://vm", "ClusterA1")
 
 
-# ── reconcile_devices with liveness gate ───────────────────────────────────────
+# ── gaps + discover-missing with liveness ──────────────────────────────────────
+
+def reconcile_devices(nd, nb, max_queued=None, max_failed=None, max_enqueue=None, require_auth_tag=False,
+                      auto_create_role=None, auto_create_site=None, **gaps_kwargs):
+    """find_gaps, then discover_missing on its lists (what the two jobs do), counts merged."""
+    gaps = find_gaps(nd, nb, **gaps_kwargs)
+    done = discover_missing(nd, nb, gaps["not_in_netdisco_list"], gaps["not_in_netbox_list"],
+                            max_queued=max_queued, max_failed=max_failed, max_enqueue=max_enqueue,
+                            require_auth_tag=require_auth_tag,
+                            auto_create_role=auto_create_role, auto_create_site=auto_create_site)
+    return {**gaps, **done}
 
 class FakeND:
     def __init__(self):
@@ -255,6 +265,25 @@ def test_reconcile_liveness_by_name() -> None:
     )
     assert nd.enqueued == ["10.0.0.1", "10.0.0.3"]
     assert counts["skipped_offline"] == 1
+
+
+def test_discover_missing_needs_only_the_gap_list() -> None:
+    """Decoupled from Netbox: the entry carries the auth tag and SNMP budget find_gaps read."""
+    class NDRec(FakeND):
+        def enqueue_discover(self, ip, device_auth_tag_hint=None, snmp_timeout_us=None):
+            self.enqueued.append((ip, device_auth_tag_hint, snmp_timeout_us))
+    nd = NDRec()
+    entries = [{"ip": "10.0.0.7", "name": "sw-7", "auth_tag": "v3", "snmp_timeout": "5m", "status": "up"},
+               {"ip": "10.0.0.8", "name": "sw-8", "auth_tag": None, "snmp_timeout": None}]
+    counts = discover_missing(nd, None, entries, max_queued=None, max_failed=None, require_auth_tag=True)
+    assert nd.enqueued == [("10.0.0.7", "v3", 20_000_000)] and counts["skipped"] == 1
+
+
+def test_find_gaps_entry_carries_the_discover_inputs() -> None:
+    dev = FakeDevice("sw-9", "10.0.0.9")
+    dev.custom_fields = {"snmp_auth_profile": "v3", "snmp_polling_timeout": "2m"}
+    gaps = find_gaps(FakeND(), FakeNB([dev]))
+    assert gaps["not_in_netdisco_list"] == [{"ip": "10.0.0.9", "name": "sw-9", "auth_tag": "v3", "snmp_timeout": "2m"}]
 
 
 if __name__ == "__main__":

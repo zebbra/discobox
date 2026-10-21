@@ -21,7 +21,8 @@ REPO = Path(__file__).resolve().parent.parent
 def test_repo_example_config_is_valid() -> None:
     settings, source = load_settings(str(REPO / "discobox.yaml"))
     assert source.endswith("discobox.yaml")
-    assert settings.jobs.reconcile.interval == 86400 and settings.jobs.types_bare.interval == 3600
+    assert settings.jobs.discover_missing.interval == 86400 and settings.jobs.gaps.max_age == 7200
+    assert settings.jobs.types_bare.interval == 3600
 
 
 def test_defaults() -> None:

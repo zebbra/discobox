@@ -90,7 +90,7 @@ These fields are updated on every sync. Create them on the **Device** object in 
 | `inventory_last_rebuild` | Date & time | Stamped (UTC) after every `/rebuild` with `dry_run=false`, whether or not it changed anything; never by a normal sync or a dry-run (`custom_fields.inventory_rebuild`; skipped unless the field exists, `null` disables) |
 | `stack_members` | Integer | Total physical units in a traditional stack with more than one member. Unset for standalone, a degraded 1-member stack (a count of `1` adds no signal), VSS (split across two Netbox devices), and FEX (satellites aren't stack members). By default (`custom_fields.stack_members_only_increase: true`, yaml-only) the recorded value never decreases — a dead member won't silently reduce it |
 
-### Read by discobox (Netbox → Netdisco, reconcile loop)
+### Read by discobox (Netbox → Netdisco, discover jobs)
 
 These fields are optional. If set on a Device they are passed to the Netdisco discovery queue. The names are configurable (`custom_fields.auth_profile`, `custom_fields.snmp_timeout`; null = not used).
 

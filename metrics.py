@@ -103,7 +103,7 @@ device_orphans_braked = Gauge(
 syncs_skipped_total = Counter(
     "discobox_syncs_skipped_total",
     "Syncs not done, by reason: cooldown | in_progress | queue_full (hook dropped before queuing; "
-    "queue_full means the device waits for its next hook or reconcile), discovery_incomplete | "
+    "queue_full means the device waits for its next hook or discover-missing), discovery_incomplete | "
     "recently_touched (sync started, then skipped; also in discobox_syncs_total{status=\"skipped\"})",
     ["reason"],
     **_reg,
@@ -136,19 +136,19 @@ device_sync_failed = Gauge(
     ["instance"],
     **_reg,
 )
-reconcile_netbox_devices = Gauge(
-    "discobox_reconcile_netbox_devices",
-    "Active Netbox devices with a primary IP seen during last reconcile",
+gaps_netbox_devices = Gauge(
+    "discobox_gaps_netbox_devices",
+    "Netbox devices (reconcile.roles/statuses, with a primary IP) seen by the last gaps run",
     **_reg,
 )
-reconcile_netdisco_devices = Gauge(
-    "discobox_reconcile_netdisco_devices",
-    "Devices known to Netdisco seen during last reconcile",
+gaps_netdisco_devices = Gauge(
+    "discobox_gaps_netdisco_devices",
+    "Devices known to Netdisco, last gaps run",
     **_reg,
 )
-reconcile_enqueued_total = Counter(
-    "discobox_reconcile_enqueued_total",
-    "Devices enqueued for Netdisco discovery by the reconcile loop",
+discover_missing_enqueued_total = Counter(
+    "discobox_discover_missing_enqueued_total",
+    "Devices enqueued for Netdisco discovery by discover-missing",
     **_reg,
 )
 unknown_devices_total = Counter(
@@ -156,14 +156,14 @@ unknown_devices_total = Counter(
     "Sync webhooks received for devices in Netdisco but not in Netbox",
     **_reg,
 )
-reconcile_not_in_netdisco = Gauge(
-    "discobox_reconcile_not_in_netdisco",
-    "Active Netbox devices not found in Netdisco, excluding those liveness reports down (last reconcile)",
+gaps_not_in_netdisco = Gauge(
+    "discobox_gaps_not_in_netdisco",
+    "Netbox devices not found in Netdisco, excluding those liveness reports down (last gaps run)",
     **_reg,
 )
-reconcile_skipped_offline = Gauge(
-    "discobox_reconcile_skipped_offline",
-    "Devices not enqueued by the last reconcile because liveness reported them down",
+gaps_offline = Gauge(
+    "discobox_gaps_offline",
+    "Netbox devices not found in Netdisco that liveness reports down (last gaps run)",
     **_reg,
 )
 types_bare = Gauge(
@@ -177,24 +177,24 @@ types_bare = Gauge(
 
 liveness_query_up = Gauge(
     "discobox_liveness_query_up",
-    "1 if the liveness query during the last reconcile succeeded, 0 on error",
+    "1 if the liveness query of the last gaps run succeeded, 0 on error",
     **_reg,
 )
 
-reconcile_not_in_netbox = Gauge(
-    "discobox_reconcile_not_in_netbox",
-    "Netdisco devices not found in Netbox, excluding stale ones (last reconcile)",
+gaps_not_in_netbox = Gauge(
+    "discobox_gaps_not_in_netbox",
+    "Netdisco devices not found in Netbox, excluding stale ones (last gaps run)",
     **_reg,
 )
-reconcile_not_in_netbox_stale = Gauge(
-    "discobox_reconcile_not_in_netbox_stale",
+gaps_not_in_netbox_stale = Gauge(
+    "discobox_gaps_not_in_netbox_stale",
     "Netdisco devices not in Netbox whose last discovery lags Netdisco's newest by more than "
-    "reconcile.not_in_netbox_stale_hours: listed, not counted (last reconcile)",
+    "reconcile.not_in_netbox_stale_hours: listed, not counted (last gaps run)",
     **_reg,
 )
-reconcile_tag_mismatches = Gauge(
-    "discobox_reconcile_tag_mismatches",
-    "Netdisco devices with a missing or Netbox-mismatched auth tag (last reconcile)",
+gaps_tag_mismatches = Gauge(
+    "discobox_gaps_tag_mismatches",
+    "Netdisco devices with a missing or Netbox-mismatched auth tag (last gaps run)",
     **_reg,
 )
 fix_tags_enqueued_total = Counter(

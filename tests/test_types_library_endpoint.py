@@ -77,84 +77,97 @@ def test_missing_library_is_503(monkeypatch) -> None:
     assert exc.value.status_code == 503
 
 
-def test_reconcile_diff_is_compare_only(monkeypatch) -> None:
-    seen: dict = {}
+GAP_COUNTS = {"netbox_total": 10, "netdisco_total": 9, "already_known": 8, "skipped": 0, "not_in_netdisco": 1,
+              "offline": 1, "not_in_netbox": 1, "not_in_netbox_stale": 0, "tag_mismatches": 2}
 
-    def fake_reconcile(nd, nb, **kw):
-        seen.update(kw)
-        return {"netbox_total": 10, "netdisco_total": 9, "already_known": 8, "not_in_netdisco": 1,
-                "skipped_offline": 1, "not_in_netbox": 1, "tag_mismatches": 2,
-                "not_in_netdisco_list": [{"ip": "192.0.2.1"}], "not_in_netbox_list": [], "tag_mismatches_list": []}
 
-    monkeypatch.setattr(server, "reconcile_devices", fake_reconcile)
+def _gaps_env(monkeypatch, find_gaps):
+    """server with find_gaps stubbed, its own job registry and state files."""
+    from prometheus_client import CollectorRegistry
+
+    from jobs import Job, JobRegistry
+    state = tempfile.mkdtemp(prefix="discobox-state-")
+    jobs = JobRegistry(os.path.join(state, "jobs.json"), registry=CollectorRegistry())
+    jobs.register(Job("gaps", server._job_gaps))
+    jobs.register(Job("discover-missing", server._job_discover_missing))
+    monkeypatch.setattr(server, "_jobs", jobs)
+    monkeypatch.setattr(server, "find_gaps", find_gaps)
     monkeypatch.setattr(server, "_get_netdisco_client", lambda: object())
     monkeypatch.setattr(server, "_get_netbox_client", lambda: object())
     monkeypatch.setattr(server, "_LIVENESS_URL", None)
-    monkeypatch.setattr(server, "_is_paused", lambda: True)          # read-only: runs while paused
-    state = tempfile.mkdtemp(prefix="discobox-state-")
-    for attr, name in (("_RECONCILE_LAST_FILE", "last"), ("_NOT_IN_NETDISCO_FILE", "nind"),
+    for attr, name in (("_GAPS_COUNTS_FILE", "gaps"), ("_NOT_IN_NETDISCO_FILE", "nind"),
                        ("_NOT_IN_NETBOX_FILE", "ninb"), ("_TAG_MISMATCHES_FILE", "tm")):
         monkeypatch.setattr(server, attr, os.path.join(state, name + ".json"))
-    r = server.reconcile_diff(lists=False, refresh=False, wait=True)     # GET /reconcile?wait=true
-    assert seen["max_enqueue"] == 0 and seen["auto_create_role"] is None
-    assert seen["max_queued"] is None and seen["max_failed"] is None
-    counts = {k: r[k] for k in ("netbox_total", "netdisco_total", "already_known", "not_in_netdisco",
-                                "not_in_netbox", "tag_mismatches", "offline")}
-    assert counts == {"netbox_total": 10, "netdisco_total": 9, "already_known": 8, "not_in_netdisco": 1,
-                      "not_in_netbox": 1, "tag_mismatches": 2, "offline": 1}
-    assert r["mode"] == "compare" and r["error"] is None and r["running"] is False
-    assert r["refresh_started"] is False
+    return jobs
+
+
+def test_gaps_view_runs_the_gaps_job_read_only(monkeypatch) -> None:
+    seen: dict = {}
+
+    def fake_find_gaps(nd, nb, **kw):
+        seen.update(kw)
+        return {**GAP_COUNTS, "not_in_netdisco_list": [{"ip": "192.0.2.1"}], "not_in_netbox_list": [],
+                "tag_mismatches_list": []}
+
+    _gaps_env(monkeypatch, fake_find_gaps)
+    monkeypatch.setattr(server, "_is_paused", lambda: True)          # read-only: runs while paused
+    r = server.gaps_view(lists=False, refresh=False, wait=True)     # GET /gaps?wait=true
+    assert set(seen) == {"roles", "statuses", "liveness", "liveness_key", "not_in_netbox_stale_hours"}
+    assert {k: r[k] for k in GAP_COUNTS} == GAP_COUNTS
+    assert r["last_run"]["status"] == "ok" and r["running"] is False and r["refresh_started"] is False
     # lists come from the saved gap files
-    assert server.reconcile_diff(lists=True, refresh=False, wait=False)["not_in_netdisco_list"] == [{"ip": "192.0.2.1"}]
+    assert server.gaps_view(lists=True, refresh=False, wait=False)["not_in_netdisco_list"] == [{"ip": "192.0.2.1"}]
 
 
-def test_reconcile_diff_answers_immediately_and_refreshes_in_background(monkeypatch) -> None:
+def test_gaps_view_answers_immediately_and_refreshes_in_background(monkeypatch) -> None:
     import threading
     gate, calls = threading.Event(), []
 
-    def slow_reconcile(nd, nb, **kw):
+    def slow_find_gaps(nd, nb, **kw):
         calls.append(kw)
         gate.wait(5)
-        return {"netbox_total": 3, "netdisco_total": 3, "already_known": 3}
+        return {**GAP_COUNTS, "not_in_netdisco_list": [], "not_in_netbox_list": [], "tag_mismatches_list": []}
 
-    monkeypatch.setattr(server, "reconcile_devices", slow_reconcile)
-    monkeypatch.setattr(server, "_get_netdisco_client", lambda: object())
-    monkeypatch.setattr(server, "_get_netbox_client", lambda: object())
-    monkeypatch.setattr(server, "_LIVENESS_URL", None)
-    state = tempfile.mkdtemp(prefix="discobox-state-")
-    for attr, name in (("_RECONCILE_LAST_FILE", "last"), ("_NOT_IN_NETDISCO_FILE", "nind"),
-                       ("_NOT_IN_NETBOX_FILE", "ninb"), ("_TAG_MISMATCHES_FILE", "tm")):
-        monkeypatch.setattr(server, attr, os.path.join(state, name + ".json"))
-
-    r = server.reconcile_diff(lists=False, refresh=False, wait=False)   # no result yet → starts one
+    jobs = _gaps_env(monkeypatch, slow_find_gaps)
+    r = server.gaps_view(lists=False, refresh=False, wait=False)   # no result yet → starts one
     assert r["refresh_started"] is True and r["running"] is True and r["finished"] is None
-    r2 = server.reconcile_diff(lists=False, refresh=True, wait=False)   # already running → not doubled
+    r2 = server.gaps_view(lists=False, refresh=True, wait=False)   # already running → not doubled
     assert r2["refresh_started"] is False and r2["running"] is True
     gate.set()
-    server._jobs.wait("compare")
-    for _ in range(50):
-        r3 = server.reconcile_diff(lists=False, refresh=False, wait=False)
-        if r3["finished"]:
-            break
-        __import__("time").sleep(0.05)
+    jobs.wait("gaps")
+    r3 = server.gaps_view(lists=False, refresh=False, wait=False)
     assert len(calls) == 1
-    assert r3["netbox_total"] == 3 and r3["running"] is False and r3["refresh_started"] is False
+    assert r3["netbox_total"] == 10 and r3["finished"] and r3["running"] is False and r3["refresh_started"] is False
 
 
-def test_reconcile_diff_records_errors(monkeypatch) -> None:
+def test_gaps_view_records_errors(monkeypatch) -> None:
     def boom(nd, nb, **kw):
         raise ConnectionError("Remote end closed connection without response")
 
-    monkeypatch.setattr(server, "reconcile_devices", boom)
-    monkeypatch.setattr(server, "_get_netdisco_client", lambda: object())
-    monkeypatch.setattr(server, "_get_netbox_client", lambda: object())
-    monkeypatch.setattr(server, "_LIVENESS_URL", None)
-    monkeypatch.setattr(server, "_RECONCILE_LAST_FILE", os.path.join(tempfile.mkdtemp(), "last.json"))
+    _gaps_env(monkeypatch, boom)
     with pytest.raises(HTTPException) as exc:
-        server.reconcile_diff(lists=False, refresh=False, wait=True)
+        server.gaps_view(lists=False, refresh=False, wait=True)
     assert exc.value.status_code == 502
-    r = server.reconcile_diff(lists=False, refresh=False, wait=False)
-    assert "Remote end closed" in r["error"] and r["refresh_started"] is False
+    r = server.gaps_view(lists=False, refresh=False, wait=False)
+    assert "Remote end closed" in r["last_run"]["error"] and r["refresh_started"] is False and r["finished"] is None
+
+
+def test_discover_missing_refuses_a_missing_or_old_gaps_result(monkeypatch) -> None:
+    jobs = _gaps_env(monkeypatch, lambda nd, nb, **kw: {**GAP_COUNTS, "not_in_netdisco_list": [],
+                                                        "not_in_netbox_list": [], "tag_mismatches_list": []})
+    monkeypatch.setattr(server, "_is_paused", lambda: False)
+    monkeypatch.setattr(server, "_inflight_hosts", lambda: [])
+    called = []
+    monkeypatch.setattr(server, "discover_missing", lambda *a, **kw: called.append(a) or
+                        {"aborted": False, "enqueued": 0, "skipped": 0, "skipped_offline": 0})
+    rec = jobs.run("discover-missing")
+    assert rec["status"] == "skipped" and "no gaps result" in rec["summary"] and not called
+    jobs.run("gaps")
+    monkeypatch.setattr(server, "_GAPS_MAX_AGE", 3600)
+    assert jobs.run("discover-missing")["status"] == "ok" and len(called) == 1
+    monkeypatch.setattr(server.time, "time", lambda: jobs.last_success("gaps") + 7200)
+    rec = jobs.run("discover-missing")
+    assert rec["status"] == "skipped" and "120m old (max 60m)" in rec["summary"] and len(called) == 1
 
 
 # ── /discover ──

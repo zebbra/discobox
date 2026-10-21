@@ -6,20 +6,18 @@ Netdisco calls POST /sync after each discovery job.
 Syncs run in a background thread pool; duplicate requests for the
 same host are dropped while a sync is already in progress.
 
-Endpoints:
-  GET/POST /sync             Trigger a device sync
-  GET/POST /sync/all         Queue a sync for every device known to Netdisco
-  GET/POST /rebuild          Rebuild one device's inventory to exactly match Netdisco (deletes stale entries)
-  GET/POST /sync/pause       Hold queued syncs from starting
-  GET/POST /sync/resume      Release the pause gate
-  GET      /reconcile        Last Netbox↔Netdisco compare: the gaps (read-only; ?refresh re-runs it)
-  GET/POST /reconcile/enqueue  Reconcile + enqueue discovers for missing devices / auto-create
-  GET/POST /discover         Enqueue a Netdisco discover for one device (Netbox SNMP profile/timeout)
+Endpoints (see /docs):
+  POST     /sync             Trigger a device sync (the Netdisco hook)
+  POST     /sync/all         Queue a sync for every device known to Netdisco
+  POST     /rebuild          Rebuild one device's inventory to exactly match Netdisco (deletes stale entries)
+  POST     /sync/pause       Hold queued syncs from starting
+  POST     /sync/resume      Release the pause gate
+  POST     /discover         Enqueue a Netdisco discover for one device (Netbox SNMP profile/timeout)
+  GET      /jobs             Jobs: gaps, discover-missing, fix-tags, types-bare
+  POST     /jobs/<name>/run  Run a job now
+  GET      /gaps             The last gaps result (Netbox ↔ Netdisco)
   GET/POST /types/library    Enrich DeviceTypes from the devicetype-library (dry-run unless POST apply=true)
-  GET      /metrics          Prometheus metrics
-  GET      /health           Liveness check
-  GET      /stats            Aggregated operational status as JSON
-  GET      /docs             Swagger UI (auto-generated)
+  GET      /config, /stats, /metrics, /health
 """
 
 import asyncio
@@ -56,11 +54,12 @@ from discobox import (
     configure_ap_fingerprint,
     configure_discover_snmptimeout,
     configure_read_fields,
+    discover_missing,
     discover_snmptimeout_us,
     fetch_liveness,
+    find_gaps,
     fix_tag_mismatches,
     read_cf,
-    reconcile_devices,
     sync_device,
     validate_ip,
 )
@@ -75,7 +74,15 @@ from metrics import (
     device_sync_errors,
     device_sync_failed,
     device_sync_timestamp,
+    discover_missing_enqueued_total,
     fix_tags_enqueued_total,
+    gaps_netbox_devices,
+    gaps_netdisco_devices,
+    gaps_not_in_netbox,
+    gaps_not_in_netbox_stale,
+    gaps_not_in_netdisco,
+    gaps_offline,
+    gaps_tag_mismatches,
     ha_vip_total,
     hooks_received_total,
     interfaces_total,
@@ -86,14 +93,6 @@ from metrics import (
     netdisco_requests_total,
     orphans_total,
     rebuilds_total,
-    reconcile_enqueued_total,
-    reconcile_netbox_devices,
-    reconcile_netdisco_devices,
-    reconcile_not_in_netbox,
-    reconcile_not_in_netbox_stale,
-    reconcile_not_in_netdisco,
-    reconcile_skipped_offline,
-    reconcile_tag_mismatches,
     sfps_total,
     sync_duration,
     sync_errors_total,
@@ -268,7 +267,9 @@ async def require_auth(authorization: Annotated[str, Header()] = "") -> None:
 
 # ── Reconcile loop ─────────────────────────────────────────────────────────────
 
-_RECONCILE_INTERVAL:      int           = _S.jobs.reconcile.interval
+_GAPS_INTERVAL:           int           = _S.jobs.gaps.interval
+_GAPS_MAX_AGE:            int           = _S.jobs.gaps.max_age
+_DISCOVER_MISSING_INTERVAL: int         = _S.jobs.discover_missing.interval
 _RECONCILE_MAX_QUEUED:    Optional[int] = _S.reconcile.max_queued
 _RECONCILE_MAX_FAILED:    Optional[int] = _S.reconcile.max_failed
 _RECONCILE_MAX_ENQUEUE:   Optional[int] = _S.reconcile.max_enqueue
@@ -356,7 +357,7 @@ def _get_netdisco_client() -> NetdiscoClient:
     return _netdisco_client
 
 
-# Shared across every sync/reconcile call: constructing a fresh NetboxClient
+# Shared across every sync/gaps call: constructing a fresh NetboxClient
 # per request opened a brand-new requests.Session (and thus a brand-new
 # TCP+TLS connection) every single time instead of reusing a warm connection
 # pool — real, avoidable load on Netbox at 8-concurrent-syncs scale. Token
@@ -451,109 +452,63 @@ def _refresh_types_bare_safe() -> None:
         _jobs.run("types-bare", wait_if_running=True)
 
 
-def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = None,
-                   compare_only: bool = False) -> Optional[dict]:
-    """
-    Compare Netbox with Netdisco and (unless compare_only) enqueue discovers /
-    auto-create. compare_only never writes anywhere but the gap reports: no
-    discover jobs, no auto-create, no queue-busy abort, allowed while paused.
-    Returns reconcile_devices' counts (None when skipped or aborted). Every
-    finished run (or its error) is recorded for GET /reconcile.
-    """
-    if _is_paused() and not compare_only:
-        logger.info("Reconcile skipped: sync is paused")
+def _fetch_liveness_safe() -> Optional[dict]:
+    """The liveness data for a gaps run; None (fail open) when off or the query fails."""
+    if not _LIVENESS_URL:
         return None
-    started = time.time()
     try:
-        counts = _reconcile_once(max_enqueue, offset, compare_only)
+        liveness = fetch_liveness(
+            _LIVENESS_URL, _LIVENESS_QUERY,
+            label=_LIVENESS_LABEL,
+            timeout=_LIVENESS_TIMEOUT,
+            verify_tls=_LIVENESS_TLS_VERIFY,
+        )
     except Exception as exc:
-        _save_reconcile_last({"mode": "compare" if compare_only else "enqueue", "started": started,
-                              "finished": time.time(), "duration_s": round(time.time() - started, 1),
-                              "error": str(exc)})
-        raise
-    if counts is not None:
-        _save_reconcile_last({"mode": "compare" if compare_only else "enqueue", "started": started,
-                              "finished": time.time(), "duration_s": round(time.time() - started, 1),
-                              "error": None, "counts": _diff_counts(counts)})
-    return counts
+        liveness_query_up.set(0)
+        _save_liveness_status({"ok": False, "devices": 0, "error": str(exc), "checked": time.time()})
+        logger.error("Liveness query failed (failing open: no device marked down): %s", exc)
+        return None
+    liveness_query_up.set(1)
+    _save_liveness_status({"ok": True, "devices": len(liveness), "error": None, "checked": time.time()})
+    logger.info("Liveness: %d devices matched by query", len(liveness))
+    return liveness
 
 
-def _reconcile_once(max_enqueue: Optional[int], offset: Optional[int], compare_only: bool) -> Optional[dict]:
-    nd = _get_netdisco_client()
-    nb = _get_netbox_client()
-    effective_max = 0 if compare_only else (max_enqueue if max_enqueue is not None else _RECONCILE_MAX_ENQUEUE)
-
-    liveness = None
-    if _LIVENESS_URL:
-        try:
-            liveness = fetch_liveness(
-                _LIVENESS_URL, _LIVENESS_QUERY,
-                label=_LIVENESS_LABEL,
-                timeout=_LIVENESS_TIMEOUT,
-                verify_tls=_LIVENESS_TLS_VERIFY,
-            )
-            liveness_query_up.set(1)
-            _save_liveness_status({"ok": True, "devices": len(liveness), "error": None, "checked": time.time()})
-            logger.info("Liveness: %d devices matched by query", len(liveness))
-        except Exception as exc:
-            liveness = None  # fail open: reconcile as if the gate were disabled
-            liveness_query_up.set(0)
-            _save_liveness_status({"ok": False, "devices": 0, "error": str(exc), "checked": time.time()})
-            logger.error("Liveness query failed (failing open, nothing skipped): %s", exc)
-
-    counts = reconcile_devices(
-        nd, nb,
-        max_queued=None if compare_only else _RECONCILE_MAX_QUEUED,
-        max_failed=None if compare_only else _RECONCILE_MAX_FAILED,
-        max_enqueue=effective_max,
-        offset=offset,
+def _run_gaps() -> dict:
+    """Compare Netbox with Netdisco, keep the gap lists for the status page, discover-missing and fix-tags."""
+    counts = find_gaps(
+        _get_netdisco_client(), _get_netbox_client(),
         roles=_RECONCILE_ROLES,
         statuses=_RECONCILE_STATUSES,
-        require_auth_tag=_RECONCILE_REQUIRE_AUTH_TAG,
-        auto_create_role=None if compare_only else _AUTO_CREATE_ROLE,
-        auto_create_site=None if compare_only else _AUTO_CREATE_SITE,
-        auto_create_status=_AUTO_CREATE_STATUS,
-        auto_create_location=_AUTO_CREATE_LOCATION,
-        iface_source_cf=_IFACE_SOURCE_CF,
-        iface_source_value=_IFACE_SOURCE_VALUE,
-        liveness=liveness,
+        liveness=_fetch_liveness_safe(),
         liveness_key=_LIVENESS_KEY,
         not_in_netbox_stale_hours=_NOT_IN_NETBOX_STALE_HOURS,
     )
-    if counts.get("aborted"):
-        return None
-    reconcile_netbox_devices.set(counts.get("netbox_total", 0))
-    reconcile_netdisco_devices.set(counts.get("netdisco_total", 0))
-    reconcile_enqueued_total.inc(counts.get("enqueued", 0))
-    reconcile_not_in_netdisco.set(counts.get("not_in_netdisco", 0))
-    reconcile_not_in_netbox.set(counts.get("not_in_netbox", 0))
-    reconcile_not_in_netbox_stale.set(counts.get("not_in_netbox_stale", 0))
-    reconcile_tag_mismatches.set(counts.get("tag_mismatches", 0))
-    reconcile_skipped_offline.set(counts.get("skipped_offline", 0))
+    gaps_netbox_devices.set(counts["netbox_total"])
+    gaps_netdisco_devices.set(counts["netdisco_total"])
+    gaps_not_in_netdisco.set(counts["not_in_netdisco"])
+    gaps_offline.set(counts["offline"])
+    gaps_not_in_netbox.set(counts["not_in_netbox"])
+    gaps_not_in_netbox_stale.set(counts["not_in_netbox_stale"])
+    gaps_tag_mismatches.set(counts["tag_mismatches"])
+    summary = {k: v for k, v in counts.items() if not k.endswith("_list")}
     with _reconcile_gaps_lock:
-        _save_gap(_NOT_IN_NETDISCO_FILE, counts.get("not_in_netdisco_list", []))
-        _save_gap(_NOT_IN_NETBOX_FILE, counts.get("not_in_netbox_list", []))
-        _save_gap(_TAG_MISMATCHES_FILE, counts.get("tag_mismatches_list", []))
-    return counts
+        _save_gap(_NOT_IN_NETDISCO_FILE, counts["not_in_netdisco_list"])
+        _save_gap(_NOT_IN_NETBOX_FILE, counts["not_in_netbox_list"])
+        _save_gap(_TAG_MISMATCHES_FILE, counts["tag_mismatches_list"])
+        _save_gaps_counts(summary)
+    return summary
 
 
-def _run_fix_tag_mismatches(max_enqueue: Optional[int] = None) -> Optional[dict]:
-    if _is_paused():
-        logger.info("Fix tag mismatches skipped: sync is paused")
-        return None
-    nd = _get_netdisco_client()
-    with _reconcile_gaps_lock:
-        mismatches = _load_gap(_TAG_MISMATCHES_FILE)
-    result = fix_tag_mismatches(
-        nd, mismatches,
-        max_queued=_RECONCILE_MAX_QUEUED,
-        max_failed=_RECONCILE_MAX_FAILED,
-        max_enqueue=max_enqueue,
-    )
-    if not result.get("aborted"):
-        fix_tags_enqueued_total.inc(result.get("enqueued", 0))
-        logger.info("Fix tag mismatches: %s", result)
-    return result
+def _gaps_too_old() -> Optional[str]:
+    """Why the last gaps result can't be acted on (None: fresh enough)."""
+    finished = _jobs.last_success("gaps")
+    if not finished:
+        return "no gaps result yet: run gaps first"
+    age = time.time() - finished
+    if age > _GAPS_MAX_AGE:
+        return f"gaps result is {int(age // 60)}m old (max {_GAPS_MAX_AGE // 60}m): run gaps first"
+    return None
 
 
 # ── Jobs ───────────────────────────────────────────────────────────────────────
@@ -561,43 +516,72 @@ def _run_fix_tag_mismatches(max_enqueue: Optional[int] = None) -> Optional[dict]
 _jobs = JobRegistry(os.path.join(_STATE_DIR, "discobox.jobs.json"), registry=_custom_registry)
 
 
-def _reconcile_summary(counts: dict) -> str:
-    d = _diff_counts(counts)
-    parts = [f"{d['not_in_netdisco']} not in Netdisco", f"{d['not_in_netbox']} not in Netbox"]
-    if d.get("not_in_netbox_stale"):
-        parts[-1] += f" (+{d['not_in_netbox_stale']} stale)"
-    if d.get("offline"):
-        parts.append(f"{d['offline']} offline")
-    parts.append(f"{d['tag_mismatches']} tag mismatches")
-    if "enqueued" in d or not counts.get("compare_only"):
-        parts.insert(0, f"{counts.get('enqueued', 0)} enqueued")
-    return ", ".join(parts)
+def _job_gaps() -> JobResult:
+    c = _run_gaps()
+    parts = [f"{c['not_in_netdisco']} not in Netdisco", f"{c['not_in_netbox']} not in Netbox"]
+    if c["not_in_netbox_stale"]:
+        parts[-1] += f" (+{c['not_in_netbox_stale']} stale)"
+    if c["offline"]:
+        parts.append(f"{c['offline']} offline")
+    parts.append(f"{c['tag_mismatches']} tag mismatches")
+    return JobResult(summary=", ".join(parts), data=c)
 
 
-def _job_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = None,
-                   manual: bool = False) -> JobResult:
+def _job_discover_missing(max_enqueue: Optional[int] = None, offset: Optional[int] = None,
+                          manual: bool = False) -> JobResult:
     if _is_paused():
         return JobResult("skipped", "sync is paused", retry_in=_RECONCILE_DEFER_SECONDS)
+    too_old = _gaps_too_old()
+    if too_old:
+        return JobResult("skipped", too_old, retry_in=_RECONCILE_DEFER_SECONDS)
     queued = len(_inflight_hosts())
     if _RECONCILE_DEFER_IF_QUEUED and queued and not manual:
         return JobResult("deferred", f"{queued} sync(s) still queued/in-flight", retry_in=_RECONCILE_DEFER_SECONDS)
-    counts = _run_reconcile(max_enqueue=max_enqueue, offset=offset)
-    if counts is None:
+    with _reconcile_gaps_lock:
+        not_in_netdisco = _load_gap(_NOT_IN_NETDISCO_FILE)
+        not_in_netbox = _load_gap(_NOT_IN_NETBOX_FILE)
+    c = discover_missing(
+        _get_netdisco_client(), _get_netbox_client(), not_in_netdisco, not_in_netbox,
+        max_queued=_RECONCILE_MAX_QUEUED,
+        max_failed=_RECONCILE_MAX_FAILED,
+        max_enqueue=max_enqueue if max_enqueue is not None else _RECONCILE_MAX_ENQUEUE,
+        offset=offset,
+        require_auth_tag=_RECONCILE_REQUIRE_AUTH_TAG,
+        auto_create_role=_AUTO_CREATE_ROLE,
+        auto_create_site=_AUTO_CREATE_SITE,
+        auto_create_status=_AUTO_CREATE_STATUS,
+        auto_create_location=_AUTO_CREATE_LOCATION,
+        iface_source_cf=_IFACE_SOURCE_CF,
+        iface_source_value=_IFACE_SOURCE_VALUE,
+    )
+    if c["aborted"]:
         return JobResult("aborted", "Netdisco queue too busy or its status unreachable (see log)")
-    return JobResult(summary=_reconcile_summary(counts))
-
-
-def _job_compare() -> JobResult:
-    counts = _run_reconcile(compare_only=True)
-    return JobResult(summary=_reconcile_summary({**(counts or {}), "compare_only": True}))
+    discover_missing_enqueued_total.inc(c["enqueued"])
+    parts = [f"{c['enqueued']} enqueued"]
+    for key, label in (("skipped", "without auth tag"), ("skipped_offline", "offline"), ("created", "created"),
+                       ("failed", "auto-create failed")):
+        if c.get(key):
+            parts.append(f"{c[key]} {label}")
+    return JobResult(summary=", ".join(parts), data=c)
 
 
 def _job_fix_tags(max_enqueue: Optional[int] = None) -> JobResult:
-    result = _run_fix_tag_mismatches(max_enqueue=max_enqueue)
-    if result is None:
+    if _is_paused():
         return JobResult("skipped", "sync is paused")
+    too_old = _gaps_too_old()
+    if too_old:
+        return JobResult("skipped", too_old)
+    with _reconcile_gaps_lock:
+        mismatches = _load_gap(_TAG_MISMATCHES_FILE)
+    result = fix_tag_mismatches(
+        _get_netdisco_client(), mismatches,
+        max_queued=_RECONCILE_MAX_QUEUED,
+        max_failed=_RECONCILE_MAX_FAILED,
+        max_enqueue=max_enqueue,
+    )
     if result.get("aborted"):
         return JobResult("aborted", "Netdisco queue too busy or its status unreachable (see log)")
+    fix_tags_enqueued_total.inc(result.get("enqueued", 0))
     return JobResult(summary=f"{result.get('enqueued', 0)} enqueued, {result.get('skipped', 0)} skipped, "
                              f"{result.get('errors', 0)} errors")
 
@@ -609,12 +593,13 @@ def _job_types_bare() -> JobResult:
     return JobResult(summary=f"{n} dummy types, {available} the library can fill")
 
 
-_jobs.register(Job("reconcile", _job_reconcile, interval=_RECONCILE_INTERVAL, startup_delay=300,
-                   description="Compare Netbox with Netdisco; enqueue discovery for missing devices, auto-create"))
-_jobs.register(Job("compare", _job_compare,
-                   description="Compare only: refresh the gap reports, no discovery, no auto-create"))
+_jobs.register(Job("gaps", _job_gaps, interval=_GAPS_INTERVAL, startup_delay=60,
+                   description="Compare Netbox with Netdisco: the gap lists (read-only on both)"))
+_jobs.register(Job("discover-missing", _job_discover_missing, interval=_DISCOVER_MISSING_INTERVAL, startup_delay=300,
+                   description="From the last gaps result: enqueue Netdisco discovery for Netbox devices it doesn't "
+                               "know, auto-create Netbox devices (auto_create)"))
 _jobs.register(Job("fix-tags", _job_fix_tags,
-                   description="Re-enqueue discovery with Netbox's auth tag for the last reconcile's tag mismatches"))
+                   description="From the last gaps result: re-enqueue discovery with Netbox's auth tag for tag mismatches"))
 if _IFACE_SOURCE_CF:
     _jobs.register(Job("types-bare", _job_types_bare, interval=_LIBRARY_METRICS_INTERVAL,
                        description="Refresh discobox_types_bare (dummy types and what the library can fill)"))
@@ -786,25 +771,23 @@ _reconcile_gaps_lock = threading.Lock()
 # file here), full pass every aps.full_pass_days and on every rebuild.
 configure_ap_fingerprint(_STATE_DIR if _S.aps.skip_unchanged else None, _S.aps.full_pass_days)
 
-# Summary of the last finished reconcile run (counts, when, how long, error),
-# served by GET /reconcile without re-running the compare.
-_RECONCILE_LAST_FILE: str = os.path.join(
-    _STATE_DIR, "discobox.reconcile_last.json"
-)
+# Counts of the last successful gaps run, served by GET /gaps (the lists are
+# in the gap files; when and how it ran is in the job state).
+_GAPS_COUNTS_FILE: str = os.path.join(_STATE_DIR, "discobox.gaps.json")
 
-def _load_reconcile_last() -> dict:
+def _load_gaps_counts() -> dict:
     try:
-        with open(_RECONCILE_LAST_FILE) as f:
+        with open(_GAPS_COUNTS_FILE) as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
-def _save_reconcile_last(summary: dict) -> None:
+def _save_gaps_counts(counts: dict) -> None:
     try:
-        with open(_RECONCILE_LAST_FILE, "w") as f:
-            json.dump(summary, f)
+        with open(_GAPS_COUNTS_FILE, "w") as f:
+            json.dump(counts, f)
     except OSError as exc:
-        logger.warning("Could not save the reconcile summary: %s", exc)
+        logger.warning("Could not save the gaps counts: %s", exc)
 
 def _load_gap(path: str) -> list[dict]:
     try:
@@ -1592,14 +1575,14 @@ def jobs_run(
     name: str,
     response: Response,
     wait: Annotated[bool, Query(description="Run in this request and answer with the result")] = False,
-    max_enqueue: Annotated[Optional[int], Query(description="reconcile / fix-tags: max devices to enqueue")] = None,
-    offset: Annotated[Optional[int], Query(description="reconcile: skip the first N missing devices")] = None,
+    max_enqueue: Annotated[Optional[int], Query(description="discover-missing / fix-tags: max devices to enqueue")] = None,
+    offset: Annotated[Optional[int], Query(description="discover-missing: skip the first N missing devices")] = None,
 ) -> dict:
     # Plain def: a ?wait=true run blocks FastAPI's threadpool, not the event loop.
     if name not in _jobs:
         raise HTTPException(404, f"unknown job {name!r}, known: {', '.join(_jobs.names())}")
     kwargs: dict = {}
-    if name == "reconcile":
+    if name == "discover-missing":
         kwargs = {"max_enqueue": max_enqueue, "offset": offset, "manual": True}
     elif name == "fix-tags":
         kwargs = {"max_enqueue": max_enqueue}
@@ -1632,12 +1615,12 @@ async def stats() -> dict:
         not_in_netdisco_list = _load_gap(_NOT_IN_NETDISCO_FILE)
         not_in_netbox_list = _load_gap(_NOT_IN_NETBOX_FILE)
         tag_mismatches_count = len(_load_gap(_TAG_MISMATCHES_FILE))
-    last_reconcile = _jobs.last_success("reconcile") or 0
     return {
         "version": __version__,
         "paused": _is_paused(),
         "in_flight": len(_inflight_hosts()),
-        "last_reconcile": last_reconcile or None,
+        "last_reconcile": _jobs.last_success("gaps"),      # when the gap counts below are from
+        "last_discover_missing": _jobs.last_success("discover-missing"),
         "unknown_devices_count": unknown_devices_count,
         "not_in_netdisco_count": sum(1 for d in not_in_netdisco_list if d.get("status") != "down"),
         "not_in_netdisco_offline_count": sum(1 for d in not_in_netdisco_list if d.get("status") == "down"),
@@ -1725,43 +1708,37 @@ def discover(
             "timeout_us": effective_timeout, "timeout_source": timeout_source}
 
 
-_DIFF_KEYS = ("netbox_total", "netdisco_total", "already_known", "not_in_netdisco", "skipped_offline",
-              "not_in_netbox", "not_in_netbox_stale", "tag_mismatches")
-
-
 @app.get(
-    "/reconcile",
+    "/gaps",
     dependencies=[Depends(require_auth)],
-    summary="The last Netbox/Netdisco compare's gaps (read-only: no discover jobs, no auto-create); ?refresh=true re-runs it",
+    summary="The last gaps result (Netbox ↔ Netdisco); ?refresh=true runs the gaps job in the background",
 )
-def reconcile_diff(
+def gaps_view(
     lists: Annotated[bool, Query(description="Include the device lists, not only the counts")] = False,
-    refresh: Annotated[bool, Query(description="Start a new compare in the background (unless one is running)")] = False,
-    wait: Annotated[bool, Query(description="Run the compare now and answer when done (slow: may exceed proxy timeouts)")] = False,
+    refresh: Annotated[bool, Query(description="Start the gaps job in the background (unless it's running)")] = False,
+    wait: Annotated[bool, Query(description="Run the gaps job now and answer when done (slow: may exceed proxy timeouts)")] = False,
 ) -> dict:
     """
-    The last reconcile's result, immediately. The full inventory compare takes
-    longer than a proxy/route timeout, so it runs in the background: ?refresh
-    starts one (also started when there's no result yet), `running` says one
-    is in progress, and the reconcile loop's runs update the result too.
+    The last gaps result, immediately. A run takes longer than a proxy/route
+    timeout, so it runs in the background: ?refresh starts one (also started
+    when there's no result yet), `running` says one is in progress.
     """
     # Plain def: runs in FastAPI's threadpool
     if wait:
-        run = _jobs.run("compare", wait_if_running=True)
+        run = _jobs.run("gaps", wait_if_running=True)
         if run and run["status"] == "error":
-            raise HTTPException(502, f"Compare failed: {run['error']}")
-    last = _load_reconcile_last()
+            raise HTTPException(502, f"gaps failed: {run['error']}")
+    last = _jobs.last("gaps")
     started = False
     if not wait and (refresh or not last):
-        started = _jobs.start("compare")
-    result: dict = dict(last.get("counts") or {})
+        started = _jobs.start("gaps")
+    result: dict = _load_gaps_counts()
+    success = _jobs.last_success("gaps")
     result.update({
-        "mode": last.get("mode"),
-        "finished": last.get("finished"),
-        "age_s": round(time.time() - last["finished"]) if last.get("finished") else None,
-        "duration_s": last.get("duration_s"),
-        "error": last.get("error"),
-        "running": _jobs.is_running("compare"),
+        "finished": success,
+        "age_s": round(time.time() - success) if success else None,
+        "last_run": {k: last.get(k) for k in ("finished", "duration_s", "status", "error")} if last else None,
+        "running": _jobs.is_running("gaps"),
         "refresh_started": started,
     })
     if lists:
@@ -1769,15 +1746,6 @@ def reconcile_diff(
             result["not_in_netdisco_list"] = _load_gap(_NOT_IN_NETDISCO_FILE)
             result["not_in_netbox_list"] = _load_gap(_NOT_IN_NETBOX_FILE)
             result["tag_mismatches_list"] = _load_gap(_TAG_MISMATCHES_FILE)
-    return result
-
-
-def _diff_counts(counts: dict) -> dict:
-    result: dict = {k: counts.get(k, 0) for k in _DIFF_KEYS}
-    # skipped_offline: not-in-Netdisco devices the liveness data reports down (not counted above)
-    result["offline"] = result.pop("skipped_offline")
-    if counts.get("enqueued"):
-        result["enqueued"] = counts["enqueued"]
     return result
 
 

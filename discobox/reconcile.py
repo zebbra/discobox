@@ -349,107 +349,57 @@ def _stale_cutoff(nd_devices: list[dict], hours: Optional[float]) -> Optional[da
     return newest - timedelta(hours=hours) if newest else None
 
 
-def reconcile_devices(
+def find_gaps(
     nd: "NetdiscoClient",
     nb: "NetboxClient",
-    max_queued: Optional[int] = 500,
-    max_failed: Optional[int] = 500,
-    max_enqueue: Optional[int] = None,
-    offset: Optional[int] = None,
-    roles: Optional[list] = None,  # empty/None = all roles
-    statuses: Optional[list] = None,  # empty/None = ["active"]
-    require_auth_tag: bool = False,
-    auto_create_role: Optional[str] = None,
-    auto_create_site: Optional[str] = None,
-    auto_create_status: str = "active",
-    auto_create_location: bool = False,
-    iface_source_cf: Optional[str] = None,
-    iface_source_value: str = "netdisco",
-    liveness: Optional[dict] = None,   # from fetch_liveness(); None = no filtering
+    roles: Optional[list] = None,      # empty/None = all roles
+    statuses: Optional[list] = None,   # empty/None = ["active"]
+    liveness: Optional[dict] = None,   # from fetch_liveness(); None = no liveness status
     liveness_key: str = "ip",          # device attribute matched against liveness keys: ip | name
     not_in_netbox_stale_hours: Optional[float] = 24,   # see _stale_cutoff; None/0 = off
 ) -> dict:
     """
-    Compare Netbox active devices against Netdisco and enqueue discovery
-    for any device present in Netbox but missing from Netdisco.
+    Compare Netbox with Netdisco (read-only on both): Netbox devices (roles,
+    statuses, with a primary IP) that Netdisco doesn't know, Netdisco devices
+    missing from Netbox, and auth tag mismatches. discover_missing and
+    fix_tag_mismatches act on the lists this returns.
 
-    If auto_create_role and auto_create_site are set, also creates NetBox
-    devices for any Netdisco device not yet present in NetBox.
-
-    If the Netdisco queue exceeds max_queued or max_failed (last 1h), the
-    enqueue step is skipped to avoid overloading Netdisco.
-
-    max_enqueue=0 disables enqueueing entirely (no discovery jobs are ever
-    submitted) while still running the full not_in_netdisco/not_in_netbox
-    gap scan — use this to monitor drift without triggering discovery.
-
-    When `liveness` is given, each missing device gets a status (up/down/
-    unknown) in the gap list and devices reported down are not enqueued —
-    a dead device would only produce a failed Netdisco discovery job and
-    burn max_failed budget. Devices absent from the liveness data count as
-    "unknown" and are still enqueued (fail-open: not-yet-monitored gear
-    must remain discoverable).
+    Each not_in_netdisco entry carries what a discover job needs (auth_tag,
+    snmp_timeout from the device's read custom fields) and, with liveness,
+    a status up/down/unknown. Devices reported down stay in the list but
+    don't count: discovery can't reach them anyway.
 
     Netdisco devices missing from Netbox whose last discovery is more than
     not_in_netbox_stale_hours older than Netdisco's newest one are gone (or
-    unreachable): they stay in the gap list marked "stale": true, but don't count
-    in not_in_netbox and are never auto-created.
+    unreachable): listed with "stale": true, not counted, never auto-created.
 
-    Returns counts: enqueued / skipped (no primary IP) / skipped_offline /
-                    already_known / netbox_total / netdisco_total / aborted (bool).
+    Raises when Netdisco's device list can't be fetched.
     """
     log = logging.getLogger("discobox.reconcile")
-    _aborted = {"aborted": True, "enqueued": 0, "skipped": 0, "already_known": 0, "netbox_total": 0, "netdisco_total": 0}
-
-    if max_queued is not None or max_failed is not None:
-        try:
-            qs = nd.get_queue_status(since="1h")
-        except requests.HTTPError as exc:
-            log.error("Reconcile aborted: could not fetch Netdisco queue status: %s", exc)
-            return _aborted
-        queued, failed = qs.get("queued", 0), qs.get("failed", 0)
-        if (max_queued is not None and queued > max_queued) or \
-           (max_failed is not None and failed > max_failed):
-            log.warning(
-                "Reconcile aborted: queue too busy (queued=%d failed=%d, limits queued=%s failed=%s)",
-                queued, failed, max_queued, max_failed,
-            )
-            return _aborted
-
-    try:
-        nd_all_devices = nd.get_all_devices()
-        nd_by_ip = {d["ip"]: d for d in nd_all_devices if d.get("ip")}
-    except requests.HTTPError as exc:
-        log.error("Reconcile aborted: could not fetch Netdisco devices: %s", exc)
-        return _aborted
+    nd_all_devices = nd.get_all_devices()
+    nd_by_ip = {d["ip"]: d for d in nd_all_devices if d.get("ip")}
     log.info("Netdisco knows %d devices", len(nd_by_ip))
 
     role_filter = {"role": roles} if roles else {}
     status_filter = statuses or ["active"]
-    nb_total = nb.nb.dcim.devices.count(status=status_filter, has_primary_ip=True, **role_filter)
-    counts = {"enqueued": 0, "skipped": 0, "skipped_offline": 0, "already_known": 0, "netdisco_total": len(nd_by_ip), "netbox_total": nb_total}
-    if roles:
-        log.info("Reconcile role filter: %s", roles)
-    if statuses:
-        log.info("Reconcile status filter: %s", statuses)
-
+    counts = {"netbox_total": 0, "netdisco_total": len(nd_by_ip), "already_known": 0, "skipped": 0}
     not_in_netdisco: list[dict] = []
     tag_mismatches: list[dict] = []
-    enqueue_cap_logged = False
     for device in nb.nb.dcim.devices.filter(status=status_filter, has_primary_ip=True, **role_filter):
+        counts["netbox_total"] += 1
         primary = device.primary_ip4
         if not primary:
             counts["skipped"] += 1
             continue
         ip = str(primary).split("/")[0]
+        cf = getattr(device, "custom_fields", {}) or {}
+        nb_tag = read_cf(cf, "auth_profile")
+        snmp_timeout = read_cf(cf, "snmp_timeout")
 
         if ip in nd_by_ip:
             counts["already_known"] += 1
-            cf = getattr(device, "custom_fields", {}) or {}
-            nb_tag = read_cf(cf, "auth_profile")
             nd_tag = nd_by_ip[ip].get("device_auth_tag") or None
             # carried along so fix-tags' re-discover uses the device's own SNMP timeout
-            snmp_timeout = read_cf(cf, "snmp_timeout")
             if not nd_tag:
                 tag_mismatches.append({"ip": ip, "name": device.name, "netbox_tag": nb_tag, "netdisco_tag": nd_tag,
                                        "reason": "missing", "snmp_polling_timeout": snmp_timeout})
@@ -458,51 +408,14 @@ def reconcile_devices(
                                        "reason": "mismatch", "snmp_polling_timeout": snmp_timeout})
             continue
 
-        entry = {"ip": ip, "name": device.name}
+        entry = {"ip": ip, "name": device.name, "auth_tag": nb_tag, "snmp_timeout": snmp_timeout}
         if liveness is not None:
             alive = liveness.get(ip if liveness_key == "ip" else str(device.name or ""))
             entry["status"] = "unknown" if alive is None else ("up" if alive else "down")
         not_in_netdisco.append(entry)
 
-        if entry.get("status") == "down":
-            counts["skipped_offline"] += 1
-            log.debug("Skipping %s (%s): liveness reports down", ip, device.name)
-            continue
-
-        cf = getattr(device, "custom_fields", {}) or {}
-        device_auth_tag_hint = read_cf(cf, "auth_profile")
-        if require_auth_tag and not device_auth_tag_hint:
-            log.debug("Skipping %s (%s): no auth profile (custom_fields.auth_profile) set", ip, device.name)
-            counts["skipped"] += 1
-            continue
-        snmp_timeout_us = discover_snmptimeout_us(read_cf(cf, "snmp_timeout"))
-
-        if offset and counts["enqueued"] + counts.get("offset_skipped", 0) < offset:
-            counts["offset_skipped"] = counts.get("offset_skipped", 0) + 1
-            continue
-
-        if max_enqueue is not None and counts["enqueued"] >= max_enqueue:
-            if not enqueue_cap_logged:
-                enqueue_cap_logged = True
-                log.info(
-                    "Enqueue cap reached (%d): skipping further enqueues this run "
-                    "(gap scan continues)", max_enqueue,
-                )
-            continue
-
-        try:
-            nd.enqueue_discover(ip, device_auth_tag_hint=device_auth_tag_hint, snmp_timeout_us=snmp_timeout_us)
-            effective_timeout = snmp_timeout_us
-            log.info("Enqueued discover for %s (%s) device_auth_tag_hint=%r timeout=%dus",
-                     ip, device.name, device_auth_tag_hint, effective_timeout)
-            counts["enqueued"] += 1
-        except Exception as exc:
-            log.error("Failed to enqueue discover for %s: %s", ip, exc)
-
-    # Build full nb_all_ips across all statuses/roles for gap reporting and auto-create.
-    # Deliberately NOT role_filter-scoped: the enqueue loop above only targets
-    # reconcile's target roles, but a device under any other role still counts
-    # as "in Netbox" for gap-reporting purposes.
+    # Deliberately NOT role/status-scoped: a device under any other role or
+    # status still counts as "in Netbox" for the not-in-Netbox list.
     nb_all_ips = {
         str(d.primary_ip4).split("/")[0]
         for d in nb.nb.dcim.devices.filter(primary_ip4__isnull=False)
@@ -519,27 +432,91 @@ def reconcile_devices(
             "last_discover": seen.strftime("%Y-%m-%d %H:%M") if seen else None,
             "stale": cutoff is not None and (seen is None or seen < cutoff),
         })
-    stale_ips = {e["ip"] for e in not_in_netbox if e["stale"]}
-    # Devices liveness reports down are expected to be missing from Netdisco
-    # (discovery can't reach them): keep them in the list, not in the count.
-    counts["not_in_netdisco"] = sum(1 for e in not_in_netdisco if e.get("status") != "down")
-    counts["not_in_netbox"] = len(not_in_netbox) - len(stale_ips)
-    counts["not_in_netbox_stale"] = len(stale_ips)
-    counts["tag_mismatches"] = len(tag_mismatches)
-    if not_in_netdisco or not_in_netbox:
-        log.info("Gaps: not_in_netdisco=%d (+%d offline)  not_in_netbox=%d (+%d stale)",
-                 counts["not_in_netdisco"], counts["skipped_offline"],
-                 counts["not_in_netbox"], counts["not_in_netbox_stale"])
-    if tag_mismatches:
-        log.info("Auth tag mismatches: %d", len(tag_mismatches))
+    offline = sum(1 for e in not_in_netdisco if e.get("status") == "down")
+    stale = sum(1 for e in not_in_netbox if e["stale"])
+    counts.update({
+        "not_in_netdisco": len(not_in_netdisco) - offline, "offline": offline,
+        "not_in_netbox": len(not_in_netbox) - stale, "not_in_netbox_stale": stale,
+        "tag_mismatches": len(tag_mismatches),
+    })
+    log.info("Gaps: not_in_netdisco=%d (+%d offline)  not_in_netbox=%d (+%d stale)  tag_mismatches=%d",
+             counts["not_in_netdisco"], offline, counts["not_in_netbox"], stale, len(tag_mismatches))
+    counts["not_in_netdisco_list"] = not_in_netdisco
+    counts["not_in_netbox_list"] = not_in_netbox
+    counts["tag_mismatches_list"] = tag_mismatches
+    return counts
 
-    # Auto-create: bootstrap NetBox devices for Netdisco entries not yet in NetBox
+
+def discover_missing(
+    nd: "NetdiscoClient",
+    nb: "NetboxClient",
+    not_in_netdisco: list[dict],
+    not_in_netbox: Optional[list[dict]] = None,
+    max_queued: Optional[int] = 500,
+    max_failed: Optional[int] = 500,
+    max_enqueue: Optional[int] = None,
+    offset: Optional[int] = None,
+    require_auth_tag: bool = False,
+    auto_create_role: Optional[str] = None,
+    auto_create_site: Optional[str] = None,
+    auto_create_status: str = "active",
+    auto_create_location: bool = False,
+    iface_source_cf: Optional[str] = None,
+    iface_source_value: str = "netdisco",
+) -> dict:
+    """
+    Act on a find_gaps result: enqueue Netdisco discovery for the Netbox
+    devices Netdisco doesn't know (skipping those liveness reports down and,
+    with require_auth_tag, those without an auth tag), and with
+    auto_create_role/site create Netbox devices for the (non-stale) Netdisco
+    devices missing from Netbox.
+
+    Nothing is enqueued while Netdisco's queue exceeds max_queued queued or
+    max_failed failed jobs (last 1h): returns aborted. max_enqueue caps the
+    discover jobs per run (0: none), offset skips the first N candidates.
+
+    Returns counts: enqueued / skipped (no auth tag) / skipped_offline /
+    offset_skipped / created / failed / aborted (bool).
+    """
+    log = logging.getLogger("discobox.reconcile")
+    counts = {"aborted": False, "enqueued": 0, "skipped": 0, "skipped_offline": 0}
+    if not _netdisco_queue_ok(nd, max_queued, max_failed, log, "Discover missing"):
+        counts["aborted"] = True
+        return counts
+
+    cap_logged = False
+    for entry in not_in_netdisco:
+        ip, name = entry["ip"], entry.get("name")
+        if entry.get("status") == "down":
+            counts["skipped_offline"] += 1
+            continue
+        tag = entry.get("auth_tag") or None
+        if require_auth_tag and not tag:
+            log.debug("Skipping %s (%s): no auth profile (custom_fields.auth_profile) set", ip, name)
+            counts["skipped"] += 1
+            continue
+        if offset and counts["enqueued"] + counts.get("offset_skipped", 0) < offset:
+            counts["offset_skipped"] = counts.get("offset_skipped", 0) + 1
+            continue
+        if max_enqueue is not None and counts["enqueued"] >= max_enqueue:
+            if not cap_logged:
+                cap_logged = True
+                log.info("Enqueue cap reached (%d): skipping further enqueues this run", max_enqueue)
+            continue
+        timeout_us = discover_snmptimeout_us(entry.get("snmp_timeout"))
+        try:
+            nd.enqueue_discover(ip, device_auth_tag_hint=tag, snmp_timeout_us=timeout_us)
+            log.info("Enqueued discover for %s (%s) device_auth_tag_hint=%r timeout=%dus", ip, name, tag, timeout_us)
+            counts["enqueued"] += 1
+        except Exception as exc:
+            log.error("Failed to enqueue discover for %s: %s", ip, exc)
+
     if auto_create_role and auto_create_site:
         create_counts: dict[str, int] = {"created": 0, "failed": 0}
-        for nd_dev in nd_all_devices:
-            nd_ip = nd_dev.get("ip")
-            if not nd_ip or nd_ip in nb_all_ips or nd_ip in stale_ips:
+        for entry in not_in_netbox or []:
+            if entry.get("stale"):
                 continue
+            nd_ip = entry["ip"]
             try:
                 nd_device_full = nd.get_device(nd_ip)
             except Exception as exc:
@@ -560,8 +537,5 @@ def reconcile_devices(
             log.info("Auto-create: %s", "  ".join(f"{k}: {v}" for k, v in create_counts.items() if v))
         counts.update(create_counts)
 
-    log.info("Reconcile done: %s", counts)
-    counts["not_in_netdisco_list"] = not_in_netdisco
-    counts["not_in_netbox_list"] = not_in_netbox
-    counts["tag_mismatches_list"] = tag_mismatches
+    log.info("Discover missing done: %s", counts)
     return counts

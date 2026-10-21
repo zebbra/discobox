@@ -144,13 +144,16 @@ aps:                        # access points reported by a WLC (updated during th
                             # still retried. A rebuild (dry_run=false) always does the full pass
   full_pass_days: 7         # full AP pass at least this often anyway (repairs hand edits in Netbox)
 
-jobs:                       # schedules (status page, /jobs); 0 = on demand only
-  reconcile:
-    interval: 86400         # seconds (default: reconcile.interval)
+jobs:                       # schedules in seconds (status page, /jobs); 0 = on demand only
+  gaps:                     # compare Netbox with Netdisco (read-only): the gap lists, liveness status
+    interval: 3600
+    max_age: 7200           # discover-missing and fix-tags skip a gaps result older than this
+  discover-missing:         # from the last gaps result: discovery for missing devices, auto-create
+    interval: 86400
   types-bare:               # discobox_types_bare from Netbox (also right after a dummy is created or an apply)
-    interval: 3600          # seconds (default: library.metrics_interval)
+    interval: 3600
 
-reconcile:
+reconcile:                  # gaps selection and discover-missing limits
   max_queued: null          # abort reconcile if Netdisco queue exceeds this
   max_failed: null
   max_enqueue: null         # cap devices enqueued per reconcile run
@@ -169,7 +172,7 @@ reconcile:
   not_in_netbox_stale_hours: 24   # Netdisco devices not in Netbox whose last discovery lags Netdisco's
                              # newest by more than this are gone or unreachable: listed as stale
                              # (/not-in-netbox, collapsed on /), not counted in
-                             # discobox_reconcile_not_in_netbox, never auto-created. 0 = off
+                             # discobox_gaps_not_in_netbox, never auto-created. 0 = off
   liveness:                 # skip enqueueing devices a metrics store reports as down
     url: null               # Prometheus-compatible query API incl. tenant prefix, e.g.
                             # http://vmselect:8481/select/0/prometheus — null disables

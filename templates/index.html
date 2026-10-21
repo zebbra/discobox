@@ -64,7 +64,7 @@
   {% endif %}
 </h1>
 
-<div class="status">
+<div class="status" id="live-status">
   <span>in flight <b>{{ in_flight|length }}</b></span>
   <span>retries <b>{{ retries.pending }}</b></span>
   <span>liveness
@@ -78,7 +78,7 @@
 <div id="result"></div>
 
 <h2>Jobs</h2>
-<table class="jobs">
+<table class="jobs" id="live-jobs">
   <tr><th>Job</th><th class="hide-narrow">Schedule</th><th>Last run</th><th>Result</th><th>Next run</th><th></th></tr>
   {% for j in jobs %}
   <tr>
@@ -101,7 +101,7 @@
   </tr>
 </table>
 
-<h2>Gaps <small class="muted">from the last reconcile or compare · <a href="/reconcile">JSON</a></small></h2>
+<h2>Gaps <small class="muted">from the last gaps run · <a href="/gaps">JSON</a></small></h2>
 
 <details{% if missing %} open{% endif %}><summary>In Netbox, not in Netdisco: <b>{{ missing|length }}</b>{% if offline %} <span class="muted">(+{{ offline|length }} offline per liveness, ignored)</span>{% endif %} · <a href="/not-in-netdisco">JSON</a></summary>
   {{ gap_table(missing) }}
@@ -176,7 +176,7 @@ try {
   const saved = JSON.parse(sessionStorage.getItem("discobox-result") || "null");
   if (saved) { show(saved.text, saved.ok); sessionStorage.removeItem("discobox-result"); }
 } catch (e) {}
-document.querySelectorAll("form.act").forEach(form => form.addEventListener("submit", async ev => {
+function bind(form) { form.addEventListener("submit", async ev => {
   ev.preventDefault();
   const params = new URLSearchParams();
   for (const [k, v] of new FormData(form)) if (v !== "") params.append(k, v);
@@ -193,7 +193,24 @@ document.querySelectorAll("form.act").forEach(form => form.addEventListener("sub
   } catch (e) { text = `POST ${url} failed: ${e}`; ok = false; }
   try { sessionStorage.setItem("discobox-result", JSON.stringify({ text, ok })); location.reload(); }
   catch (e) { show(text, ok); }
-}));
+}); }
+document.querySelectorAll("form.act").forEach(bind);
+
+// Lazy auto-refresh: every 30s swap in the status line and the jobs table from a
+// fresh copy of this page; not while the tab is hidden or a field has focus.
+setInterval(async () => {
+  if (document.hidden || document.activeElement?.matches("input, select")) return;
+  try {
+    const r = await fetch("/", { cache: "no-store" });
+    if (!r.ok) return;
+    const fresh = new DOMParser().parseFromString(await r.text(), "text/html");
+    for (const id of ["live-status", "live-jobs"]) {
+      const el = document.getElementById(id), next = fresh.getElementById(id);
+      if (el && next) el.innerHTML = next.innerHTML;
+    }
+    document.querySelectorAll("#live-jobs form.act").forEach(bind);
+  } catch (e) {}
+}, 30000);
 </script>
 </body>
 </html>

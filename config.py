@@ -189,8 +189,13 @@ class JobSchedule(_Section):
     interval: int                     # seconds; 0 = on demand only
 
 
+class GapsSchedule(JobSchedule):
+    max_age: int = 7200               # discover-missing / fix-tags refuse an older gaps result
+
+
 class Jobs(_Section):
-    reconcile: JobSchedule = JobSchedule(interval=86400)
+    gaps: GapsSchedule = GapsSchedule(interval=3600)
+    discover_missing: JobSchedule = Field(default=JobSchedule(interval=86400), alias="discover-missing")
     types_bare: JobSchedule = Field(default=JobSchedule(interval=3600), alias="types-bare")
 
 

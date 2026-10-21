@@ -30,7 +30,7 @@ The main `discobox.yaml` sections:
 | `custom_fields`, `cabling` | Custom field names discobox writes and reads; null disables one |
 | `types`, `library` | DeviceType resolution (aliases, `create_missing`) and devicetype-library enrichment |
 | `aps` | WLC access point pass |
-| `reconcile`, `auto_create` | Reconcile limits and selection, the `liveness` gate, auto-created devices |
+| `reconcile`, `auto_create` | Device selection for the gaps job, the `liveness` gate, discover-missing limits, auto-created devices |
 | `jobs` | Job schedules (see [Jobs](operations.md#jobs)) |
 | `netdisco` | Per-request SNMP timeout of the discover jobs discobox enqueues |
 | `auth` | `metrics_path`; `token` (prefer `DISCOBOX_AUTH_TOKEN`) |

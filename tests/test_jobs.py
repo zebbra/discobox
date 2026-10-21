@@ -138,14 +138,14 @@ def test_jobs_endpoints(monkeypatch, tmp_path) -> None:
 
     server, jobs = _server(monkeypatch, tmp_path)
     seen = []
-    jobs.register(Job("reconcile", lambda **kw: seen.append(kw) or JobResult(summary="2 enqueued"), interval=60))
+    jobs.register(Job("discover-missing", lambda **kw: seen.append(kw) or JobResult(summary="2 enqueued"), interval=60))
     jobs.register(Job("compare", lambda: JobResult()))
 
-    r = server.jobs_run("reconcile", Response(), wait=True, max_enqueue=5, offset=None)
+    r = server.jobs_run("discover-missing", Response(), wait=True, max_enqueue=5, offset=None)
     assert r["status"] == "ok" and r["summary"] == "2 enqueued"
     assert seen == [{"max_enqueue": 5, "offset": None, "manual": True}]
     listed = server.jobs_list()
-    assert [j["job"] for j in listed["jobs"]] == ["reconcile", "compare"]
+    assert [j["job"] for j in listed["jobs"]] == ["discover-missing", "compare"]
     assert listed["jobs"][0]["last"]["summary"] == "2 enqueued" and listed["retries"]["pending"] >= 0
     with pytest.raises(HTTPException) as exc:
         server.jobs_run("nope", Response())

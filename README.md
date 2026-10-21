@@ -27,8 +27,8 @@ flowchart LR
     ND -- "webhook after discovery" --> DB
     DB -- "fetch device data" --> ND
     DB -- "write inventory" --> NB
-    DB -. "reconcile: enqueue missing devices" .-> ND
-    DB -. "reconcile: liveness check" .-> VM
+    DB -. "discover-missing: enqueue missing devices" .-> ND
+    DB -. "gaps: liveness check" .-> VM
 ```
 
 ---

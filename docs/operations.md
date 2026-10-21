@@ -8,20 +8,23 @@ Periodic and on-demand work runs as jobs, listed on the status page and at `/job
 
 | Job | Default schedule | What it does |
 |---|---|---|
-| `reconcile` | every 24h | Compare Netbox with Netdisco; enqueue discovery for Netbox devices Netdisco doesn't know (and auto-create). Deferred while syncs are queued (`reconcile.defer_if_queued`, retried after `reconcile.defer_seconds`), skipped while paused |
-| `compare` | on demand | Compare only: refresh the gap reports, no discovery, no auto-create (`/reconcile?refresh=true`) |
-| `fix-tags` | on demand | Re-enqueue discovery with Netbox's auth tag for the last reconcile's tag mismatches |
+| `gaps` | every 1h | Compare Netbox with Netdisco, read-only on both: Netbox devices (`reconcile.roles` / `statuses`, with a primary IP) Netdisco doesn't know, Netdisco devices missing from Netbox, auth tag mismatches. Also runs the liveness query (status line, `discobox_liveness_query_up`). Saves the gap lists the next two jobs act on (`GET /gaps`) |
+| `discover-missing` | every 24h | From the last gaps result: enqueue Netdisco discovery for the Netbox devices it doesn't know (not those liveness reports down; with `reconcile.require_auth_tag` only those with an auth tag; at most `reconcile.max_enqueue`), and with `auto_create` create Netbox devices for the non-stale Netdisco-only ones. Skipped when the gaps result is missing or older than `jobs.gaps.max_age` and while paused, deferred while syncs are queued (`reconcile.defer_if_queued`, retried after `reconcile.defer_seconds`), aborted while Netdisco's queue is over `reconcile.max_queued` / `max_failed` |
+| `fix-tags` | on demand | From the last gaps result: re-enqueue discovery with Netbox's auth tag for the tag mismatches (same freshness rule) |
 | `types-bare` | every 1h | Refresh `discobox_types_bare` (only with `custom_fields.source` set) |
 
 ```yaml
 jobs:
-  reconcile:
-    interval: 86400     # seconds; 0 = on demand only
+  gaps:
+    interval: 3600      # seconds; 0 = on demand only
+    max_age: 7200       # discover-missing and fix-tags skip an older gaps result
+  discover-missing:
+    interval: 86400
   types-bare:
     interval: 3600
 ```
 
-Each job's last result (start, end, status `ok | deferred | skipped | aborted | error`, summary) is kept in `discobox.jobs.json` in the state dir, so after a restart the next run follows the last one; an overdue job runs shortly after startup (reconcile after 5 minutes, types-bare after 30 s). Any job also runs on demand: the status page's "run now", or `POST /jobs/<name>/run` (e.g. from an external scheduler). Metrics per job: `discobox_job_last_run_timestamp_seconds`, `discobox_job_last_success_timestamp_seconds`, `discobox_job_duration_seconds`, `discobox_job_next_run_timestamp_seconds`, `discobox_job_runs_total{status}`.
+Each job's last result (start, end, status `ok | deferred | skipped | aborted | error`, summary) is kept in `discobox.jobs.json` in the state dir, so after a restart the next run follows the last one; an overdue job runs shortly after startup (gaps after 1 minute, discover-missing after 5 minutes, types-bare after 30 s). Any job also runs on demand: the status page's "run now", or `POST /jobs/<name>/run` (e.g. from an external scheduler). Metrics per job: `discobox_job_last_run_timestamp_seconds`, `discobox_job_last_success_timestamp_seconds`, `discobox_job_duration_seconds`, `discobox_job_next_run_timestamp_seconds`, `discobox_job_runs_total{status}`.
 
 ---
 
@@ -35,12 +38,12 @@ Actions are POST. `GET /sync` and `GET /rebuild` still work but are deprecated: 
 | `/sync?host=<ip>` | POST | yes | Trigger device sync (the Netdisco hook) |
 | `/sync/all` | POST | yes | Queue a sync for every device known to Netdisco; optional `?limit=N&force=true` (force bypasses the cooldown window). Any other query param is forwarded to the Netbox device filter, e.g. `?last_updated__lt=2026-10-01`, `?name__ic=foo`, `?site=zrh&role=switch` — selection is then intersected with Netdisco's device list |
 | `/rebuild?host=<ip>` | POST | yes | Rebuild one device's inventory to match Netdisco: also deletes discobox-owned stale interfaces, modules, inventory items and SFPs, and force-corrects `stack_members`. `dry_run=true` (default) previews those deletions; the sync part still runs like a normal sync, so it never writes more than one. `dry_run=false` also forces housekeeping and a full WLC AP pass and stamps `inventory_last_rebuild`. Synchronous: a large WLC can exceed a proxy timeout while the rebuild finishes in the background |
-| `/sync/pause` | POST | yes | Pause queued syncs (reconcile and fix-tags are skipped while paused) |
+| `/sync/pause` | POST | yes | Pause queued syncs (discover-missing and fix-tags are skipped while paused) |
 | `/sync/resume` | POST | yes | Resume queued syncs |
 | `/discover` | POST | yes | Enqueue a Netdisco discover for one device: `?host=<ip or Netbox name>`, tag hint from `snmp_auth_profile` and per-request SNMP timeout derived from `snmp_polling_timeout` (`netdisco.discover_snmptimeout`), or `&tag=` / `&timeout=` (per-request, used as-is) |
 | `/jobs` | GET | no | Every job: schedule, last run and result, next run; plus the retry queue (JSON) |
-| `/jobs/<name>/run` | POST | yes | Run a job now: `202` in the background, `?wait=true` answers with the result; `409` while it's running. reconcile and fix-tags take `?max_enqueue=N`, reconcile `&offset=N` |
-| `/reconcile` | GET | yes | The last Netbox↔Netdisco compare's gaps as JSON, answered immediately (read-only: no discover jobs, no auto-create). `?refresh=true` starts the compare job in the background (`running` shows it's in progress; the first call without a result starts one too), `?lists=true` adds the device lists, `?wait=true` runs it synchronously (may exceed proxy timeouts). Reconcile runs update the result too (`mode`) |
+| `/jobs/<name>/run` | POST | yes | Run a job now: `202` in the background, `?wait=true` answers with the result; `409` while it's running. discover-missing and fix-tags take `?max_enqueue=N`, discover-missing `&offset=N` |
+| `/gaps` | GET | yes | The last gaps result as JSON, answered immediately. `?refresh=true` starts the gaps job in the background (`running` shows it's in progress; the first call without a result starts one too), `?lists=true` adds the device lists, `?wait=true` runs it synchronously (may exceed proxy timeouts) |
 | `/not-in-netdisco`, `/not-in-netbox`, `/tag-mismatches`, `/unknown-devices` | GET | no | The gap lists (JSON) |
 | `/types/library` | GET, POST | yes | DeviceType enrichment report; `POST …&apply=true` writes (see [Features](features.md)) |
 | `/config` | GET | yes | Effective settings (secrets masked) and the env vars in use |
@@ -72,7 +75,7 @@ When ≥ `sync.circuit_breaker.threshold` (default 3) timeout errors occur withi
 
 - All new and queued syncs are held for `sync.circuit_breaker.backoff` seconds (default 120)
 - After the backoff the breaker resets automatically — no manual intervention needed
-- The reconcile loop also skips while the breaker is active
+- discover-missing and fix-tags also skip while the breaker is active
 - Metric: `discobox_circuit_breaker_trips_total`
 
 This is distinct from `sync.pause_on_error` / `/sync/pause`, which pause permanently until manually resumed.
@@ -90,8 +93,8 @@ When a sync times out but the circuit breaker has **not** tripped (isolated fail
 - Metric: `discobox_sync_retries_total`
 - A hook for a device that is in Netdisco but not in Netbox is no error and no skip: it counts as `discobox_syncs_total{status="not_in_netbox"}` (plus `discobox_unknown_devices_total`), sets no failed flag, doesn't auto-pause, and lists the device on `/` and `/unknown-devices` until a sync finds it in Netbox (or no hook came for it in 14 days)
 - Orphaned interfaces: `discobox_orphans_total{action=removed|braked}`; per device `discobox_device_orphans_braked{instance}` = orphans the mass-deletion brake kept in its last sync (> 0: discovery incomplete or Netbox stale — check the device or run a rebuild; a rebuild resets it to 0). Worth an alert: `discobox_device_orphans_braked > 0`
-- Skips: `discobox_syncs_skipped_total{reason}`. Before queuing, a hook is dropped on `cooldown`, `in_progress` (already being synced) or `queue_full` (the device then waits for its next hook or reconcile: worth an alert). A sync that started can still skip on `discovery_incomplete` (ifIndex placeholders as port names) or `recently_touched` (Netbox touch field within the cooldown); those two also count as `discobox_syncs_total{status="skipped"}`
-- Likewise a sync for a device Netdisco doesn't know (404, and no other Netdisco IP matches): `discobox_syncs_total{status="not_in_netdisco"}`; the reconcile lists these on `/not-in-netdisco`
+- Skips: `discobox_syncs_skipped_total{reason}`. Before queuing, a hook is dropped on `cooldown`, `in_progress` (already being synced) or `queue_full` (the device then waits for its next hook or discover-missing: worth an alert). A sync that started can still skip on `discovery_incomplete` (ifIndex placeholders as port names) or `recently_touched` (Netbox touch field within the cooldown); those two also count as `discobox_syncs_total{status="skipped"}`
+- Likewise a sync for a device Netdisco doesn't know (404, and no other Netdisco IP matches): `discobox_syncs_total{status="not_in_netdisco"}`; the gaps job lists these on `/not-in-netdisco`
 - Errors inside a sync that still completes (an AP, IP, module, … that failed; `errors=` in the `sync done` line) don't make it an `error` in `discobox_syncs_total`: they count in `discobox_sync_errors_total` and per device in `discobox_device_last_sync_errors{instance}`; APs also in `discobox_aps_total{action}`. The errors are every ERROR line a sync logs (plus counted ones not logged as errors), so a failed note, fan or PSU update counts too. `/rebuild` outcomes: `discobox_rebuilds_total{status=success|error|skipped,dry_run}`. Reads (GET/HEAD) to Netbox and Netdisco are retried up to 3 times on a dropped connection or a 500/502/503, after 2, 4 and 8 s (plus up to 1 s jitter), never on 504 (a gateway timeout usually repeats) and never for writes
 
 ---
