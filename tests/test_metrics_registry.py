@@ -1,34 +1,29 @@
-"""Regression test: server.py must be importable twice in one process.
-
-Every metric must go to the module's private _custom_registry: one on
-prometheus_client's global REGISTRY raises "Duplicated timeseries in
-CollectorRegistry" on a second import (tests import server more than once).
+"""Every discobox metric is on the private registry (metrics._custom_registry),
+none on prometheus_client's global REGISTRY: a metric there collides
+("Duplicated timeseries in CollectorRegistry") when its module is loaded again.
 
 Run with `pytest tests/` or directly:
     python -m pytest tests/test_metrics_registry.py
 """
 from __future__ import annotations
 
-import importlib.util
 import os
 import sys
 import tempfile
 
-_TMPDIR = tempfile.mkdtemp(prefix="discobox-test-")
-os.environ["DISCOBOX_STATE_DIR"] = _TMPDIR
+os.environ.setdefault("DISCOBOX_STATE_DIR", tempfile.mkdtemp(prefix="discobox-test-"))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _ROOT)
+from prometheus_client import REGISTRY  # noqa: E402
 
-
-def _import_server_as(name: str):
-    spec = importlib.util.spec_from_file_location(name, os.path.join(_ROOT, "server.py"))
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+import server  # noqa: E402
 
 
-def test_server_imports_twice_without_registry_collision() -> None:
-    _import_server_as("server_first_copy")
-    _import_server_as("server_second_copy")  # raised Duplicated timeseries before fix
+def _names(registry) -> set[str]:
+    return {m.name for m in registry.collect()}
+
+
+def test_no_discobox_metric_on_the_global_registry() -> None:
+    assert not {n for n in _names(REGISTRY) if n.startswith("discobox_")}
+    private = _names(server._custom_registry)
+    assert "discobox_syncs" in private and "discobox_job_runs" in private

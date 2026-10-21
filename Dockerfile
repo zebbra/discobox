@@ -49,7 +49,7 @@ print(f"devicetype-library {repo}@{ref} ({', '.join(sorted(vendors)) or 'all ven
 if not n:
     raise SystemExit("no device-types extracted: check DEVICETYPE_LIBRARY_VENDORS")
 PY
-COPY server.py typesync.py jobs.py config.py ./
+COPY server.py typesync.py jobs.py config.py metrics.py ./
 COPY discobox/ discobox/
 COPY templates/ templates/
 
