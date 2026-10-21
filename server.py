@@ -36,7 +36,6 @@ from pathlib import Path
 from typing import Annotated, Any, Optional
 
 import uvicorn
-import yaml
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from fastapi.templating import Jinja2Templates
@@ -67,6 +66,7 @@ from discobox import (
     sync_device,
     validate_ip,
 )
+from config import ConfigError, effective, env_flag, load_settings
 from jobs import Job, JobRegistry, JobResult
 from typesync import Library, match_library, sync_types
 
@@ -380,148 +380,94 @@ netdisco_requests_total = Counter(
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-def _load_config() -> dict:
-    path = os.getenv("DISCOBOX_CONFIG") or "discobox.yaml"
-    try:
-        with open(path) as f:
-            data = yaml.safe_load(f) or {}
-        logging.getLogger("discobox").info("Config loaded from %s", path)
-        return data
-    except FileNotFoundError:
-        if os.getenv("DISCOBOX_CONFIG"):
-            logging.getLogger("discobox").warning("Config file not found: %s", path)
-        return {}
-    except Exception as exc:
-        logging.getLogger("discobox").error("Failed to load config %s: %s", path, exc)
-        return {}
-
-_MISSING = object()
-
-def _c(cfg: dict, *keys: str, default: Any = None) -> Any:
-    """Navigate nested config dict; return default when key is missing.
-    Explicit null/~ in YAML returns None, not the default."""
-    node = cfg
-    for k in keys:
-        if not isinstance(node, dict) or k not in node:
-            return default
-        node = node[k]
-    return node
-
-def _cstr(cfg: dict, *keys: str, default: Optional[str] = None) -> Optional[str]:
-    """Like _c but returns None for empty strings (disables the feature).
-    Explicit null/~ disables; missing key falls back to default."""
-    val = _c(cfg, *keys, default=_MISSING)
-    if val is _MISSING:
-        return default
-    if val is None:
-        return None
-    return str(val).strip() or None
-
-def _cbool(cfg: dict, *keys: str, default: bool = False) -> bool:
-    val = _c(cfg, *keys, default=_MISSING)
-    if val is _MISSING or val is None:
-        return default
-    if isinstance(val, bool):
-        return val
-    return str(val).lower() in ("1", "true", "yes")
-
-def _clist(cfg: dict, *keys: str) -> list[str]:
-    """Return a list of strings from a YAML list or comma-separated string; empty list if missing."""
-    val = _c(cfg, *keys, default=None)
-    if not val:
-        return []
-    if isinstance(val, list):
-        return [str(v).strip() for v in val if str(v).strip()]
-    return [v.strip() for v in str(val).split(",") if v.strip()]
-
-_CFG = _load_config()
+try:
+    _S, _CFG_SOURCE = load_settings()
+except ConfigError as exc:
+    logging.getLogger("discobox").error("%s", exc)
+    raise SystemExit(2)
+logging.getLogger("discobox").info("Config loaded from %s", _CFG_SOURCE)
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
-_AUTH_TOKEN: Optional[str] = os.getenv("DISCOBOX_AUTH_TOKEN") or _cstr(_CFG, "auth", "token")
-_METRICS_PATH: str = _c(_CFG, "auth", "metrics_path", default=os.getenv("DISCOBOX_METRICS_PATH", "/metrics"))
+_AUTH_TOKEN: Optional[str] = os.getenv("DISCOBOX_AUTH_TOKEN") or _S.auth.token
+_METRICS_PATH: str = _S.auth.metrics_path
 
 # ── Sync defaults (overridable per-request) ────────────────────────────────────
 
-_SYNC_COOLDOWN: int       = int(_c(_CFG, "sync", "cooldown", default=3600))  # seconds; 0 = disabled
-_DEFAULT_MAC              = not _cbool(_CFG, "sync", "no_mac",          default=False)
-_DEFAULT_IP               = not _cbool(_CFG, "sync", "no_ip",           default=False)
-_DEFAULT_MODULES          = not _cbool(_CFG, "sync", "no_modules",      default=False)
-_DEFAULT_SFP              = not _cbool(_CFG, "sync", "no_sfp",          default=False)
-_DEFAULT_POE              = not _cbool(_CFG, "sync", "no_poe",          default=False)
-_DEFAULT_HOUSEKEEPING     =     _cbool(_CFG, "sync", "housekeeping",    default=False)
-_DEFAULT_LLDP_CLEAR_STALE =     _cbool(_CFG, "sync", "lldp_clear_stale", default=False)
-_VIP_MODE: str            = _c   (_CFG, "sync", "vip_mode",            default="threenode")
+_SYNC_COOLDOWN: int       = _S.sync.cooldown  # seconds; 0 = disabled
+_DEFAULT_MAC              = not _S.sync.no_mac
+_DEFAULT_IP               = not _S.sync.no_ip
+_DEFAULT_MODULES          = not _S.sync.no_modules
+_DEFAULT_SFP              = not _S.sync.no_sfp
+_DEFAULT_POE              = not _S.sync.no_poe
+_DEFAULT_HOUSEKEEPING     = _S.sync.housekeeping
+_DEFAULT_LLDP_CLEAR_STALE = _S.sync.lldp_clear_stale
+_VIP_MODE: str            = _S.sync.vip_mode
 # Per-vendor override, e.g. {fortinet: threenode} while _VIP_MODE stays the
 # fallback for everything else (VSS, HSRP, ...). Keyed by nd_device["vendor"],
 # which is already lowercased at the source (see tests/samples/*-device.json).
-_VIP_MODE_BY_VENDOR: dict[str, str] = {
-    str(k).lower(): str(v).lower()
-    for k, v in (_c(_CFG, "sync", "vip_mode_by_vendor", default={}) or {}).items()
-}
-_PAUSE_ON_ERROR: bool     = _cbool(_CFG, "sync", "pause_on_error",     default=False)
+_VIP_MODE_BY_VENDOR: dict[str, str] = {k.lower(): v.lower() for k, v in _S.sync.vip_mode_by_vendor.items()}
+_PAUSE_ON_ERROR: bool     = _S.sync.pause_on_error
 
 # Circuit breaker: trip when >= _CB_THRESHOLD timeouts occur within _CB_WINDOW seconds.
 # New syncs are held for _CB_BACKOFF seconds, then automatically released.
-_CB_WINDOW:    int = int(os.getenv("DISCOBOX_CB_WINDOW",    "120"))  # look-back window (s)
-_CB_THRESHOLD: int = int(os.getenv("DISCOBOX_CB_THRESHOLD", "3"))    # timeouts to trip
-_CB_BACKOFF:   int = int(os.getenv("DISCOBOX_CB_BACKOFF",   "120"))  # pause duration (s)
+_CB_WINDOW:    int = _S.sync.circuit_breaker.window  # look-back window (s)
+_CB_THRESHOLD: int = _S.sync.circuit_breaker.threshold  # timeouts to trip
+_CB_BACKOFF:   int = _S.sync.circuit_breaker.backoff  # pause duration (s)
 
 # Per-device retry on isolated timeouts (circuit breaker not tripped).
 # Delay doubles each attempt starting from RETRY_DELAY, capped at RETRY_MAX_DELAY:
 # default sequence is 8m, 16m, 30m, 30m, 30m, 30m across 6 attempts (~2.5h span).
-_RETRY_DELAY:     int = int(os.getenv("DISCOBOX_RETRY_DELAY",     "480"))   # seconds before first retry
-_RETRY_MAX_DELAY: int = int(os.getenv("DISCOBOX_RETRY_MAX_DELAY", "1800"))  # cap on backoff growth
-_RETRY_MAX:       int = int(os.getenv("DISCOBOX_RETRY_MAX",       "6"))    # max retries per device
+_RETRY_DELAY:     int = _S.sync.retry.delay  # seconds before first retry
+_RETRY_MAX_DELAY: int = _S.sync.retry.max_delay  # cap on backoff growth
+_RETRY_MAX:       int = _S.sync.retry.max  # max retries per device
 
-_CF_NEIGHBOR_TEXT:   Optional[str] = _cstr(_CFG, "custom_fields", "neighbor_text",   default="neighbor")
-_CF_NEIGHBOR_PORT:   Optional[str] = _cstr(_CFG, "custom_fields", "neighbor_port",   default="neighbor_port")
-_CF_NEIGHBOR_DEVICE: Optional[str] = _cstr(_CFG, "custom_fields", "neighbor_device", default="neighbor_device")
-_CF_NEIGHBOR_IFACE:  Optional[str] = _cstr(_CFG, "custom_fields", "neighbor_iface",  default="neighbor_iface")
+_CF_NEIGHBOR_TEXT:   Optional[str] = _S.custom_fields.neighbor_text
+_CF_NEIGHBOR_PORT:   Optional[str] = _S.custom_fields.neighbor_port
+_CF_NEIGHBOR_DEVICE: Optional[str] = _S.custom_fields.neighbor_device
+_CF_NEIGHBOR_IFACE:  Optional[str] = _S.custom_fields.neighbor_iface
 
-_CABLE_SCOPE:        str            = _c   (_CFG, "cabling", "scope",        default="site")
-_CABLE_SOURCE_CF:    Optional[str]  = _cstr(_CFG, "cabling", "source_cf",    default="source")
-_CABLE_SOURCE_VALUE: Optional[str]  = _cstr(_CFG, "cabling", "source_value", default="netdisco")
+_CABLE_SCOPE:        str            = _S.cabling.scope
+_CABLE_SOURCE_CF:    Optional[str]  = _S.cabling.source_cf
+_CABLE_SOURCE_VALUE: Optional[str]  = _S.cabling.source_value
 
-_IFACE_SOURCE_CF:    Optional[str]  = _cstr(_CFG, "custom_fields", "source",       default="source")
-_IFACE_SOURCE_VALUE: str            = _c   (_CFG, "custom_fields", "source_value", default="netdisco")
+_IFACE_SOURCE_CF:    Optional[str]  = _S.custom_fields.source
+_IFACE_SOURCE_VALUE: str            = _S.custom_fields.source_value
 
-_CF_OS_VERSION:      Optional[str]  = _cstr(_CFG, "custom_fields", "os_version", default="os_version")
-_CF_OS_NAME:         Optional[str]  = _cstr(_CFG, "custom_fields", "os_name",    default="os_name")
-_CF_OS_RELEASE:      Optional[str]  = _cstr(_CFG, "custom_fields", "os_release", default="os_release")
-_CF_STACK_MEMBERS:   Optional[str]  = _cstr(_CFG, "custom_fields", "stack_members", default="stack_members")
-_STACK_MEMBERS_ONLY_INCREASE: bool  = _cbool(_CFG, "custom_fields", "stack_members_only_increase", default=True)
-_CF_TOUCH:           Optional[str]  = _cstr(_CFG, "custom_fields", "touch", default="netdisco_last_update")
-_CF_INVENTORY_REBUILD: Optional[str] = _cstr(_CFG, "custom_fields", "inventory_rebuild", default="inventory_last_rebuild")
-_CF_CONTROLLER:      Optional[str]  = _cstr(_CFG, "custom_fields", "controller", default="controller")
-_AP_PRUNE_INTERFACES: bool          = _cbool(_CFG, "aps", "prune_interfaces", default=True)
+_CF_OS_VERSION:      Optional[str]  = _S.custom_fields.os_version
+_CF_OS_NAME:         Optional[str]  = _S.custom_fields.os_name
+_CF_OS_RELEASE:      Optional[str]  = _S.custom_fields.os_release
+_CF_STACK_MEMBERS:   Optional[str]  = _S.custom_fields.stack_members
+_STACK_MEMBERS_ONLY_INCREASE: bool  = _S.custom_fields.stack_members_only_increase
+_CF_TOUCH:           Optional[str]  = _S.custom_fields.touch
+_CF_INVENTORY_REBUILD: Optional[str] = _S.custom_fields.inventory_rebuild
+_CF_CONTROLLER:      Optional[str]  = _S.custom_fields.controller
+_AP_PRUNE_INTERFACES: bool          = _S.aps.prune_interfaces
 # Orphaned interfaces (in Netbox, not in Netdisco): discobox's own always go; the
 # source-less (imported/manual) ones only with this. Unset → follows housekeeping.
-_REMOVE_ORPHANED_RAW = _c(_CFG, "sync", "remove_orphaned_interfaces", default=None)
-_REMOVE_ORPHANED: Optional[bool]    = None if _REMOVE_ORPHANED_RAW is None else _cbool(_CFG, "sync", "remove_orphaned_interfaces")
-_ORPHAN_DELETE_MAX_PERCENT: int     = int(_c(_CFG, "sync", "orphan_delete_max_percent", default=25))
-_AP_TYPE_CONFIRMED_UNTAG: list      = list(_c(_CFG, "aps", "type_confirmed_untag", default=["fixme-model"]) or [])
-_TOUCH_COOLDOWN_DAYS: int           = int(_c(_CFG, "sync", "touch_cooldown_days", default=1))
+_REMOVE_ORPHANED: Optional[bool]    = _S.sync.remove_orphaned_interfaces
+_ORPHAN_DELETE_MAX_PERCENT: int     = _S.sync.orphan_delete_max_percent
+_AP_TYPE_CONFIRMED_UNTAG: list      = list(_S.aps.type_confirmed_untag)
+_TOUCH_COOLDOWN_DAYS: int           = _S.sync.touch_cooldown_days
 
-_TYPES_CREATE_MISSING: bool          = _cbool(_CFG, "types", "create_missing", default=True)
+_TYPES_CREATE_MISSING: bool          = _S.types.create_missing
 
 # Per-request snmptimeout policy for discobox-enqueued discover jobs (see
 # discobox.DISCOVER_SNMPTIMEOUT): derived from snmp_polling_timeout, bounded.
-configure_discover_snmptimeout(**(_c(_CFG, "netdisco", "discover_snmptimeout", default={}) or {}))
-_TYPES_ALIAS_CF:      Optional[str]  = _cstr(_CFG, "types", "alias_cf", default="snmp_models")
-_TYPES_DEVICE_ALIASES: dict          = _c(_CFG, "types", "device_aliases", default={}) or {}
-_TYPES_MODULE_ALIASES: dict          = _c(_CFG, "types", "module_aliases", default={}) or {}
+configure_discover_snmptimeout(**_S.netdisco.discover_snmptimeout.model_dump())
+_TYPES_ALIAS_CF:      Optional[str]  = _S.types.alias_cf
+_TYPES_DEVICE_ALIASES: dict          = _S.types.device_aliases
+_TYPES_MODULE_ALIASES: dict          = _S.types.module_aliases
 
 # DeviceType enrichment from the devicetype-library (typesync.py, /types/library)
-_LIBRARY_PATH:    Optional[str] = _cstr(_CFG, "library", "path", default="/opt/devicetype-library")
-_LIBRARY_OVERLAY: Optional[str] = _cstr(_CFG, "library", "overlay")
-_LIBRARY_ROLES:   list          = list(_c(_CFG, "library", "roles", default=[]) or [])
-_LIBRARY_MAPPING: dict          = _c(_CFG, "library", "device_types", default={}) or {}
+_LIBRARY_PATH:    Optional[str] = _S.library.path
+_LIBRARY_OVERLAY: Optional[str] = _S.library.overlay
+_LIBRARY_ROLES:   list          = list(_S.library.roles)
+_LIBRARY_MAPPING: dict          = _S.library.device_types
 # discobox_types_bare refresh from Netbox: this often (0 = only after type creations / applies)
-_LIBRARY_METRICS_INTERVAL: int  = int(_c(_CFG, "jobs", "types-bare", "interval",
-                                        default=_c(_CFG, "library", "metrics_interval", default=3600)) or 0)
+_LIBRARY_METRICS_INTERVAL: int  = _S.jobs.types_bare.interval
 # source value /types/library apply sets on a library-filled type (custom_fields.source)
-_LIBRARY_SOURCE_VALUE: str      = _c(_CFG, "library", "source_value", default="devicetype-library")
+_LIBRARY_SOURCE_VALUE: str      = _S.library.source_value
 _library: Optional[Library] = None
 _library_lock = threading.Lock()
 
@@ -547,59 +493,52 @@ async def require_auth(authorization: Annotated[str, Header()] = "") -> None:
 
 # ── Reconcile loop ─────────────────────────────────────────────────────────────
 
-_RECONCILE_INTERVAL:      int           = int(_c(_CFG, "jobs", "reconcile", "interval",
-                                                 default=_c(_CFG, "reconcile", "interval", default=24 * 3600)) or 0)
-_RECONCILE_MAX_QUEUED:    Optional[int] = _c (_CFG, "reconcile", "max_queued",     default=None)
-_RECONCILE_MAX_FAILED:    Optional[int] = _c (_CFG, "reconcile", "max_failed",     default=None)
-_RECONCILE_MAX_ENQUEUE:   Optional[int] = _c (_CFG, "reconcile", "max_enqueue",    default=None)
-_RECONCILE_ROLES:         list[str]     = _clist(_CFG, "reconcile", "roles") or ["router", "switch", "firewall", "appliance"]
-_RECONCILE_STATUSES:      list[str]     = _clist(_CFG, "reconcile", "statuses") or ["active"]
-_RECONCILE_REQUIRE_AUTH_TAG: bool       = _cbool(_CFG, "reconcile", "require_auth_tag", default=True)
+_RECONCILE_INTERVAL:      int           = _S.jobs.reconcile.interval
+_RECONCILE_MAX_QUEUED:    Optional[int] = _S.reconcile.max_queued
+_RECONCILE_MAX_FAILED:    Optional[int] = _S.reconcile.max_failed
+_RECONCILE_MAX_ENQUEUE:   Optional[int] = _S.reconcile.max_enqueue
+_RECONCILE_ROLES:         list[str]     = list(_S.reconcile.roles)
+_RECONCILE_STATUSES:      list[str]     = list(_S.reconcile.statuses)
+_RECONCILE_REQUIRE_AUTH_TAG: bool       = _S.reconcile.require_auth_tag
 # Reconcile enqueues more discovery work on top of whatever's already syncing —
 # the last thing a large hook-triggered backlog needs is reconcile piling on
 # more load while it's still draining. Deferred (not skipped): re-checked every
 # defer_seconds until the queue clears, so it still always eventually runs.
-_RECONCILE_DEFER_IF_QUEUED: bool         = _cbool(_CFG, "reconcile", "defer_if_queued", default=True)
-_RECONCILE_DEFER_SECONDS:   int          = int(_c(_CFG, "reconcile", "defer_seconds", default=3600))
+_RECONCILE_DEFER_IF_QUEUED: bool         = _S.reconcile.defer_if_queued
+_RECONCILE_DEFER_SECONDS:   int          = _S.reconcile.defer_seconds
 # Netdisco devices not in Netbox whose last discovery lags Netdisco's newest by
 # more than this are listed as stale, not counted (and never auto-created).
-_NOT_IN_NETBOX_STALE_HOURS: Optional[float] = _c(_CFG, "reconcile", "not_in_netbox_stale_hours", default=24)
+_NOT_IN_NETBOX_STALE_HOURS: Optional[float] = _S.reconcile.not_in_netbox_stale_hours
 
 # Liveness gate: before enqueueing discovery, ask a Prometheus-compatible API
 # (VictoriaMetrics vmselect) which devices actually respond, and skip the dead
 # ones. Disabled unless a URL is configured. Query failures fail open.
-_LIVENESS_URL:   Optional[str] = os.getenv("DISCOBOX_LIVENESS_URL") or _cstr(_CFG, "reconcile", "liveness", "url")
-_LIVENESS_QUERY: str = os.getenv("DISCOBOX_LIVENESS_QUERY") or _c(
-    _CFG, "reconcile", "liveness", "query", default='max_over_time(up{job="snmp"}[6h])'
-)
-_LIVENESS_LABEL: str = os.getenv("DISCOBOX_LIVENESS_LABEL") or _c(
-    _CFG, "reconcile", "liveness", "label", default="netbox_primary_ip"
-)
-_LIVENESS_KEY: str = (os.getenv("DISCOBOX_LIVENESS_KEY") or _c(
-    _CFG, "reconcile", "liveness", "key", default="ip"
-)).lower()  # 'ip' (primary IP) or 'name' (device name/FQDN)
-_LIVENESS_TIMEOUT: int = int(os.getenv("DISCOBOX_LIVENESS_TIMEOUT") or _c(_CFG, "reconcile", "liveness", "timeout", default=15))
-_LIVENESS_TLS_VERIFY: bool = os.getenv("DISCOBOX_LIVENESS_TLS_VERIFY", "true").lower() != "false"
+_LIVENESS_URL:   Optional[str] = _S.reconcile.liveness.url
+_LIVENESS_QUERY: str = _S.reconcile.liveness.query
+_LIVENESS_LABEL: str = _S.reconcile.liveness.label
+_LIVENESS_KEY: str = _S.reconcile.liveness.key.lower()  # 'ip' (primary IP) or 'name' (device name/FQDN)
+_LIVENESS_TIMEOUT: int = _S.reconcile.liveness.timeout
+_LIVENESS_TLS_VERIFY: bool = _S.reconcile.liveness.tls_verify
 
 # HA member resolution: when a device's SNMP-reported hostname doesn't match
 # its Netbox name (e.g. a Fortinet cluster VIP), look up the correct Netbox
 # primary IP from a Prometheus-compatible metric whose labels already carry
 # it (e.g. fgHaStatsSyncStatus_info{fgHaStatsHostname=...}). Reuses the same
 # query endpoint as the liveness gate; disabled unless that URL is set.
-_HA_METRICS_METRIC:         str = _c(_CFG, "sync", "ha_resolve", "metric",         default="fgHaStatsSyncStatus_info")
-_HA_METRICS_HOSTNAME_LABEL: str = _c(_CFG, "sync", "ha_resolve", "hostname_label", default="fgHaStatsHostname")
-_HA_METRICS_TARGET_LABEL:   str = _c(_CFG, "sync", "ha_resolve", "target_label",   default="netbox_primary_ip")
-_HA_METRICS_TIMEOUT:        int = int(_c(_CFG, "sync", "ha_resolve", "timeout",    default=15))
+_HA_METRICS_METRIC:         str = _S.sync.ha_resolve.metric
+_HA_METRICS_HOSTNAME_LABEL: str = _S.sync.ha_resolve.hostname_label
+_HA_METRICS_TARGET_LABEL:   str = _S.sync.ha_resolve.target_label
+_HA_METRICS_TIMEOUT:        int = _S.sync.ha_resolve.timeout
 # instance_label matches a metric row to an already-known NetBox device FQDN
 # (rather than a vendor hostname) -- used to also ensure each HA member's own
 # management IP (not just the one currently being resolved) is set correctly.
-_HA_METRICS_INSTANCE_LABEL: str = _c(_CFG, "sync", "ha_resolve", "instance_label", default="instance")
-_HA_MGMT_IFACE_NAME:        str = _c(_CFG, "sync", "ha_resolve", "mgmt_iface_name", default="mgmt1")
+_HA_METRICS_INSTANCE_LABEL: str = _S.sync.ha_resolve.instance_label
+_HA_MGMT_IFACE_NAME:        str = _S.sync.ha_resolve.mgmt_iface_name
 
-_AUTO_CREATE_ROLE:     Optional[str] = _cstr (_CFG, "auto_create", "role",     default=None)
-_AUTO_CREATE_SITE:     Optional[str] = _cstr (_CFG, "auto_create", "site",     default=None)
-_AUTO_CREATE_STATUS:   str           = _c    (_CFG, "auto_create", "status",   default="active")
-_AUTO_CREATE_LOCATION: bool          = _cbool(_CFG, "auto_create", "location", default=False)
+_AUTO_CREATE_ROLE:     Optional[str] = _S.auto_create.role
+_AUTO_CREATE_SITE:     Optional[str] = _S.auto_create.site
+_AUTO_CREATE_STATUS:   str           = _S.auto_create.status
+_AUTO_CREATE_LOCATION: bool          = _S.auto_create.location
 
 
 def _count_netdisco_request(method: str) -> None:
@@ -611,7 +550,7 @@ def _count_netbox_request(method: str) -> None:
 
 
 def _make_netdisco_client() -> NetdiscoClient:
-    tls = os.getenv("NETDISCO_TLS_VERIFY", "true").lower() != "false"
+    tls = env_flag("NETDISCO_TLS_VERIFY")
     token = os.getenv("NETDISCO_TOKEN")
     if token:
         return NetdiscoClient(base_url=os.environ["NETDISCO_URL"], token=token, verify_tls=tls, on_request=_count_netdisco_request)
@@ -660,7 +599,7 @@ def _get_netbox_client() -> NetboxClient:
                 _netbox_client = NetboxClient(
                     url=os.environ["NETBOX_URL"],
                     token=os.environ["NETBOX_TOKEN"],
-                    verify_tls=os.getenv("NETBOX_TLS_VERIFY", "true").lower() != "false",
+                    verify_tls=env_flag("NETBOX_TLS_VERIFY"),
                     on_request=_count_netbox_request,
                     type_alias_cf=_TYPES_ALIAS_CF,
                     device_type_aliases=_TYPES_DEVICE_ALIASES,
@@ -1115,10 +1054,7 @@ _reconcile_gaps_lock = threading.Lock()
 
 # WLC AP pass: skip the APs while the WLC's AP list is unchanged (per-WLC state
 # file here), full pass every aps.full_pass_days and on every rebuild.
-configure_ap_fingerprint(
-    _STATE_DIR if _cbool(_CFG, "aps", "skip_unchanged", default=True) else None,
-    _c(_CFG, "aps", "full_pass_days", default=7),
-)
+configure_ap_fingerprint(_STATE_DIR if _S.aps.skip_unchanged else None, _S.aps.full_pass_days)
 
 # Summary of the last finished reconcile run (counts, when, how long, error),
 # served by GET /reconcile without re-running the compare.
@@ -1169,9 +1105,9 @@ def _save_liveness_status(status: dict) -> None:
 
 # Limit concurrent Netbox API load: all workers share this semaphore via the
 # threading module (workers are forked from the same parent process).
-_MAX_CONCURRENT: int = int(os.getenv("DISCOBOX_MAX_CONCURRENT_SYNCS", "3"))
+_MAX_CONCURRENT: int = _S.sync.max_concurrent
 _sync_semaphore = threading.Semaphore(_MAX_CONCURRENT)
-_MAX_QUEUE: int = int(os.getenv("DISCOBOX_MAX_QUEUE", "10000"))
+_MAX_QUEUE: int = _S.sync.max_queue
 
 # Pause gate: file-based so all workers see it regardless of which handled the request.
 # Presence of the file = paused; absence = running.
@@ -1968,6 +1904,11 @@ def jobs_run(
     return {"job": name, "status": "started"}
 
 
+@app.get("/config", dependencies=[Depends(require_auth)], summary="Effective settings (secrets masked) and where they came from")
+def config_view() -> dict:
+    return effective(_S, _CFG_SOURCE)
+
+
 @app.get("/health", summary="Liveness check")
 async def health() -> dict:
     return {"status": "ok", "version": __version__, "paused": _is_paused(), "in_flight": _inflight_hosts()}
@@ -2226,23 +2167,11 @@ async def tag_mismatches() -> list:
 
 if __name__ == "__main__":
     import socket
-    port = int(os.getenv("DISCOBOX_LISTEN_PORT", os.getenv("DISCOBOX_PORT", "8080")))
-    # one process: jobs, in-flight tracking and metrics are in-memory, per process
-    if int(os.getenv("DISCOBOX_WORKERS", "1")) > 1:
-        logger.warning("DISCOBOX_WORKERS > 1 is no longer supported: running one worker")
-    workers = 1
+    port = int(os.getenv("DISCOBOX_LISTEN_PORT", "8080"))
     try:
         local_ip = socket.gethostbyname(socket.gethostname())
     except Exception:
         local_ip = "unknown"
-    logger.info(
-        "discobox v%s starting on port %d (%d workers): outbound IP: %s",
-        __version__, port, workers, local_ip,
-    )
-    uvicorn.run(
-        "server:app",
-        host="0.0.0.0",
-        port=port,
-        workers=workers,
-        log_config=_UVICORN_LOG_CONFIG,
-    )
+    logger.info("discobox v%s starting on port %d: outbound IP: %s", __version__, port, local_ip)
+    # the app object, not "server:app": one import of this module, one process
+    uvicorn.run(app, host="0.0.0.0", port=port, log_config=_UVICORN_LOG_CONFIG)
