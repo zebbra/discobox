@@ -33,9 +33,40 @@ flowchart LR
 
 ---
 
-## Running
+## Features
+
+- **Device fields**: serial, OS version, OS name, OS release ([features](docs/features.md), [mapping](docs/netbox-mapping.md#device))
+- **Interfaces**: physical and logical interfaces, type by name prefix, subinterface parents ([mapping](docs/netbox-mapping.md#interfaces))
+- **PoE**: `poe_mode = pse` on PoE-capable ports ([features](docs/features.md))
+- **MAC addresses**: `dcim.mac-addresses` as primary MAC per interface ([features](docs/features.md))
+- **IP addresses**: interface IPs, prefix fixes, moves off dummy interfaces ([mapping](docs/netbox-mapping.md#ip-addresses))
+- **Module bays & modules**: chassis members as module bays with modules ([mapping](docs/netbox-mapping.md#module-bays--modules))
+- **Blades**: linecards, supervisors, fabric modules as module bays ([mapping](docs/netbox-mapping.md#blades-linecards--supervisors))
+- **Device type auto-creation**: manufacturer and device type if missing, [type aliases](docs/netbox-mapping.md#type-aliases) first ([features](docs/features.md))
+- **SFP / transceiver inventory**: inventory items linked to their interface ([mapping](docs/netbox-mapping.md#sfp--transceivers))
+- **PSU inventory**: inventory items for power supplies ([features](docs/features.md))
+- **HA / VIP detection**: VIP by hostname mismatch, Virtual Chassis of the HA members ([topologies](docs/netbox-mapping.md#supported-topologies))
+- **Wireless APs**: APs reported by a WLC updated during its sync ([features](docs/features.md))
+- **WLC HA pairs**: Cisco 9800 HA SSO pair as one device per unit in a Virtual Chassis ([features](docs/features.md))
+- **DeviceType enrichment**: fill-blank from the devicetype-library, `GET`/`POST /types/library` ([features](docs/features.md))
+- **Housekeeping**: stale template device bays and empty dummy interfaces removed ([features](docs/features.md))
+- **Orphaned interfaces**: interfaces Netdisco doesn't report removed, with a mass-deletion brake ([features](docs/features.md))
+
+---
+
+## Quick start
 
 A FastAPI server that receives webhook calls from Netdisco after each discovery and runs syncs in the background. Exposes a status page, Prometheus metrics and a Swagger UI. One process: jobs, in-flight tracking and metrics live in it.
+
+Connections and secrets come from the environment (`.env.example`), everything else from `discobox.yaml` (the annotated [`discobox.yaml`](discobox.yaml) in this repo lists every key with its default). See [Configuration](docs/configuration.md).
+
+```env
+NETDISCO_URL=https://netdisco.example.com
+NETDISCO_TOKEN=your-long-lived-token    # preferred (Bearer prefix added automatically)
+NETBOX_URL=https://netbox.example.com
+NETBOX_TOKEN=your-token-here
+DISCOBOX_AUTH_TOKEN=secret              # bearer token for the action endpoints; unset = no auth
+```
 
 ```bash
 # Docker
@@ -45,141 +76,6 @@ docker compose up -d discobox
 python server.py
 ```
 
-A one-off sync of one device: `curl -X POST "http://discobox:8080/sync?host=10.0.0.1"` (add `&debug=true` to get its log as plain text).
-
----
-
-## Features
-
-- **Device fields** — updates serial number, OS version, OS name, OS release (parsed from description)
-- **Interfaces** — creates and updates all physical and logical interfaces; maps interface type by name prefix; links subinterfaces (e.g. `Gi0/0/1.100`) to their parent interface
-- **PoE** — sets `poe_mode = pse` on ports reported as PoE-capable by Netdisco
-- **MAC addresses** — creates `dcim.mac-addresses` objects and links them as primary MAC per interface (Netbox 4.x model)
-- **IP addresses** — assigns interface IPs; fixes prefix mismatches (e.g. `/32` → `/26`); moves IPs from dummy placeholder interfaces to the correct one
-- **Module bays & modules** — models physical chassis members as module bays with installed modules; assigns interfaces to their parent module
-- **Blades** — models linecards, supervisors, and fabric modules as module bays on the device they belong to (routed per VSS member for split chassis)
-- **Device type auto-creation** — creates manufacturer, device type (with part number and slug) if not present in Netbox; raw SNMP models can be translated to curated types first (see [Type aliases](#type-aliases))
-- **SFP / transceiver inventory** — creates inventory items for transceivers with serial numbers, linked to their interface
-- **PSU inventory** — creates inventory items for power supplies
-- **HA / VIP detection** — detects cluster VIPs by hostname mismatch; redirects sync to the real active node; creates a Virtual Chassis linking both HA members; optionally deletes the VIP device (housekeeping)
-- **Wireless APs** — during a WLC's sync, updates each AP it reports (found by serial, then name): DeviceType, serial, `os_version`, an optional `controller` link to the WLC (the WLC then gets a `## Wireless controller` comments block linking the list of its APs), a `## Wireless` block in the comments (controller, location, uplink — linked to the switch by id when its IP or name resolves unambiguously, else a search, plus its port when the WLC reports it —, the C9800 Policy/Site/RF tags when Netdisco reports them, MACs, radios; no DHCP IP or timestamp, so it only changes when something real does; text outside its markers is never touched), a `GigabitEthernet0` interface with the Ethernet MAC, and a `Dot11Radio<slot>` per reported radio (devicetype-library names, so template interfaces are adopted), the radio base MAC on the first radio only (the WLC reports the same one for every slot). The WLC's per-AP radio "ports" are not synced as its own interfaces. Every other AP interface (import placeholders like `main`/`Vlan2`, ports from a wrong DeviceType template) is removed on every WLC sync unless it has a cable, an IP or another source's ownership, and so are empty device/module bays (`aps.prune_interfaces`, default on). Once an AP's model resolves to a DeviceType, a `fixme-model` tag is removed from it (`aps.type_confirmed_untag`). While everything the AP pass reads from Netdisco (AP list, descriptions, serials, models, radio MACs) is unchanged since the last pass, a WLC sync skips its APs (log: `aps=… (unchanged: N skipped)`) and only retries the ones not found or failed last time (`aps.skip_unchanged`, default on); a full pass still runs every `aps.full_pass_days` (7) and on every `/rebuild` with `dry_run=false`
-- **WLC HA pairs** — a Cisco 9800 HA SSO pair (ENTITY-MIB root "Multi Chassis System") becomes one Netbox device per unit in a Virtual Chassis, by chassis position (chassis 1 = the controller's own device, chassis 2 = `<name>-2`), so roles can switch over without devices swapping. A missing `-2` peer is created (role/site/tenant/status/type from the controller, serial from its chassis; location/rack left empty) with a `## HA peer` comments block that flags the missing location until it's set. Each unit gets its own chassis serial (the controller's combined "A B" serial is never written); chassis module bays from the earlier modelling are removed
-- **DeviceType enrichment** — `GET /types/library?role=…|type=…` reports what the [devicetype-library](https://github.com/netbox-community/devicetype-library) would add to existing DeviceTypes; `POST …&apply=true` writes it. Fortinet types also match by the SKU decoded from the MIB product name Netdisco reports (`fac3kf` → `FAC-3000F`, `fgt101F` → `FG-101F`), only when the library has exactly that part_number. Fill-blank only (weight, airflow, description, datasheet comment; `u_height` only while no device of the type is racked) plus missing interface/console/power templates. Never renames types, never imports bays, front/rear ports or images. Templates only affect devices created afterwards. A pinned copy (Cisco, Fortinet; build args `DEVICETYPE_LIBRARY_REF` / `DEVICETYPE_LIBRARY_VENDORS`) is baked into the image, and `library.device_types` maps Netbox types to library entries. Also runs standalone: `python typesync.py --library ../devicetype-library --role lwapp-ap`. `role=` takes slugs, names or ids. `?bare=true` selects every type discobox created without templates (`source=netdisco`, or no source and its "Created by discobox" comment). Source on types (`custom_fields.source`, if the field exists on DeviceType/ModuleType): a type a sync has to create bare (`types.create_missing`) gets `source=netdisco` and a warning log line; an apply sets `devicetype-library` (`library.source_value`) on a library-matched type whose source is empty or `netdisco`, and `netdisco` on an unmatched discobox-created one without a source (the backfill: `POST /types/library?bare=true&apply=true`). A type fixed by hand gets `source=manual` and is never touched. Metric `discobox_types_bare{kind,manufacturer,model,part_number,library}` = devices (modules) using each `source=netdisco` type, read from Netbox by the `types-bare` job (`jobs.types-bare.interval`) and right after a creation or apply; `library=available` means `/types/library` can fill it, `none` fix it by hand or upstream it
-- **Housekeeping** — removes stale device bays auto-created from DeviceType templates (e.g. `PS-A`, `Fan 1`, `Slot 1`) and deletes empty dummy interfaces
-- **Orphaned interfaces** — interfaces in Netbox that Netdisco doesn't report: discobox's own (`source=netdisco`) are removed on every sync; source-less ones (imported, manual) only with `sync.remove_orphaned_interfaces: true` (unset: follows `housekeeping`); another source's never. Never one with a cable or an IP. Brake: nothing is removed when Netdisco reports no ports, or when more than `sync.orphan_delete_max_percent` (default 25) of a device's interfaces would go — except discobox's own digit-only names (an ifIndex from a failed SNMP walk), when Netdisco reports none of its own ports digit-only (HP/Aruba `1`…`48` stay braked). Shown as `orphans=-N` in the sync summary
-
----
-
-## Supported Topologies
-
-| Topology | Detection | Netbox model |
-|---|---|---|
-| **Standalone** | Single chassis, no stack root | Updates `device_type` directly on the device |
-| **Traditional stack** (e.g. Cisco 3850) | `class=stack` root present | Module bay + module per stack member; interfaces linked to their member's module |
-| **Nexus FEX** (e.g. N9K-C93180LC-EX) | Stack root type `cevContainerNexusLogicalFabric` | Primary N9K updates `device_type`; each FEX unit becomes a module bay + module; FEX interfaces linked to their FEX module |
-| **Cat9500 / Cat9600 StackWise Virtual** | Stack root type contains `VirtualStack` or name contains `Virtual Stack` | Two separate Netbox devices linked via Virtual Chassis; each gets its own blades and device type; partner found by serial or hostname (`-2` suffix) |
-| **HA pair / VIP** (e.g. Fortinet) | SNMP hostname differs from Netbox device found by IP, or hostname contains `p1h`/`p2h`, `node1`/`node2`, or `-1`/`-2` | Virtual Chassis created linking both physical nodes and the VIP device (p0h). Management VIP IP stays on the VIP device record; interface VIPs are assigned to whichever physical node syncs first. All shared IPs get `role=vip`. Behaviour of the VIP device is controlled by `DISCOBOX_VIP_MODE` (see Configuration). |
-| **Modular chassis** (e.g. N9K-C9508, C9606R) | Standalone with `class=module` blade entries | Blades (linecards, supervisors, fabric modules) modelled as module bays |
-
----
-
-## Netbox Mapping
-
-### Device
-
-| Netdisco field | Netbox field |
-|---|---|
-| `serial` | `serial` |
-| `os_ver` | `custom_fields.os_version` |
-| `os` | `custom_fields.os_name` |
-| OS release (parsed from `description`) | `custom_fields.os_release` |
-| Chassis `model` | `device_type.model` |
-| Chassis `type` (vendor prefix) | `device_type.manufacturer` |
-| Chassis count (traditional stack only) | `custom_fields.stack_members` |
-
-### Interfaces
-
-| Netdisco field | Netbox field |
-|---|---|
-| `port` / `descr` | `name` |
-| Interface name prefix | `type` (e.g. `10gbase-x-sfpp`, `lag`, `virtual`) |
-| `speed` | `speed` (kbps) |
-| `duplex` | `duplex` |
-| `description` | `description` |
-| `up` | `enabled` |
-| `mac` | `dcim.mac-addresses` → `primary_mac_address` |
-
-### IP Addresses
-
-| Netdisco field | Netbox field |
-|---|---|
-| `alias` / `ip` + `subnet` | `ipam.ip-addresses.address` (CIDR) |
-| Interface port name | `assigned_object` (dcim.interface) |
-
-### Module Bays & Modules
-
-| Netdisco field | Netbox field |
-|---|---|
-| Chassis `name` | Module bay `name` |
-| Chassis `pos` | Module bay `position` |
-| Chassis `model` | Module type `model` / `part_number` |
-| Chassis `serial` | Module `serial` |
-| Chassis `type` vendor prefix | Module type manufacturer |
-
-### Blades (Linecards / Supervisors)
-
-| Netdisco field | Netbox field |
-|---|---|
-| Module `name` | Module bay `name` |
-| Slot number (from `name`) | Module bay `position` |
-| Module `model` | Module type `model` / `part_number` |
-| Module `serial` | Module `serial` |
-
-### SFP / Transceivers
-
-| Netdisco field | Netbox field |
-|---|---|
-| Module `name` (expanded) | Inventory item `name` + interface link |
-| Module `model` | Inventory item `part_id` |
-| Module `serial` | Inventory item `serial` |
-
----
-
-## Configuration
-
-Connections and secrets come from the environment (`.env.example`), everything else from `discobox.yaml` (path in `DISCOBOX_CONFIG`; the annotated `discobox.yaml` in this repo lists every key with its default). The file is checked at startup: an unknown key or a wrong type stops discobox with the offending path, e.g. `sync.cooldwn: Extra inputs are not permitted`. `GET /config` shows the effective settings, secrets masked.
-
-```env
-NETDISCO_URL=https://netdisco.example.com
-NETDISCO_TOKEN=your-long-lived-token    # preferred (Bearer prefix added automatically)
-NETDISCO_USERNAME=admin                 # fallback if NETDISCO_TOKEN is not set
-NETDISCO_PASSWORD=secret
-NETBOX_URL=https://netbox.example.com
-NETBOX_TOKEN=your-token-here
-NETBOX_TLS_VERIFY=true                  # false for self-signed certificates
-NETDISCO_TLS_VERIFY=true
-
-DISCOBOX_LISTEN_PORT=8080               # default: 8080
-DISCOBOX_AUTH_TOKEN=secret              # bearer token for the action endpoints; unset = no auth
-DISCOBOX_CONFIG=/app/discobox.yaml      # default: ./discobox.yaml if present, else built-in defaults
-DISCOBOX_STATE_DIR=/tmp/discobox        # writable dir for job results, gap reports, pause flag, sync
-                                        # cooldown markers, AP fingerprints; default: /tmp/discobox. On a
-                                        # volume that outlives the pod, job schedules survive a redeploy too
-```
-
-The main `discobox.yaml` sections:
-
-| Section | What it sets |
-|---|---|
-| `sync` | Feature defaults per sync (`no_mac`, `no_ip`, `no_modules`, `no_sfp`, `no_poe`, `housekeeping`, `lldp_clear_stale`; per request overridable), cooldown, VIP handling (`vip_mode`, `vip_mode_by_vendor`), concurrency (`max_concurrent`, `max_queue`), `retry`, `circuit_breaker`, `pause_on_error`, orphan removal, Fortinet HA resolution (`ha_resolve`) |
-| `custom_fields`, `cabling` | Custom field names discobox writes and reads; null disables one |
-| `types`, `library` | DeviceType resolution (aliases, `create_missing`) and devicetype-library enrichment |
-| `aps` | WLC access point pass |
-| `reconcile`, `auto_create` | Reconcile limits and selection, the `liveness` gate, auto-created devices |
-| `jobs` | Job schedules (see Jobs) |
-| `netdisco` | Per-request SNMP timeout of the discover jobs discobox enqueues |
-| `auth` | `metrics_path`; `token` (prefer `DISCOBOX_AUTH_TOKEN`) |
-
 **venv setup:**
 ```bash
 python3 -m venv .venv
@@ -188,171 +84,7 @@ pip install -r requirements.txt
 set -a && source .env && set +a
 ```
 
----
-
-## Netbox Custom Fields
-
-### Written by discobox (Netdisco → Netbox)
-
-These fields are updated on every sync. Create them on the **Device** object in Netbox.
-
-| Slug | Type | Description |
-|---|---|---|
-| `os_version` | Text | OS version string (e.g. `17.3.4`) |
-| `os_name` | Text | OS platform name (e.g. `ios-xe`, `fortios`, `nx-os`) |
-| `os_release` | Text | IOS release name parsed from device description (e.g. `Gibraltar`) |
-| `controller` | Object → Device | Set on an AP to the WLC reporting it (`custom_fields.controller`; skipped unless the field exists, `null` disables). Generic name so other controller-managed devices can use it later |
-| `inventory_last_rebuild` | Date & time | Stamped (UTC) after every `/rebuild` with `dry_run=false`, whether or not it changed anything; never by a normal sync or a dry-run (`custom_fields.inventory_rebuild`; skipped unless the field exists, `null` disables) |
-| `stack_members` | Integer | Total physical units in a traditional stack with more than one member. Unset for standalone, a degraded 1-member stack (a count of `1` adds no signal), VSS (split across two Netbox devices), and FEX (satellites aren't stack members). By default (`custom_fields.stack_members_only_increase: true`, yaml-only) the recorded value never decreases — a dead member won't silently reduce it |
-
-### Read by discobox (Netbox → Netdisco, reconcile loop)
-
-These fields are optional. If set on a Device they are passed to the Netdisco discovery queue.
-
-| Slug | Type | Description |
-|---|---|---|
-| `snmp_auth_profile` | Select | SNMP credential tag in Netdisco (maps to `snmp_tag`) |
-| `snmp_polling_timeout` | Select | Discovery timeout, e.g. `30s`, `3m` (default: `3s` if unset) |
-
-| `snmp_models` | Text | Set on **DeviceType** / **ModuleType**: raw SNMP model strings (comma- or newline-separated) that map to this type, e.g. `enterprises.2440`. See [Type aliases](#type-aliases) |
-
-### Type aliases
-
-SNMP often reports a model that isn't what the type should be called in Netbox, e.g. `enterprises.2440`
-(a sysObjectID left over when Netdisco has no matching MIB). Before its usual matching (part number,
-model, slug), discobox translates the raw model string through:
-
-1. `types.device_aliases` / `types.module_aliases` in `discobox.yaml`: exact (case-insensitive) or `/regex/` keys → Netbox part number (or model/slug) of an existing type; vendor-scoped entries win over unscoped ones
-2. the `snmp_models` custom field (`types.alias_cf`) on DeviceType/ModuleType, if it exists in Netbox
-
-```yaml
-types:
-  create_missing: true
-  alias_cf: snmp_models
-  device_aliases:
-    "enterprises.2440": efficientip-generic
-    cisco:                        # vendor-scoped: Netdisco vendor or Netbox manufacturer name
-      "N9KC93180YCFX3": N9K-C93180YC-FX3   # Netdisco placeholder chassis (no ENTITY-MIB data)
-    fortinet:
-      ".107.1.50001": FWB_VM
-```
-
-Models that are just OID fragments (`enterprises.2440`, `.1570`, `.107.1.50001`) are never trusted.
-They resolve only through an alias, and are never matched or created as a type themselves. Such a
-fragment is only unique within its vendor's enterprise tree, so scope it under the vendor (nested
-mapping, vendor compared ignoring case and punctuation). `enterprises.<n>` already names the vendor and
-can stay unscoped. Quote the keys: YAML reads an unquoted `.1570` as the number `0.157`.
-
-An alias whose target type doesn't exist in Netbox is logged and skipped. discobox never falls back to
-creating a type from the raw string. For devices without ENTITY-MIB chassis modules, the alias is
-checked against Netdisco's device model and the device's current Netbox type. So a device already on a
-wrongly auto-created `enterprises.2440` type moves to the aliased type on its next sync, and the old type
-can then be deleted. With
-`types.create_missing: false`, discobox never creates types. An unmatched model is logged and the device
-keeps its current type (auto-create skips the device instead).
-
-### Written by discobox on Interfaces (Netdisco → Netbox)
-
-CDP/LLDP neighbor data from Netdisco, written on every interface sync. Text fields — no dependency on the neighbor existing in Netbox.
-
-| Slug | Type | Object | Description |
-|---|---|---|---|
-| `lldp_neighbor` | Text | `dcim.interface` | Neighbor device hostname as reported by CDP/LLDP |
-| `lldp_neighbor_port` | Text | `dcim.interface` | Neighbor port name as reported by CDP/LLDP |
-
----
-
-## Server Endpoints
-
-Actions are POST. `GET /sync` and `GET /rebuild` still work but are deprecated: logged, counted in `discobox_deprecated_requests_total{path}` and answered with a `Deprecation: true` header.
-
-| Endpoint | Method | Auth | Description |
-|---|---|---|---|
-| `/` | GET | no | Status page: status, jobs, gaps, dummy types, actions (POST buttons) |
-| `/sync?host=<ip>` | POST | yes | Trigger device sync (the Netdisco hook) |
-| `/sync/all` | POST | yes | Queue a sync for every device known to Netdisco; optional `?limit=N&force=true` (force bypasses the cooldown window). Any other query param is forwarded to the Netbox device filter, e.g. `?last_updated__lt=2026-10-01`, `?name__ic=foo`, `?site=zrh&role=switch` — selection is then intersected with Netdisco's device list |
-| `/rebuild?host=<ip>` | POST | yes | Rebuild one device's inventory to match Netdisco: also deletes discobox-owned stale interfaces, modules, inventory items and SFPs, and force-corrects `stack_members`. `dry_run=true` (default) previews those deletions; the sync part still runs like a normal sync, so it never writes more than one. `dry_run=false` also forces housekeeping and a full WLC AP pass and stamps `inventory_last_rebuild`. Synchronous: a large WLC can exceed a proxy timeout while the rebuild finishes in the background |
-| `/sync/pause` | POST | yes | Pause queued syncs (reconcile and fix-tags are skipped while paused) |
-| `/sync/resume` | POST | yes | Resume queued syncs |
-| `/discover` | POST | yes | Enqueue a Netdisco discover for one device: `?host=<ip or Netbox name>`, tag hint from `snmp_auth_profile` and per-request SNMP timeout derived from `snmp_polling_timeout` (`netdisco.discover_snmptimeout`), or `&tag=` / `&timeout=` (per-request, used as-is) |
-| `/jobs` | GET | no | Every job: schedule, last run and result, next run; plus the retry queue (JSON) |
-| `/jobs/<name>/run` | POST | yes | Run a job now: `202` in the background, `?wait=true` answers with the result; `409` while it's running. reconcile and fix-tags take `?max_enqueue=N`, reconcile `&offset=N` |
-| `/reconcile` | GET | yes | The last Netbox↔Netdisco compare's gaps as JSON, answered immediately (read-only: no discover jobs, no auto-create). `?refresh=true` starts the compare job in the background (`running` shows it's in progress; the first call without a result starts one too), `?lists=true` adds the device lists, `?wait=true` runs it synchronously (may exceed proxy timeouts). Reconcile runs update the result too (`mode`) |
-| `/not-in-netdisco`, `/not-in-netbox`, `/tag-mismatches`, `/unknown-devices` | GET | no | The gap lists (JSON) |
-| `/types/library` | GET, POST | yes | DeviceType enrichment report; `POST …&apply=true` writes (see Features) |
-| `/config` | GET | yes | Effective settings (secrets masked) and the env vars in use |
-| `/stats` | GET | no | Aggregated status as JSON (for external status dashboards) |
-| `/metrics` | GET | no | Prometheus metrics |
-| `/health` | GET | no | Liveness check + in-flight hosts |
-| `/docs` | GET | no | Swagger UI |
-
-All sync flags are available as query parameters or JSON body fields, defaulting to the env var values:
-
-```
-POST /sync?host=10.0.0.1&housekeeping=true&sync_mac=false
-POST /sync  {"host": "10.0.0.1", "housekeeping": true, "sync_mac": false}
-```
-
-Syncs run in a background thread pool. Duplicate requests for the same host are dropped while a sync is in progress. Concurrent syncs log under `discobox.<ip>` so they are distinguishable in the log stream.
-
----
-
-## Jobs
-
-Periodic and on-demand work runs as jobs, listed on the status page and at `/jobs`:
-
-| Job | Default schedule | What it does |
-|---|---|---|
-| `reconcile` | every 24h | Compare Netbox with Netdisco; enqueue discovery for Netbox devices Netdisco doesn't know (and auto-create). Deferred while syncs are queued (`reconcile.defer_if_queued`, retried after `reconcile.defer_seconds`), skipped while paused |
-| `compare` | on demand | Compare only: refresh the gap reports, no discovery, no auto-create (`/reconcile?refresh=true`) |
-| `fix-tags` | on demand | Re-enqueue discovery with Netbox's auth tag for the last reconcile's tag mismatches |
-| `types-bare` | every 1h | Refresh `discobox_types_bare` (only with `custom_fields.source` set) |
-
-```yaml
-jobs:
-  reconcile:
-    interval: 86400     # seconds; 0 = on demand only
-  types-bare:
-    interval: 3600
-```
-
-Each job's last result (start, end, status `ok | deferred | skipped | aborted | error`, summary) is kept in `discobox.jobs.json` in the state dir, so after a restart the next run follows the last one; an overdue job runs shortly after startup (reconcile after 5 minutes, types-bare after 30 s). Any job also runs on demand: the status page's "run now", or `POST /jobs/<name>/run` (e.g. from an external scheduler). Metrics per job: `discobox_job_last_run_timestamp_seconds`, `discobox_job_last_success_timestamp_seconds`, `discobox_job_duration_seconds`, `discobox_job_next_run_timestamp_seconds`, `discobox_job_runs_total{status}`.
-
----
-
-## Overload Protection
-
-discobox distinguishes between isolated device timeouts and global Netdisco overload, and handles each differently.
-
-**Errors covered:** `ReadTimeout` (TCP read timeout) and HTTP `502`/`503`/`504` (gateway/proxy errors). Both indicate Netdisco is unable to serve the request.
-
-### Circuit breaker
-
-When ≥ `sync.circuit_breaker.threshold` (default 3) timeout errors occur within `sync.circuit_breaker.window` seconds (default 120), the circuit breaker trips:
-
-- All new and queued syncs are held for `sync.circuit_breaker.backoff` seconds (default 120)
-- After the backoff the breaker resets automatically — no manual intervention needed
-- The reconcile loop also skips while the breaker is active
-- Metric: `discobox_circuit_breaker_trips_total`
-
-This is distinct from `sync.pause_on_error` / `/sync/pause`, which pause permanently until manually resumed.
-
-### Per-device retry
-
-When a sync times out but the circuit breaker has **not** tripped (isolated failure), the device is automatically retried:
-
-- Retry is scheduled after `sync.retry.delay` seconds (default 480 = 8m), doubling each attempt
-  up to a cap of `sync.retry.max_delay` (default 1800 = 30m)
-- Up to `sync.retry.max` retries (default 6: 8m, 16m, 30m, 30m, 30m, 30m — then dropped)
-- If a retry fires while the circuit breaker is active, it waits until the breaker clears
-- If the queue is full when a retry becomes due, it is deferred 60s and re-attempted
-  (the attempt is not consumed) rather than dropped
-- Metric: `discobox_sync_retries_total`
-- A hook for a device that is in Netdisco but not in Netbox is no error and no skip: it counts as `discobox_syncs_total{status="not_in_netbox"}` (plus `discobox_unknown_devices_total`), sets no failed flag, doesn't auto-pause, and lists the device on `/` and `/unknown-devices` until a sync finds it in Netbox (or no hook came for it in 14 days)
-- Orphaned interfaces: `discobox_orphans_total{action=removed|braked}`; per device `discobox_device_orphans_braked{instance}` = orphans the mass-deletion brake kept in its last sync (> 0: discovery incomplete or Netbox stale — check the device or run a rebuild; a rebuild resets it to 0). Worth an alert: `discobox_device_orphans_braked > 0`
-- Skips: `discobox_syncs_skipped_total{reason}`. Before queuing, a hook is dropped on `cooldown`, `in_progress` (already being synced) or `queue_full` (the device then waits for its next hook or reconcile: worth an alert). A sync that started can still skip on `discovery_incomplete` (ifIndex placeholders as port names) or `recently_touched` (Netbox touch field within the cooldown); those two also count as `discobox_syncs_total{status="skipped"}`
-- Likewise a sync for a device Netdisco doesn't know (404, and no other Netdisco IP matches): `discobox_syncs_total{status="not_in_netdisco"}`; the reconcile lists these on `/not-in-netdisco`
-- Errors inside a sync that still completes (an AP, IP, module, … that failed; `errors=` in the `sync done` line) don't make it an `error` in `discobox_syncs_total`: they count in `discobox_sync_errors_total` and per device in `discobox_device_last_sync_errors{instance}`; APs also in `discobox_aps_total{action}`. The errors are every ERROR line a sync logs (plus counted ones not logged as errors), so a failed note, fan or PSU update counts too. `/rebuild` outcomes: `discobox_rebuilds_total{status=success|error|skipped,dry_run}`. Reads (GET/HEAD) to Netbox and Netdisco are retried up to 3 times on a dropped connection or a 500/502/503, after 2, 4 and 8 s (plus up to 1 s jitter), never on 504 (a gateway timeout usually repeats) and never for writes
+A one-off sync of one device: `curl -X POST "http://discobox:8080/sync?host=10.0.0.1"` (add `&debug=true` to get its log as plain text).
 
 ---
 
@@ -371,144 +103,11 @@ hooks:
     timeout: 30000
 ```
 
-
-<details>
-<summary><strong>Traditional stack — Cisco C9300 (3-member)</strong></summary>
-
-```
-INFO     discobox  ── device 10.10.1.1
-INFO     discobox  Netdisco  hostname='SWCORE01-STK.corp.example.com'  ports=167
-INFO     discobox  Netbox    device='swcore01-stk.corp.example.com'  id=443
-INFO     discobox  Device fields updated — serial='FOC2404H5VQ' os_name='ios-xe' os_ver=None os_release='Amsterdam'
-INFO     discobox    stack (root)  'c93xx Stack'  model=C9300-24UX  serial=FOC2404H5VQ
-INFO     discobox    ├── chassis  'Switch 1'  model=C9300-24UX  serial=FOC2404H5VQ
-INFO     discobox    ├── chassis  'Switch 2'  model=C9300-24T  serial=FCW2352M8JP
-INFO     discobox    └── chassis  'Switch 3'  model=C9300-24T  serial=FCW2352R3TN
-INFO     discobox  Modules   chassis=3  topology=stack
-INFO     discobox    Switch 1  C9300-24UX  serial=FOC2404H5VQ  created
-INFO     discobox    Switch 2  C9300-24T  serial=FCW2352M8JP  created
-INFO     discobox    Switch 3  C9300-24T  serial=FCW2352R3TN  created
-INFO     discobox  Modules — updated=3 unchanged=0 errors=0
-INFO     discobox  PSUs      entries: 3
-INFO     discobox    PSU Switch 2 - Power Supply A  model=PWR-C1-350WAC-P  serial=DCC2344W9KR  created
-INFO     discobox    PSU Switch 3 - Power Supply A  model=PWR-C1-350WAC-P  serial=DCC2344B4QM  created
-INFO     discobox    PSU Switch 1 - Power Supply A  model=PWR-C1-1100WAC-P  serial=DCC2344L7FN  created
-INFO     discobox  PSUs — created=3 updated=0 unchanged=0 errors=0
-INFO     discobox    GigabitEthernet2/0/4                     created
-INFO     discobox    Vlan653                                  created
-INFO     discobox    TenGigabitEthernet1/0/12                 updated
-INFO     discobox    GigabitEthernet3/0/15                    created
-...
-INFO     discobox    TenGigabitEthernet1/0/3.10               created
-WARNING  discobox    StackPort1/1                             in Netbox but not in Netdisco
-WARNING  discobox    StackPort1/2                             in Netbox but not in Netdisco
-INFO     discobox  Subinterfaces — linked 1 parent(s)
-INFO     discobox  Interface→Module — updated=124 unchanged=0 skipped=44
-WARNING  discobox    IP 192.168.63.11/24     already in Netbox (id=2688, assigned to unassigned) — skipping
-INFO     discobox    IP 172.16.56.1/26       → created on Vlan720
-...
-INFO     discobox  IPs — created=22 fixed=1 moved=0 unchanged=0 skipped=12 errors=0
-INFO     discobox  SFPs      entries: 12
-INFO     discobox    SFP Te2/1/3              model=SFP-10G-SR-S         serial=ACW2402P6SM → created
-INFO     discobox    SFP Te3/1/8              model=SFP-10G-SR           serial=AGA16034T3N → created
-...
-INFO     discobox  SFPs — created=12 updated=0 unchanged=0 errors=0
-INFO     discobox  PoE — updated=0 unchanged=24 skipped=0 errors=0
-INFO     discobox  ── done 10.10.1.1  created=140 updated=26 unchanged=0 errors=0
-INFO     discobox.server  Sync success for 10.10.1.1 in 214.7s
-```
-
-</details>
-
-<details>
-<summary><strong>StackWise Virtual — Cisco C9500 (2-member VSS)</strong></summary>
-
-```
-INFO     discobox.server  hook from 10.10.0.5: 10.10.2.87  queued
-INFO     discobox  ── device 10.10.2.87
-INFO     discobox  Netdisco  hostname='SWDIST01-VSS1.corp.example.com'  ports=106
-INFO     discobox  Netbox    device='swdist01-vss1.corp.example.com'  id=507
-INFO     discobox  Device fields updated — serial='FDO25031N7Q' os_name='ios-xe' os_ver=None os_release='Amsterdam'
-INFO     discobox    stack (root)  'Virtual Stack'  model=  serial=
-INFO     discobox    ├── chassis  'Switch 2 Chassis'  model=C9500-24Y4C  serial=FDO25031B4R
-INFO     discobox    └── chassis  'Switch 1 Chassis'  model=C9500-24Y4C  serial=FDO25031N7Q
-INFO     discobox  Modules   chassis=2  topology=vss
-INFO     discobox    DeviceType → C9500-24Y4C  serial=FDO25031N7Q  updated
-INFO     discobox    VSS partner found by hostname 'swdist01-vss2.corp.example.com'
-INFO     discobox    VSS partner DeviceType → C9500-24Y4C  serial=FDO25031B4R  updated
-INFO     discobox    VirtualChassis 'SWDIST01-VSS1' — created
-INFO     discobox  Modules — updated=2 unchanged=0 errors=0
-...
-INFO     discobox  ── done 10.10.2.87  created=0 updated=0 unchanged=105 errors=0
-INFO     discobox.server  Sync success for 10.10.2.87 in 20.3s
-```
-
-</details>
-
-<details>
-<summary><strong>Modular chassis — Cisco Nexus 9508 (blades + PSUs)</strong></summary>
-
-```
-INFO     discobox.server  hook from 10.10.0.6: 10.10.3.21  queued
-INFO     discobox  ── device 10.10.3.21
-INFO     discobox  Netdisco  hostname='NXCORE01-DC1'  ports=570
-INFO     discobox  Netbox    device='nxcore01-dc1.corp.example.com'  id=534
-WARNING  discobox  Hostname mismatch for 10.10.3.21 — Netdisco='NXCORE01-DC1'  Netbox='nxcore01-dc1.corp.example.com'
-INFO     discobox  Device fields updated — serial='FGE22124W6T' os_name='nx-os' os_ver=None os_release=None
-WARNING  discobox    Dummy interface 'mgmt0' still has 1 IP(s) — skipping deletion
-INFO     discobox  Housekeeping — deleted 0 stale device bay(s), 0 empty dummy interface(s)
-INFO     discobox    chassis (root)  'Nexus9000 C9508 (8 Slot) Chassis'  type=cevChassisN9Kc9508  model=N9K-C9508  serial=FGE22124W6T
-INFO     discobox    └── chassis  'Nexus9000 C9508 (8 Slot) Chassis'  model=N9K-C9508  serial=FGE22124W6T
-INFO     discobox  Modules   chassis=1  topology=standalone
-INFO     discobox    DeviceType → N9K-C9508  serial=FGE22124W6T  updated
-INFO     discobox  Modules — updated=1 unchanged=0 errors=0
-INFO     discobox  PSUs      entries: 6
-INFO     discobox    PSU PSU 1  model=N9K-PAC-3000W-B  serial=ART2216B3QN  created
-INFO     discobox    PSU PSU 2  model=N9K-PAC-3000W-B  serial=ART2216C8RM  created
-INFO     discobox    PSU PSU 3  model=N9K-PAC-3000W-B  serial=ART2216D5WP  created
-INFO     discobox    PSU PSU 4  model=N9K-PAC-3000W-B  serial=ART2216J4TS  created
-INFO     discobox    PSU PSU 5  model=N9K-PAC-3000W-B  serial=ART2213K7VP  created
-INFO     discobox    PSU PSU 6  model=N9K-PAC-3000W-B  serial=DTM214009XM  created
-INFO     discobox  PSUs — created=6 updated=0 unchanged=0 errors=0
-INFO     discobox  Blades    entries: 12
-INFO     discobox    Blade Supervisor Module 1       model=N9K-SUP-B+        serial=FOC22203T8L  created
-INFO     discobox    Blade Supervisor Module 2       model=N9K-SUP-B+        serial=FOC222030S4  created
-INFO     discobox    Blade 32p 40/100G Ethernet Module 1  model=N9K-X9732C-EX  serial=FOC22191Q4T  created
-INFO     discobox    Blade 32p 40/100G Ethernet Module 2  model=N9K-X9732C-EX  serial=FOC21186S7K  created
-INFO     discobox    Blade 32p 40/100G Ethernet Module 3  model=N9K-X9732C-EX  serial=FOC22191P5N  created
-INFO     discobox    Blade 32p 40/100G Ethernet Module 4  model=N9K-X9732C-EX  serial=FOC27028M3L  created
-INFO     discobox    Blade Fabric Module 2  model=N9K-C9508-FM-E  serial=FOC22191R2M  created
-INFO     discobox    Blade Fabric Module 3  model=N9K-C9508-FM-E  serial=FOC21410B9R  created
-INFO     discobox    Blade Fabric Module 4  model=N9K-C9508-FM-E  serial=FOC21410C4P  created
-INFO     discobox    Blade Fabric Module 6  model=N9K-C9508-FM-E  serial=FOC21410D8N  created
-INFO     discobox    Blade System Controller 1  model=N9K-SC-A  serial=FOC22155G3Q  created
-INFO     discobox    Blade System Controller 2  model=N9K-SC-A  serial=FOC22155H7X  created
-INFO     discobox  Blades — created=12 updated=0 unchanged=0 errors=0
-INFO     discobox    Ethernet4/20                             created
-INFO     discobox    Tunnel26                                 created
-INFO     discobox    Tunnel211                                created
-...
-```
-
-</details>
-
-<details>
-<summary><strong>HA pair / VIP — Fortinet (threenode mode)</strong></summary>
-
-```
-INFO     discobox  Netbox    device='fwcluster01p1h.corp.example.com'  id=24761
-INFO     discobox.10.10.4.98  HA VIP device 'fwcluster01p0h.corp.example.com' added as VC member pos=0
-INFO     discobox    VC member fwcluster01p1h.corp.example.com          pos=1  unchanged
-INFO     discobox    VC member fwcluster01p2h.corp.example.com          pos=2  unchanged
-INFO     discobox    VC member fwcluster01p0h.corp.example.com          pos=0  unchanged
-INFO     discobox.10.10.4.98  HA peer VirtualChassis 'fwcluster01' — unchanged  (topology=standalone per Netdisco; VC is Netbox-side)
-INFO     discobox.10.10.4.98  VIP device 'fwcluster01p0h.corp.example.com' — device_type updated
-INFO     discobox.10.10.4.98  VIP device 'fwcluster01p0h.corp.example.com' — primary IP 10.10.4.97/24 role set to vip
-INFO     discobox  Device fields updated — serial='FG6H0FTB24913847' os_name='fortios' os_ver=None os_release=None
-```
-
-</details>
-
 ---
 
-## Sample Log Output
+## Documentation
+
+- [Configuration](docs/configuration.md): environment variables, `discobox.yaml` sections
+- [Features](docs/features.md): what a sync does, per feature
+- [Netbox Mapping](docs/netbox-mapping.md): field mapping, supported topologies, custom fields, type aliases
+- [Operations](docs/operations.md): jobs, server endpoints, overload protection, metrics, sample log output
