@@ -1003,6 +1003,10 @@ def _acquire_reconcile_leadership() -> bool:
             try:
                 with open(_RECONCILE_LEADER_FILE) as f:
                     leader_pid = int(f.read().strip())
+                # A restarted container reuses its PID (PID 1) and a volume keeps the
+                # file: the "live leader" it names is this very process.
+                if leader_pid == os.getpid():
+                    return True
                 os.kill(leader_pid, 0)
                 return False  # leader still alive
             except (OSError, ValueError):
