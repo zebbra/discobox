@@ -35,7 +35,9 @@ from typing import Annotated, Any, Optional
 
 import uvicorn
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -666,7 +668,25 @@ app = FastAPI(
     description="Netdisco → Netbox sync webhook receiver",
     version=__version__,
     lifespan=lifespan,
+    docs_url=None,      # served below from local assets
+    redoc_url=None,
 )
+
+# Swagger UI assets baked into the image (Dockerfile), so /docs works without
+# internet access; a checkout without them falls back to FastAPI's CDN copy.
+_SWAGGER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "swagger")
+if os.path.isfile(os.path.join(_SWAGGER_DIR, "swagger-ui-bundle.js")):
+    app.mount("/static/swagger", StaticFiles(directory=_SWAGGER_DIR), name="swagger")
+    _SWAGGER_ASSETS = {"swagger_js_url": "/static/swagger/swagger-ui-bundle.js",
+                       "swagger_css_url": "/static/swagger/swagger-ui.css",
+                       "swagger_favicon_url": "/static/swagger/favicon-32x32.png"}
+else:
+    _SWAGGER_ASSETS = {}
+
+
+@app.get("/docs", include_in_schema=False)
+async def swagger_ui() -> HTMLResponse:
+    return get_swagger_ui_html(openapi_url=app.openapi_url, title="discobox API", **_SWAGGER_ASSETS)
 
 # Actions are POST. GET still works on /sync and /rebuild until their callers
 # use POST: deprecated, so logged, counted and marked.

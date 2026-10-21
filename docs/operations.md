@@ -50,7 +50,7 @@ Actions are POST. `GET /sync` and `GET /rebuild` still work but are deprecated: 
 | `/stats` | GET | no | Aggregated status as JSON (for external status dashboards) |
 | `/metrics` | GET | no | Prometheus metrics |
 | `/health` | GET | no | Liveness check + in-flight hosts |
-| `/docs` | GET | no | Swagger UI |
+| `/docs` | GET | no | Swagger UI, served from the image (no CDN, works air-gapped) |
 
 All sync flags are available as query parameters or JSON body fields, defaulting to the env var values:
 
