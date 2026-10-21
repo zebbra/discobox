@@ -51,6 +51,7 @@ from prometheus_client import (
 from pydantic import BaseModel
 from requests.exceptions import HTTPError, ReadTimeout
 
+from config import ConfigError, effective, env_flag, load_settings
 from discobox import (
     NetboxClient,
     NetdiscoClient,
@@ -66,7 +67,6 @@ from discobox import (
     sync_device,
     validate_ip,
 )
-from config import ConfigError, effective, env_flag, load_settings
 from jobs import Job, JobRegistry, JobResult
 from typesync import Library, match_library, sync_types
 
