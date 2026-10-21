@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from discobox import _remove_misplaced_vss_interfaces  # noqa: E402
+from discobox.interfaces import _remove_misplaced_vss_interfaces  # noqa: E402
 
 
 class _If:

@@ -11,7 +11,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from discobox import NetboxClient, _ChangelogSession
+from discobox import NetboxClient
+from discobox.netbox import _ChangelogSession
 
 
 def test_changelog_session_invokes_on_request(monkeypatch) -> None:

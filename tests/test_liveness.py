@@ -13,7 +13,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 import discobox
-from discobox import _resolve_ha_member_ip, fetch_liveness, reconcile_devices
+from discobox import fetch_liveness, reconcile_devices
+from discobox.ha import _resolve_ha_member_ip
 
 # ── fetch_liveness ─────────────────────────────────────────────────────────────
 
@@ -24,7 +25,7 @@ class FakeResponse:
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise discobox.requests.HTTPError(f"{self.status_code}")
+            raise discobox.reconcile.requests.HTTPError(f"{self.status_code}")
 
     def json(self):
         return self._payload
@@ -51,7 +52,7 @@ def _patch_get(monkeypatch, payload):
         calls["params"] = params
         return FakeResponse(payload)
 
-    monkeypatch.setattr(discobox.requests, "get", fake_get)
+    monkeypatch.setattr(discobox.reconcile.requests, "get", fake_get)
     return calls
 
 
@@ -283,7 +284,7 @@ def test_fix_tag_mismatches_passes_the_device_snmp_timeout() -> None:
 
 
 def test_discover_snmptimeout_is_derived_and_bounded() -> None:
-    from discobox import discover_snmptimeout_us
+    from discobox.util import discover_snmptimeout_us
     assert discover_snmptimeout_us("2m") == 10_000_000     # 120s / 12
     assert discover_snmptimeout_us("5m") == 20_000_000     # 25s → cap
     assert discover_snmptimeout_us("20s") == 10_000_000    # 1.7s → floor
@@ -296,7 +297,7 @@ def test_discover_snmptimeout_is_derived_and_bounded() -> None:
 
 
 def test_discover_snmptimeout_policy_is_configurable() -> None:
-    from discobox import DISCOVER_SNMPTIMEOUT, configure_discover_snmptimeout, discover_snmptimeout_us
+    from discobox.util import DISCOVER_SNMPTIMEOUT, configure_discover_snmptimeout, discover_snmptimeout_us
     saved = dict(DISCOVER_SNMPTIMEOUT)
     try:
         configure_discover_snmptimeout(divisor=6, floor="5s", cap="1m")
@@ -310,7 +311,7 @@ def test_discover_snmptimeout_policy_is_configurable() -> None:
 def test_sessions_retry_reads_not_writes() -> None:
     import discobox
     nd = discobox.NetdiscoClient("http://netdisco.example", token="t")     # token: no login request
-    for session, url in ((discobox._ChangelogSession(), "https://netbox.example/api/"),
+    for session, url in ((discobox.netbox._ChangelogSession(), "https://netbox.example/api/"),
                          (nd.session, "http://netdisco.example/api/v1/")):
         retry = session.get_adapter(url).max_retries
         assert retry.total == 3 and retry._is_method_retryable("GET")
@@ -357,7 +358,7 @@ def test_reconcile_stale_hours_off_counts_everything() -> None:
 
 def test_reconcile_never_auto_creates_stale_devices(monkeypatch) -> None:
     created: list[str] = []
-    monkeypatch.setattr(discobox, "_create_device_from_nd",
+    monkeypatch.setattr(discobox.reconcile, "_create_device_from_nd",
                         lambda nb, nd, ip, dev, **kw: created.append(ip) or True)
     reconcile_devices(FakeNDInventory(ND_INVENTORY), FakeNB(DEVICES[:1]), max_queued=None, max_failed=None,
                       max_enqueue=0, auto_create_role="switch", auto_create_site="lab")

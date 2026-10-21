@@ -8,7 +8,8 @@ from types import SimpleNamespace as NS
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from discobox import NetboxClient, _apply_poe  # noqa: E402
+from discobox import NetboxClient  # noqa: E402
+from discobox.interfaces import _apply_poe  # noqa: E402
 
 
 class _If:

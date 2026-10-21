@@ -13,6 +13,6 @@ select = [
 ]
 ignore = [
     "E501",  # line too long: server.py embeds multi-hundred-char HTML/CSS template strings
-    "E701",  # multiple statements on one line: discobox.py's map_iftype uses a deliberately
+    "E701",  # multiple statements on one line: discobox/util.py's map_iftype uses a deliberately
              # hand-aligned one-line if-table (see the function) for readability as a lookup table
 ]

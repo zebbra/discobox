@@ -9,7 +9,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import discobox  # noqa: E402
-from discobox import _delete_with_retry, _device_lock  # noqa: E402
+from discobox.util import _delete_with_retry, _device_lock  # noqa: E402
 
 
 class _Obj:
@@ -24,13 +24,13 @@ class _Obj:
 
 
 def test_deadlock_is_retried_then_succeeds(monkeypatch) -> None:
-    monkeypatch.setattr(discobox, "DEADLOCK_RETRIES", (0, 0, 0))
+    monkeypatch.setattr(discobox.util, "DEADLOCK_RETRIES", (0, 0, 0))
     o = _Obj(fail_times=2)
     assert _delete_with_retry(o, "x") is True and o.calls == 3
 
 
 def test_persistent_deadlock_or_other_error_returns_false(monkeypatch) -> None:
-    monkeypatch.setattr(discobox, "DEADLOCK_RETRIES", (0, 0, 0))
+    monkeypatch.setattr(discobox.util, "DEADLOCK_RETRIES", (0, 0, 0))
     o = _Obj(fail_times=99)
     assert _delete_with_retry(o, "x") is False and o.calls == 4          # 1 + 3 retries
     other = _Obj(fail_times=1, msg="400 Bad Request")
@@ -65,7 +65,7 @@ def test_sync_device_releases_its_lock_on_error(monkeypatch) -> None:
         _held_locks.append(lock)
         raise RuntimeError("sync blew up")
 
-    monkeypatch.setattr(discobox, "_sync_device", boom)
+    monkeypatch.setattr(discobox.sync, "_sync_device", boom)
     try:
         discobox.sync_device("192.0.2.1", None, None)
     except RuntimeError:
@@ -82,18 +82,18 @@ def test_logged_errors_count_per_sync_thread(monkeypatch) -> None:
     import discobox
 
     def fake(*a, _held_locks=None, **kw):
-        log = discobox._DeviceLogAdapter(discobox.logger, {"ip": "192.0.2.1"})
+        log = discobox.log._DeviceLogAdapter(discobox.log.logger, {"ip": "192.0.2.1"})
         log.error("note update error")                           # only logged, not counted anywhere
         logging.getLogger("discobox.sync").error("child logger")  # propagates to "discobox"
         log.warning("not an error")
-        return {"ok": True, "seen": discobox._sync_error_tls.count}
-    monkeypatch.setattr(discobox, "_sync_device", fake)
+        return {"ok": True, "seen": discobox.log._sync_error_tls.count}
+    monkeypatch.setattr(discobox.sync, "_sync_device", fake)
     assert discobox.sync_device()["seen"] == 2
-    assert discobox._sync_error_tls.count is None             # reset afterwards
-    discobox.logger.error("outside a sync: not counted, no crash")
+    assert discobox.log._sync_error_tls.count is None             # reset afterwards
+    discobox.log.logger.error("outside a sync: not counted, no crash")
 
     other: list = []
-    t = threading.Thread(target=lambda: other.append(getattr(discobox._sync_error_tls, "count", None)))
+    t = threading.Thread(target=lambda: other.append(getattr(discobox.log._sync_error_tls, "count", None)))
     t.start()
     t.join()
     assert other == [None]                                     # per thread
@@ -101,18 +101,18 @@ def test_logged_errors_count_per_sync_thread(monkeypatch) -> None:
 
 def test_reads_retry_on_5xx_but_not_504_or_writes() -> None:
     import discobox
-    retry = discobox._ChangelogSession().get_adapter("https://netbox.example/api/").max_retries
+    retry = discobox.netbox._ChangelogSession().get_adapter("https://netbox.example/api/").max_retries
     assert retry.is_retry("GET", 500) and retry.is_retry("GET", 503)
     assert not retry.is_retry("GET", 504) and not retry.is_retry("PATCH", 500) and not retry.is_retry("POST", 503)
 
 
 def test_read_retry_pauses_grow_from_the_first_retry(monkeypatch) -> None:
     import discobox
-    monkeypatch.setattr(discobox.random, "uniform", lambda a, b: 0.0)
-    retry = discobox._ChangelogSession().get_adapter("https://netbox.example/api/").max_retries
+    monkeypatch.setattr(discobox.util.random, "uniform", lambda a, b: 0.0)
+    retry = discobox.netbox._ChangelogSession().get_adapter("https://netbox.example/api/").max_retries
     assert retry.get_backoff_time() == 0.0
     pauses = []
     for _ in range(3):
-        retry = retry.increment(method="GET", url="/x", error=discobox.urllib3.exceptions.ProtocolError("reset"))
+        retry = retry.increment(method="GET", url="/x", error=discobox.util.urllib3.exceptions.ProtocolError("reset"))
         pauses.append(retry.get_backoff_time())
-    assert pauses == [2.0, 4.0, 8.0] and isinstance(retry, discobox._ReadRetry)
+    assert pauses == [2.0, 4.0, 8.0] and isinstance(retry, discobox.util._ReadRetry)

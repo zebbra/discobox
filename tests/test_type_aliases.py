@@ -11,7 +11,8 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from discobox import NetboxClient, _compile_type_aliases, _split_aliases
+from discobox import NetboxClient
+from discobox.util import _compile_type_aliases, _split_aliases
 
 
 class FakeType(SimpleNamespace):
@@ -188,7 +189,7 @@ SCOPED = {
 
 
 def test_is_oid_model():
-    from discobox import is_oid_model
+    from discobox.util import is_oid_model
     for oid in ("enterprises.2440", ".1570", ".107.1.50001", "1.3.6.1.4.1.9", ".112.100.1003"):
         assert is_oid_model(oid), oid
     for real in ("N9K-C9332D-GX2B", "FWB_VM", "2960", "WS-C3850-48P", "ISR4451-X/K9", "", None):

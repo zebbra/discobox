@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from discobox import _resolve_neighbor  # noqa: E402
+from discobox.neighbors import _resolve_neighbor  # noqa: E402
 
 AP_MAC = "02:00:00:00:52:01"
 
@@ -99,7 +99,7 @@ def test_mac_on_another_device_does_not_replace_ip_device() -> None:
 
 
 def test_fdb_resolves_ap_by_learned_mac() -> None:
-    from discobox import _resolve_neighbor_by_fdb
+    from discobox.neighbors import _resolve_neighbor_by_fdb
     dev, iface, mac = _ap()
     nb = _nb(devices=[dev], ifaces=[iface], macs=[mac])
     # the AP's Ethernet MAC learned on the port, plus a client MAC unknown to Netbox
@@ -109,7 +109,7 @@ def test_fdb_resolves_ap_by_learned_mac() -> None:
 
 
 def test_fdb_ignores_busy_ports_and_ambiguity() -> None:
-    from discobox import FDB_MAX_MACS_PER_PORT, _resolve_neighbor_by_fdb
+    from discobox.neighbors import FDB_MAX_MACS_PER_PORT, _resolve_neighbor_by_fdb
     dev, iface, mac = _ap()
     dev2, iface2, mac2 = _ap(53, 530, mac="02:00:00:00:53:01")
     nb = _nb(devices=[dev, dev2], ifaces=[iface, iface2], macs=[mac, mac2])

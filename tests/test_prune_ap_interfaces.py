@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from discobox import _is_ap_managed_iface, _prune_ap_interfaces  # noqa: E402
+from discobox.aps import _is_ap_managed_iface, _prune_ap_interfaces  # noqa: E402
 
 
 class _If:
@@ -57,7 +57,7 @@ def test_prune_nothing_to_do() -> None:
 
 
 def test_prune_ap_bays_only_empty_and_only_when_counted() -> None:
-    from discobox import _prune_ap_bays
+    from discobox.aps import _prune_ap_bays
 
     class _Bay(_If):
         def __init__(self, id_, name, installed=None, attr="installed_device"):
@@ -83,7 +83,7 @@ def test_prune_ap_bays_only_empty_and_only_when_counted() -> None:
 
 
 def test_tags_without() -> None:
-    from discobox import _tags_without
+    from discobox.aps import _tags_without
     t = [SimpleNamespace(id=1, slug="fixme-model"), SimpleNamespace(id=2, slug="wifi")]
     assert _tags_without(t, {"fixme-model"}) == [2]
     assert _tags_without([SimpleNamespace(id=2, slug="wifi")], {"fixme-model"}) is None    # nothing to do
@@ -92,7 +92,7 @@ def test_tags_without() -> None:
 
 
 def test_remove_wlc_radio_ports_only_unprotected_pseudo_ports() -> None:
-    from discobox import _remove_wlc_radio_ports
+    from discobox.aps import _remove_wlc_radio_ports
     ifaces = [
         _If(1, "02:00:00:aa:bb:cc.0"), _If(2, "02:00:00:aa:bb:cc.1"),               # pseudo-ports: removed
         _If(3, "02:00:00:aa:bb:dd.0", cable=SimpleNamespace(id=1)),                  # cabled: kept
@@ -107,7 +107,7 @@ def test_remove_wlc_radio_ports_only_unprotected_pseudo_ports() -> None:
 
 
 def test_ap_iface_fixups_clear_rf_role_on_non_wireless() -> None:
-    from discobox import _ap_iface_fixups
+    from discobox.aps import _ap_iface_fixups
     ch = lambda v: SimpleNamespace(value=v)  # noqa: E731  (pynetbox ChoiceItem)
     assert _ap_iface_fixups(SimpleNamespace(rf_role=ch("ap")), "2.5gbase-t") == {"rf_role": ""}
     assert _ap_iface_fixups(SimpleNamespace(rf_role=ch("ap")), "ieee802.11ax") == {}
@@ -131,7 +131,7 @@ def _orphan_setup():
 
 
 def test_orphans_own_always_unowned_only_with_flag_foreign_never() -> None:
-    from discobox import _remove_orphaned_interfaces
+    from discobox.interfaces import _remove_orphaned_interfaces
     existing, nd = _orphan_setup()
     assert _remove_orphaned_interfaces(_nb(ips_on={5}), existing, nd, 15, "source", "netdisco", 25,
                                        logging.getLogger()) == ["Gi1/0/1"]
@@ -141,7 +141,7 @@ def test_orphans_own_always_unowned_only_with_flag_foreign_never() -> None:
 
 
 def test_orphan_brake_on_empty_or_mass_deletion() -> None:
-    from discobox import _remove_orphaned_interfaces
+    from discobox.interfaces import _remove_orphaned_interfaces
     existing, _ = _orphan_setup()
     # Netdisco reports no ports at all: nothing goes, whatever the ownership
     assert _remove_orphaned_interfaces(_nb(), existing, set(), 0, "source", "netdisco", 25, logging.getLogger()) == []
@@ -154,7 +154,7 @@ def test_orphan_brake_on_empty_or_mass_deletion() -> None:
 
 
 def test_orphan_digit_names_bypass_brake_unless_netdisco_has_digit_ports() -> None:
-    from discobox import _remove_orphaned_interfaces
+    from discobox.interfaces import _remove_orphaned_interfaces
     def setup():
         existing = {f"Gi1/0/{n}": _If(n, f"Gi1/0/{n}", source="netdisco") for n in range(1, 11)}
         existing.update({str(n): _If(100 + n, str(n), source="netdisco") for n in range(1, 21)})   # ifIndex junk

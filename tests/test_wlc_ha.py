@@ -8,13 +8,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from discobox import (  # noqa: E402
-    _HA_NOTE_RE,
-    _ha_note_block,
-    _ha_peer_name,
-    _merge_note_block,
-    _pick_primary_chassis,
-)
+from discobox.aps import _merge_note_block
+from discobox.ha import _HA_NOTE_RE, _ha_note_block, _ha_peer_name, _pick_primary_chassis
 
 SAMPLES = Path(__file__).resolve().parent / "samples"
 
@@ -69,7 +64,7 @@ def test_ha_note_block_and_location_hint_lifecycle() -> None:
 
 
 def test_entity_ancestry_routes_components_to_their_unit() -> None:
-    from discobox import _chassis_pos_of
+    from discobox.ha import _chassis_pos_of
     _, mods = _load()
     by_index = {m["index"]: m for m in mods}
     by_name = {m["name"]: m for m in mods}
@@ -83,7 +78,7 @@ def test_entity_ancestry_routes_components_to_their_unit() -> None:
 
 
 def test_wlc_note_links_to_the_controller_filter() -> None:
-    from discobox import _WLC_NOTE_RE, _wlc_note_block
+    from discobox.aps import _WLC_NOTE_RE, _wlc_note_block
     block = _wlc_note_block("controller", 189)
     assert block.startswith("<!-- discobox:wlc -->\n## Wireless controller\n")
     assert "[List all APs of this controller](/dcim/devices/?cf_controller=189)" in block

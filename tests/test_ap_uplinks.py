@@ -7,7 +7,7 @@ from types import SimpleNamespace as NS
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from discobox import _ap_note_block, _resolve_ap_uplinks  # noqa: E402
+from discobox.aps import _ap_note_block, _resolve_ap_uplinks  # noqa: E402
 
 DEVICES = [
     NS(id=1, name="sw-a.example.net", primary_ip4=NS(address="192.0.2.1/24")),
@@ -66,7 +66,7 @@ def test_note_links_by_id_when_resolved() -> None:
 
 
 def test_parse_uplink_port_and_c9800_tags() -> None:
-    from discobox import _parse_ap_description
+    from discobox.aps import _parse_ap_description
     d = ("C9120AXI: AP-TEST-1 (C2/SITE1); IP 192.0.2.10; Dot3 MAC 02:00:00:00:00:01; "
          "Ethernet MAC 02:00:00:00:00:02; Connected via sw-c.example.net Gi1/0/12 (192.0.2.9); "
          "Policy tag PT-OFFICE; Site tag default-site-tag; RF tag RF-HD")

@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from discobox import _match_existing_iface
+from discobox.interfaces import _match_existing_iface
 
 
 class FakeIface:
@@ -97,7 +97,7 @@ def test_foreign_owned_duplicate_kept() -> None:
 # ── _iface_lookup ──────────────────────────────────────────────────────────────
 
 def test_iface_lookup_exact_and_case_fallback() -> None:
-    from discobox import _iface_lookup
+    from discobox.interfaces import _iface_lookup
     lo = FakeIface(1, "loopback3899")
     up = FakeIface(2, "Loopback3899")
     both = {"loopback3899": lo, "Loopback3899": up}

@@ -14,35 +14,38 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import date
 
-from discobox import (
-    NetboxClient,
-    _all_descriptions_missing,
+from discobox import NetboxClient
+from discobox.aps import (
     _ap_note_block,
     _ap_radio_iface_type,
     _ap_radio_slots,
     _ap_radios,
     _ap_wired_iface_type,
-    _cf_record_id,
+    _is_ap_port,
+    _merge_ap_note,
+    _parse_ap_description,
+)
+from discobox.ha import _guess_prefix_len, _ha_node_info
+from discobox.interfaces import port_to_netbox
+from discobox.sync import (
+    _all_descriptions_missing,
     _counts_changed,
     _discovery_incomplete,
     _fill_module_names,
-    _guess_prefix_len,
-    _ha_node_info,
-    _is_ap_port,
-    _merge_ap_note,
-    _merged_custom_fields,
-    _parse_ap_description,
     _recently_touched,
     _should_update_stack_members,
+    _stack_member_count,
+)
+from discobox.util import (
+    _cf_record_id,
+    _merged_custom_fields,
     _slave_link_field,
     _slot_from_iface,
-    _stack_member_count,
     expand_iface_name,
     map_iftype,
     parse_speed_kbps,
     parse_sw_model,
     parse_sw_ver,
-    port_to_netbox,
     slugify,
     vendor_from_chassis,
 )
