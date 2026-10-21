@@ -409,7 +409,7 @@ def _on_type_created(kind: str, manufacturer: str, model: str) -> None:
         f": the library has it, run /types/library?type={model}&apply=true" if library == "available"
         else ": not in the library, fix it by hand (then set source=manual) or upstream it",
     )
-    # a bit later: the sync assigns the device to the new type only after creating it
+    # 60s later: the sync assigns the device to the new type only after creating it
     threading.Timer(60, _refresh_types_bare_safe).start()
 
 
