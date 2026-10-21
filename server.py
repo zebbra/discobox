@@ -55,9 +55,11 @@ from discobox import (
     _recently_touched,
     configure_ap_fingerprint,
     configure_discover_snmptimeout,
+    configure_read_fields,
     discover_snmptimeout_us,
     fetch_liveness,
     fix_tag_mismatches,
+    read_cf,
     reconcile_devices,
     sync_device,
     validate_ip,
@@ -227,6 +229,7 @@ _TYPES_CREATE_MISSING: bool          = _S.types.create_missing
 # Per-request snmptimeout policy for discobox-enqueued discover jobs (see
 # discobox.DISCOVER_SNMPTIMEOUT): derived from snmp_polling_timeout, bounded.
 configure_discover_snmptimeout(**_S.netdisco.discover_snmptimeout.model_dump())
+configure_read_fields(auth_profile=_S.custom_fields.auth_profile, snmp_timeout=_S.custom_fields.snmp_timeout)
 _TYPES_ALIAS_CF:      Optional[str]  = _S.types.alias_cf
 _TYPES_DEVICE_ALIASES: dict          = _S.types.device_aliases
 _TYPES_MODULE_ALIASES: dict          = _S.types.module_aliases
@@ -297,6 +300,7 @@ _LIVENESS_TLS_VERIFY: bool = _S.reconcile.liveness.tls_verify
 # primary IP from a Prometheus-compatible metric whose labels already carry
 # it (e.g. fgHaStatsSyncStatus_info{fgHaStatsHostname=...}). Reuses the same
 # query endpoint as the liveness gate; disabled unless that URL is set.
+_HA_METRICS_URL:   Optional[str] = _S.sync.ha_resolve.url or _LIVENESS_URL
 _HA_METRICS_METRIC:         str = _S.sync.ha_resolve.metric
 _HA_METRICS_HOSTNAME_LABEL: str = _S.sync.ha_resolve.hostname_label
 _HA_METRICS_TARGET_LABEL:   str = _S.sync.ha_resolve.target_label
@@ -1190,7 +1194,7 @@ async def sync(
                 _IFACE_SOURCE_CF, _IFACE_SOURCE_VALUE,
                 _CF_OS_VERSION, _CF_OS_NAME, _CF_OS_RELEASE, _CF_STACK_MEMBERS, _STACK_MEMBERS_ONLY_INCREASE,
                 _CF_TOUCH, 0 if force else _TOUCH_COOLDOWN_DAYS,
-                _LIVENESS_URL, _HA_METRICS_METRIC, _HA_METRICS_HOSTNAME_LABEL, _HA_METRICS_TARGET_LABEL,
+                _HA_METRICS_URL, _HA_METRICS_METRIC, _HA_METRICS_HOSTNAME_LABEL, _HA_METRICS_TARGET_LABEL,
                 _HA_METRICS_TIMEOUT, _LIVENESS_TLS_VERIFY, _HA_METRICS_INSTANCE_LABEL, _HA_MGMT_IFACE_NAME,
             )
         finally:
@@ -1280,7 +1284,7 @@ async def rebuild(
                 cf_os_version=_CF_OS_VERSION, cf_os_name=_CF_OS_NAME, cf_os_release=_CF_OS_RELEASE,
                 cf_stack_members=_CF_STACK_MEMBERS, stack_members_only_increase=_STACK_MEMBERS_ONLY_INCREASE,
                 cf_touch=_CF_TOUCH, touch_cooldown_days=0, cf_inventory_rebuild=_CF_INVENTORY_REBUILD,
-                ha_metrics_url=_LIVENESS_URL, ha_metrics_metric=_HA_METRICS_METRIC,
+                ha_metrics_url=_HA_METRICS_URL, ha_metrics_metric=_HA_METRICS_METRIC,
                 ha_metrics_hostname_label=_HA_METRICS_HOSTNAME_LABEL,
                 ha_metrics_target_label=_HA_METRICS_TARGET_LABEL,
                 ha_metrics_timeout=_HA_METRICS_TIMEOUT, ha_metrics_tls_verify=_LIVENESS_TLS_VERIFY,
@@ -1458,7 +1462,7 @@ async def sync_all(
             _IFACE_SOURCE_CF, _IFACE_SOURCE_VALUE,
             _CF_OS_VERSION, _CF_OS_NAME, _CF_OS_RELEASE, _CF_STACK_MEMBERS, _STACK_MEMBERS_ONLY_INCREASE,
             _CF_TOUCH, 0 if force else _TOUCH_COOLDOWN_DAYS,
-            _LIVENESS_URL, _HA_METRICS_METRIC, _HA_METRICS_HOSTNAME_LABEL, _HA_METRICS_TARGET_LABEL,
+            _HA_METRICS_URL, _HA_METRICS_METRIC, _HA_METRICS_HOSTNAME_LABEL, _HA_METRICS_TARGET_LABEL,
             _HA_METRICS_TIMEOUT, _LIVENESS_TLS_VERIFY, _HA_METRICS_INSTANCE_LABEL, _HA_MGMT_IFACE_NAME,
         ))
 
@@ -1696,10 +1700,11 @@ def discover(
         if dev is not None:
             device_name = dev.name
             cf = dict(getattr(dev, "custom_fields", {}) or {})
-            if tag is None and cf.get("snmp_auth_profile"):
-                tag, tag_source = cf["snmp_auth_profile"], "netbox"
-            if timeout is None and _parse_snmp_timeout_us(cf.get("snmp_polling_timeout")) is not None:
-                timeout_us, timeout_source = discover_snmptimeout_us(cf["snmp_polling_timeout"]), "netbox"
+            if tag is None and read_cf(cf, "auth_profile"):
+                tag, tag_source = read_cf(cf, "auth_profile"), "netbox"
+            budget = read_cf(cf, "snmp_timeout")
+            if timeout is None and _parse_snmp_timeout_us(budget) is not None:
+                timeout_us, timeout_source = discover_snmptimeout_us(budget), "netbox"
             if ip is None and dev.primary_ip4:
                 ip = str(dev.primary_ip4).split("/")[0]
         elif ip is None:

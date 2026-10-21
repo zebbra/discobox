@@ -304,7 +304,7 @@ def _sync_device(
                                                         # follow housekeeping
     orphan_delete_max_percent: int = 25,  # mass-deletion brake for that
     ap_type_confirmed_untag: Optional[list[str]] = None,  # tag slugs removed once an AP's model
-                                                           # resolves to a type; None = ["fixme-model"]
+                                                           # resolves to a type (aps.type_confirmed_untag)
     ap_full: bool = False,  # WLC: update every AP even when the AP list's fingerprint is unchanged
     prune: bool = False,
     dry_run: bool = True,
@@ -1041,7 +1041,7 @@ def _sync_device(
         # delimited comments block, its wired interface and radios + MACs.
         ap_modules = [m for m in nd_mods if m.get("class") == "ap"]
         ap_untyped: dict[str, int] = {}   # AP model → count of APs no existing DeviceType matched
-        ap_untag = {t.lower() for t in (["fixme-model"] if ap_type_confirmed_untag is None else ap_type_confirmed_untag)}
+        ap_untag = {t.lower() for t in (ap_type_confirmed_untag or [])}
 
         ap_uplink_ids: dict[tuple[str, str], int] = {}
 

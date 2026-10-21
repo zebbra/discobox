@@ -36,7 +36,12 @@ def _str_list(value: Any) -> Any:
     return [str(v).strip() for v in value if str(v).strip()]
 
 
+def _vip_mode(value: Any) -> Any:
+    return "off" if value is False else value     # YAML reads a bare off as false
+
+
 OptStr = Annotated[Optional[str], BeforeValidator(_blank_none)]
+VipMode = Annotated[str, BeforeValidator(_vip_mode)]
 StrList = Annotated[list[str], BeforeValidator(_str_list)]
 Duration = Union[int, str]            # µs int or "10s" / "2m"
 
@@ -63,6 +68,7 @@ class CircuitBreaker(_Section):
 
 
 class HaResolve(_Section):
+    url: OptStr = None                # Prometheus-compatible query API; default: reconcile.liveness.url
     metric: str = "fgHaStatsSyncStatus_info"
     hostname_label: str = "fgHaStatsHostname"
     target_label: str = "netbox_primary_ip"
@@ -80,8 +86,8 @@ class Sync(_Section):
     no_poe: bool = False
     housekeeping: bool = False
     lldp_clear_stale: bool = False
-    vip_mode: str = "threenode"
-    vip_mode_by_vendor: dict[str, str] = {}
+    vip_mode: VipMode = "off"        # off | threenode | soft | hard
+    vip_mode_by_vendor: dict[str, VipMode] = {}
     pause_on_error: bool = False
     remove_orphaned_interfaces: Optional[bool] = None   # unset: follows housekeeping
     orphan_delete_max_percent: int = 25
@@ -110,6 +116,8 @@ class CustomFields(_Section):
     touch: OptStr = "netdisco_last_update"
     inventory_rebuild: OptStr = "inventory_last_rebuild"
     controller: OptStr = "controller"
+    auth_profile: OptStr = "snmp_auth_profile"       # read: Netdisco device_auth tag hint for discover jobs
+    snmp_timeout: OptStr = "snmp_polling_timeout"    # read: SNMP polling budget → per-request discover timeout
     neighbor_text: OptStr = "neighbor"
     neighbor_port: OptStr = "neighbor_port"
     neighbor_device: OptStr = "neighbor_device"
@@ -118,7 +126,7 @@ class CustomFields(_Section):
 
 class Aps(_Section):
     prune_interfaces: bool = True
-    type_confirmed_untag: StrList = ["fixme-model"]
+    type_confirmed_untag: StrList = []
     skip_unchanged: bool = True
     full_pass_days: float = 7
 
@@ -163,7 +171,7 @@ class Reconcile(_Section):
     max_enqueue: Optional[int] = None
     roles: StrList = ["router", "switch", "firewall", "appliance"]
     statuses: StrList = ["active"]
-    require_auth_tag: bool = True
+    require_auth_tag: bool = False
     defer_if_queued: bool = True
     defer_seconds: int = 3600
     not_in_netbox_stale_hours: Optional[float] = 24

@@ -16,7 +16,7 @@ sync:
     window: 120
     threshold: 3
     backoff: 120
-  vip_mode: threenode       # threenode | soft | hard | off; fallback for any vendor not
+  vip_mode: "off"           # off | threenode | soft | hard; fallback for any vendor not
                             # listed in vip_mode_by_vendor below
   # vip_mode_by_vendor:     # override vip_mode per vendor (nd_device["vendor"], already
   #                         # lowercased at the source — see e.g. tests/samples/*-device.json).
@@ -41,7 +41,8 @@ sync:
                             # `hostname`, unrelated to its NetBox name) to the correct NetBox
                             # device via a metric whose labels already carry that mapping —
                             # tried before the exact/contains-name and serial fallbacks.
-                            # Reuses reconcile.liveness.url/timeout; disabled unless that's set.
+                            # Disabled unless url (default: reconcile.liveness.url) is set.
+    url: null               # Prometheus-compatible query API, e.g. http://vmselect:8481/select/0/prometheus
     metric: fgHaStatsSyncStatus_info
     hostname_label: fgHaStatsHostname   # label carrying the vendor-reported hostname
     target_label: netbox_primary_ip     # label already carrying the correct NetBox device IP
@@ -107,6 +108,10 @@ custom_fields:
                             # by a normal sync or a dry-run. Skipped unless the field exists — null to disable
   controller: controller    # object CF (type Object → Device) on Device: set to the WLC on
                             # every AP it reports; skipped unless the field exists — null to disable
+  auth_profile: snmp_auth_profile      # read: Netdisco device_auth tag hint for the discover jobs
+                                       # discobox enqueues (reconcile, fix-tags, /discover); null = none
+  snmp_timeout: snmp_polling_timeout   # read: SNMP polling budget → per-request discover timeout
+                                       # (netdisco.discover_snmptimeout); null = always the floor
 
 netdisco:
   discover_snmptimeout:     # per-request SNMP timeout of the discover jobs discobox enqueues
@@ -131,8 +136,8 @@ aps:                        # access points reported by a WLC (updated during th
                             # placeholders like main/Vlan2, wrong-template ports) are deleted on
                             # every WLC sync, never with a cable or IP or another source's;
                             # empty device/module bays too
-  type_confirmed_untag: [fixme-model]  # tag slugs removed from an AP once its WLC-reported model
-                                       # resolves to a DeviceType (alias/part_number); [] to keep
+  type_confirmed_untag: []  # tag slugs removed from an AP once its WLC-reported model resolves
+                            # to a DeviceType (alias/part_number), e.g. [fixme-model]
   skip_unchanged: true      # a WLC sync skips its APs while everything they're built from in
                             # Netdisco (AP list, descriptions, serials, models, radio MACs) is
                             # unchanged since the last pass; APs not found / failed last time are
@@ -155,8 +160,8 @@ reconcile:
                                         # setups (see the network-netbox-ping alert rules, which
                                         # treat active|maintenance as reachable) — add "maintenance"
                                         # here to reconcile those too.
-  require_auth_tag: true     # only enqueue discovery for devices with snmp_auth_profile set;
-                             # without it Netdisco has no credentials to try, so discovery just fails
+  require_auth_tag: false    # true: only enqueue discovery for devices whose custom_fields.auth_profile
+                             # is set (without it Netdisco may have no credentials to try)
   defer_if_queued: true      # postpone reconcile (re-checked every defer_seconds) while any sync
                              # is still queued/in-flight, instead of piling more work on top of
                              # a backlog (e.g. a large hook burst) that's still draining

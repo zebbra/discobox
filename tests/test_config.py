@@ -32,6 +32,11 @@ def test_defaults() -> None:
     assert s.custom_fields.touch == "netdisco_last_update" and s.reconcile.liveness.url is None
 
 
+def test_bare_off_is_a_vip_mode() -> None:
+    s = parse_settings({"sync": {"vip_mode": False, "vip_mode_by_vendor": {"cisco": False, "fortinet": "threenode"}}})
+    assert s.sync.vip_mode == "off" and s.sync.vip_mode_by_vendor == {"cisco": "off", "fortinet": "threenode"}
+
+
 def test_null_or_blank_turns_an_optional_field_off() -> None:
     cf = parse_settings({"custom_fields": {"touch": None, "os_name": "  ", "controller": " ctl "}}).custom_fields
     assert cf.touch is None and cf.os_name is None and cf.controller == "ctl"

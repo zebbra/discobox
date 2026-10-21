@@ -468,6 +468,22 @@ def clean_mac(raw: Optional[str]) -> Optional[str]:
 _MAC_RE = re.compile(r"^(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}$", re.IGNORECASE)
 
 
+# Netbox custom fields on Device that discobox reads for the discover jobs it
+# enqueues: the Netdisco device_auth tag hint and the SNMP polling budget
+# (custom_fields.auth_profile / snmp_timeout; None = not used).
+READ_CF: dict[str, Optional[str]] = {"auth_profile": "snmp_auth_profile", "snmp_timeout": "snmp_polling_timeout"}
+
+
+def configure_read_fields(**names: Optional[str]) -> None:
+    READ_CF.update(names)
+
+
+def read_cf(cf: dict, key: str) -> Optional[str]:
+    """Value of the READ_CF field key in a device's custom_fields, None if unset or not configured."""
+    name = READ_CF.get(key)
+    return (cf.get(name) or None) if name else None
+
+
 _TIMEOUT_UNITS = {"us": 1, "ms": 1_000, "s": 1_000_000, "m": 60_000_000, "h": 3_600_000_000}
 
 # Per-request SNMP timeout for the discover jobs discobox enqueues ("snmptimeout",

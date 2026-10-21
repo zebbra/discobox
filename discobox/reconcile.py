@@ -9,7 +9,7 @@ import requests
 
 from .netbox import NetboxClient
 from .netdisco import NetdiscoClient
-from .util import discover_snmptimeout_us, vendor_from_chassis
+from .util import discover_snmptimeout_us, read_cf, vendor_from_chassis
 
 
 def _slugify(text: str) -> str:
@@ -446,10 +446,10 @@ def reconcile_devices(
         if ip in nd_by_ip:
             counts["already_known"] += 1
             cf = getattr(device, "custom_fields", {}) or {}
-            nb_tag = cf.get("snmp_auth_profile") or None
+            nb_tag = read_cf(cf, "auth_profile")
             nd_tag = nd_by_ip[ip].get("device_auth_tag") or None
             # carried along so fix-tags' re-discover uses the device's own SNMP timeout
-            snmp_timeout = cf.get("snmp_polling_timeout") or None
+            snmp_timeout = read_cf(cf, "snmp_timeout")
             if not nd_tag:
                 tag_mismatches.append({"ip": ip, "name": device.name, "netbox_tag": nb_tag, "netdisco_tag": nd_tag,
                                        "reason": "missing", "snmp_polling_timeout": snmp_timeout})
@@ -470,12 +470,12 @@ def reconcile_devices(
             continue
 
         cf = getattr(device, "custom_fields", {}) or {}
-        device_auth_tag_hint = cf.get("snmp_auth_profile") or None
+        device_auth_tag_hint = read_cf(cf, "auth_profile")
         if require_auth_tag and not device_auth_tag_hint:
-            log.debug("Skipping %s (%s): no snmp_auth_profile set", ip, device.name)
+            log.debug("Skipping %s (%s): no auth profile (custom_fields.auth_profile) set", ip, device.name)
             counts["skipped"] += 1
             continue
-        snmp_timeout_us = discover_snmptimeout_us(cf.get("snmp_polling_timeout"))
+        snmp_timeout_us = discover_snmptimeout_us(read_cf(cf, "snmp_timeout"))
 
         if offset and counts["enqueued"] + counts.get("offset_skipped", 0) < offset:
             counts["offset_skipped"] = counts.get("offset_skipped", 0) + 1
