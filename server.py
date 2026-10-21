@@ -1935,6 +1935,7 @@ async def index() -> str:
   a {{ color: #74b9ff; }}
   .btn {{ display:inline-block; padding: .1em .6em; border: 1px solid #74b9ff; border-radius: 4px; text-decoration: none; }}
   .btn:hover {{ background: #74b9ff; color: #1a1a2e; }}
+  button.btn {{ background: none; color: #74b9ff; font: inherit; cursor: pointer; }}
 </style></head><body>
 <h1>discobox <small style="color:#888;font-size:.5em">v{__version__}</small></h1>
 <p>Status: <span class="badge">{status_label}</span>
@@ -1958,6 +1959,8 @@ async def index() -> str:
   <tr><td>GET</td><td><a href=/unknown-devices>/unknown-devices</a></td><td>Devices Netdisco sent a sync hook for but not in Netbox (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/not-in-netdisco>/not-in-netdisco</a></td><td>Active Netbox devices not in Netdisco (JSON)</td></tr>
   <tr><td>GET/POST</td><td>/types/library?role=…</td><td>DeviceType enrichment from the devicetype-library (dry-run; POST apply=true writes)</td></tr>
+  <tr><td>GET</td><td><a href="/types/library?bare=true">/types/library?bare=true</a></td><td>Dummy types (created by a sync without templates, source=netdisco) and what the library would fill (JSON, dry-run)</td></tr>
+  <tr><td>POST</td><td><form method=post action="/types/library?bare=true&amp;apply=true" style="margin:0"><button class=btn>/types/library?bare=true&amp;apply=true</button></form></td><td>Enrich every dummy type the library matches (fill-blank + templates, source → devicetype-library; never renames)</td></tr>
   <tr><td>GET</td><td><a href=/not-in-netbox>/not-in-netbox</a></td><td>Netdisco devices not in Netbox, stale ones marked (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/tag-mismatches>/tag-mismatches</a></td><td>Devices with a missing or Netbox-mismatched auth tag (JSON)</td></tr>
   <tr><td>GET</td><td><a href=/metrics>/metrics</a></td><td>Prometheus metrics</td></tr>
