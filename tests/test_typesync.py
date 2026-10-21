@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from typesync import (  # noqa: E402
     CREATED_BY_DISCOBOX,
+    fortinet_sku,
     load_library,
     match_library,
     plan_components,
@@ -98,6 +99,34 @@ def test_match_by_mapping_then_part_number(library: Path) -> None:
     entry, how = match_library(_nb_type(model="Catalyst 9120AXI-E", manufacturer="cisco"), index)
     assert how == "model" and entry["part_number"] == "C9120AXI-E"
     assert match_library(_nb_type(model="Catalyst 9120AXI-E", manufacturer="Meraki"), index) == (None, "")
+
+
+@pytest.mark.parametrize("model, sku", [
+    ("fac3kf", "FAC-3000F"), ("fac3hf", "FAC-300F"), ("fac8hf", "FAC-800F"), ("fac2ke", "FAC-2000E"),
+    ("FAC3KF", "FAC-3000F"), ("fgt101F", "FG-101F"), ("fadc2200F", "FAD-2200F"), ("faz200F", "FAZ-200F"),
+])
+def test_fortinet_sku(model: str, sku: str) -> None:
+    assert fortinet_sku(model) == sku
+
+
+@pytest.mark.parametrize("model", ["facvm", "fmgvm", "3000F", "FGT_101F", None, ""])
+def test_fortinet_sku_not_parsed(model) -> None:
+    assert fortinet_sku(model) is None
+
+
+def test_match_fortinet_decoded_only_when_library_has_it(tmp_path: Path) -> None:
+    d = tmp_path / "lib" / "device-types" / "Fortinet"
+    d.mkdir(parents=True)
+    (d / "FAC-3000F.yaml").write_text("manufacturer: Fortinet\nmodel: FortiAuthenticator 3000F\n"
+                                      "slug: fortinet-fac-3000f\npart_number: FAC-3000F\n")
+    index = load_library([tmp_path / "lib"])
+    bare = _nb_type(model="fac3kf", slug="fac3kf", part_number="fac3kf", manufacturer="Fortinet")
+    entry, how = match_library(bare, index)
+    assert how == "fortinet" and entry["part_number"] == "FAC-3000F"
+    # decodes to FAC-300F, not in this library: no match
+    assert match_library({**bare, "model": "fac3hf", "part_number": "fac3hf"}, index) == (None, "")
+    # Fortinet only
+    assert match_library({**bare, "manufacturer": "Cisco"}, index) == (None, "")
 
 
 def test_plan_type_fields_fill_blank(library: Path) -> None:

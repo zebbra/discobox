@@ -22,7 +22,9 @@ devices never change.
 
 Library entries are matched to a Netbox type by `library.device_types`
 (Netbox model/part_number/slug → library part_number/model/slug) first, then by
-part_number, then by exact model name, both within the same manufacturer. Netbox part_numbers are often just
+part_number, then by exact model name, both within the same manufacturer, and
+for Fortinet last by the SKU decoded from its MIB product name (fac3kf →
+FAC-3000F, see fortinet_sku). Netbox part_numbers are often just
 the model Netdisco reported, so review the "match" column before --apply.
 """
 from __future__ import annotations
@@ -30,6 +32,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 import threading
 from pathlib import Path
@@ -147,7 +150,43 @@ def match_library(
         entry = index.get(value) if value else None
         if entry and _norm(entry.get(field)) == value and same_vendor(entry):
             return entry, field
+    if _vendor_key(nb_type.get("manufacturer")) == "fortinet":
+        for field in ("part_number", "model"):
+            sku = fortinet_sku(nb_type.get(field))
+            entry = index.get(_norm(sku)) if sku else None
+            if entry and _norm(entry.get("part_number")) == _norm(sku) and same_vendor(entry):
+                _log_decoded(nb_type.get(field), sku)
+                return entry, "fortinet"
     return None, ""
+
+
+# Fortinet devices report FORTINET-*-MIB product names, not SKUs: fac3kf =
+# FAC-3000F (digit, h = x100 / k = x1000, generation letter). Only a guess:
+# match_library accepts it only when the library has exactly that part_number;
+# odd names (VMs, FG-60E-POE, ...) go through library.device_types.
+_FORTINET_PREFIXES = {
+    "fac": "FAC", "fgt": "FG", "fwb": "FWB", "fad": "FAD", "fadc": "FAD",
+    "fpx": "FPX", "faz": "FAZ", "fmg": "FMG",
+}
+_FORTINET_MODEL_RE = re.compile(r"^(fadc|fac|fgt|fwb|fad|fpx|faz|fmg)(\d+)([hk]?)([a-z]\w*)$", re.IGNORECASE)
+_decoded_logged: set[str] = set()
+
+
+def fortinet_sku(model) -> Optional[str]:
+    """Fortinet MIB product name → SKU guess ("fac3kf" → "FAC-3000F"), None if it doesn't parse."""
+    m = _FORTINET_MODEL_RE.match(str(model or "").strip())
+    if not m:
+        return None
+    prefix, digits, scale, suffix = m.groups()
+    number = int(digits) * {"h": 100, "k": 1000}.get(scale.lower(), 1)
+    return f"{_FORTINET_PREFIXES[prefix.lower()]}-{number}{suffix.upper()}"
+
+
+def _log_decoded(model, sku: str) -> None:
+    # once per process: the metrics refresh matches every bare type hourly
+    if model not in _decoded_logged:
+        _decoded_logged.add(model)
+        log.info("Fortinet model %r decoded as library part_number %s", model, sku)
 
 
 # ── diff (pure) ────────────────────────────────────────────────────────────────
