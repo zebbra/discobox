@@ -66,6 +66,7 @@ from discobox import (
     sync_device,
     validate_ip,
 )
+from jobs import Job, JobRegistry, JobResult
 from typesync import Library, match_library, sync_types
 
 # ── Logging ────────────────────────────────────────────────────────────────────
@@ -516,7 +517,8 @@ _LIBRARY_OVERLAY: Optional[str] = _cstr(_CFG, "library", "overlay")
 _LIBRARY_ROLES:   list          = list(_c(_CFG, "library", "roles", default=[]) or [])
 _LIBRARY_MAPPING: dict          = _c(_CFG, "library", "device_types", default={}) or {}
 # discobox_types_bare refresh from Netbox: this often (0 = only after type creations / applies)
-_LIBRARY_METRICS_INTERVAL: int  = int(_c(_CFG, "library", "metrics_interval", default=3600) or 0)
+_LIBRARY_METRICS_INTERVAL: int  = int(_c(_CFG, "jobs", "types-bare", "interval",
+                                        default=_c(_CFG, "library", "metrics_interval", default=3600)) or 0)
 # source value /types/library apply sets on a library-filled type (custom_fields.source)
 _LIBRARY_SOURCE_VALUE: str      = _c(_CFG, "library", "source_value", default="devicetype-library")
 _library: Optional[Library] = None
@@ -544,7 +546,8 @@ async def require_auth(authorization: Annotated[str, Header()] = "") -> None:
 
 # ── Reconcile loop ─────────────────────────────────────────────────────────────
 
-_RECONCILE_INTERVAL:      int           = int(_c(_CFG, "reconcile", "interval",       default=24 * 3600))
+_RECONCILE_INTERVAL:      int           = int(_c(_CFG, "jobs", "reconcile", "interval",
+                                                 default=_c(_CFG, "reconcile", "interval", default=24 * 3600)) or 0)
 _RECONCILE_MAX_QUEUED:    Optional[int] = _c (_CFG, "reconcile", "max_queued",     default=None)
 _RECONCILE_MAX_FAILED:    Optional[int] = _c (_CFG, "reconcile", "max_failed",     default=None)
 _RECONCILE_MAX_ENQUEUE:   Optional[int] = _c (_CFG, "reconcile", "max_enqueue",    default=None)
@@ -728,10 +731,9 @@ def _refresh_types_bare() -> int:
 
 
 def _refresh_types_bare_safe() -> None:
-    try:
-        _refresh_types_bare()
-    except Exception as exc:
-        logger.warning("discobox_types_bare refresh failed: %s", exc)
+    """Refresh now (recorded as a types-bare run); after one in progress, don't double it."""
+    if "types-bare" in _jobs:
+        _jobs.run("types-bare", wait_if_running=True)
 
 
 def _run_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = None,
@@ -823,10 +825,10 @@ def _reconcile_once(max_enqueue: Optional[int], offset: Optional[int], compare_o
     return counts
 
 
-def _run_fix_tag_mismatches(max_enqueue: Optional[int] = None) -> None:
+def _run_fix_tag_mismatches(max_enqueue: Optional[int] = None) -> Optional[dict]:
     if _is_paused():
         logger.info("Fix tag mismatches skipped: sync is paused")
-        return
+        return None
     nd = _get_netdisco_client()
     with _reconcile_gaps_lock:
         mismatches = _load_gap(_TAG_MISMATCHES_FILE)
@@ -836,29 +838,81 @@ def _run_fix_tag_mismatches(max_enqueue: Optional[int] = None) -> None:
         max_failed=_RECONCILE_MAX_FAILED,
         max_enqueue=max_enqueue,
     )
+    if not result.get("aborted"):
+        fix_tags_enqueued_total.inc(result.get("enqueued", 0))
+        logger.info("Fix tag mismatches: %s", result)
+    return result
+
+
+# ── Jobs ───────────────────────────────────────────────────────────────────────
+
+_jobs = JobRegistry(os.path.join(_STATE_DIR, "discobox.jobs.json"), registry=_custom_registry)
+
+
+def _reconcile_summary(counts: dict) -> str:
+    d = _diff_counts(counts)
+    parts = [f"{d['not_in_netdisco']} not in Netdisco", f"{d['not_in_netbox']} not in Netbox"]
+    if d.get("not_in_netbox_stale"):
+        parts[-1] += f" (+{d['not_in_netbox_stale']} stale)"
+    if d.get("offline"):
+        parts.append(f"{d['offline']} offline")
+    parts.append(f"{d['tag_mismatches']} tag mismatches")
+    if "enqueued" in d or not counts.get("compare_only"):
+        parts.insert(0, f"{counts.get('enqueued', 0)} enqueued")
+    return ", ".join(parts)
+
+
+def _job_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = None,
+                   manual: bool = False) -> JobResult:
+    if _is_paused():
+        return JobResult("skipped", "sync is paused", retry_in=_RECONCILE_DEFER_SECONDS)
+    queued = len(_inflight_hosts())
+    if _RECONCILE_DEFER_IF_QUEUED and queued and not manual:
+        reconcile_runs_total.labels(status="deferred").inc()
+        return JobResult("deferred", f"{queued} sync(s) still queued/in-flight", retry_in=_RECONCILE_DEFER_SECONDS)
+    try:
+        counts = _run_reconcile(max_enqueue=max_enqueue, offset=offset)
+    except Exception:
+        reconcile_runs_total.labels(status="error").inc()
+        raise
+    if counts is None:
+        return JobResult("aborted", "Netdisco queue too busy or its status unreachable (see log)")
+    return JobResult(summary=_reconcile_summary(counts))
+
+
+def _job_compare() -> JobResult:
+    counts = _run_reconcile(compare_only=True)
+    return JobResult(summary=_reconcile_summary({**(counts or {}), "compare_only": True}))
+
+
+def _job_fix_tags(max_enqueue: Optional[int] = None) -> JobResult:
+    result = _run_fix_tag_mismatches(max_enqueue=max_enqueue)
+    if result is None:
+        return JobResult("skipped", "sync is paused")
     if result.get("aborted"):
-        return
-    fix_tags_enqueued_total.inc(result.get("enqueued", 0))
-    logger.info("Fix tag mismatches: %s", result)
+        return JobResult("aborted", "Netdisco queue too busy or its status unreachable (see log)")
+    return JobResult(summary=f"{result.get('enqueued', 0)} enqueued, {result.get('skipped', 0)} skipped, "
+                             f"{result.get('errors', 0)} errors")
 
 
-async def _reconcile_loop() -> None:
-    loop = asyncio.get_running_loop()
-    while True:
-        await asyncio.sleep(_RECONCILE_INTERVAL)
-        while _RECONCILE_DEFER_IF_QUEUED and _inflight_hosts():
-            queued = len(_inflight_hosts())
-            logger.info(
-                "Reconcile deferred %ds: %d sync(s) still queued/in-flight",
-                _RECONCILE_DEFER_SECONDS, queued,
-            )
-            reconcile_runs_total.labels(status="deferred").inc()
-            await asyncio.sleep(_RECONCILE_DEFER_SECONDS)
-        try:
-            await loop.run_in_executor(None, _run_reconcile)
-        except Exception as exc:
-            logger.error("Reconcile run failed: %s", exc)
-            reconcile_runs_total.labels(status="error").inc()
+def _job_types_bare() -> JobResult:
+    n = _refresh_types_bare()
+    available = sum(1 for m in types_bare.collect() for smp in m.samples
+                    if smp.name == "discobox_types_bare" and smp.labels.get("library") == "available")
+    return JobResult(summary=f"{n} dummy types, {available} the library can fill")
+
+
+_jobs.register(Job("reconcile", _job_reconcile, interval=_RECONCILE_INTERVAL, startup_delay=300,
+                   description="Compare Netbox with Netdisco; enqueue discovery for missing devices, auto-create"))
+_jobs.register(Job("compare", _job_compare,
+                   description="Compare only: refresh the gap reports, no discovery, no auto-create"))
+_jobs.register(Job("fix-tags", _job_fix_tags,
+                   description="Re-enqueue discovery with Netbox's auth tag for the last reconcile's tag mismatches"))
+if _IFACE_SOURCE_CF:
+    _jobs.register(Job("types-bare", _job_types_bare, interval=_LIBRARY_METRICS_INTERVAL,
+                       description="Refresh discobox_types_bare (dummy types and what the library can fill)"))
+# deprecated reconcile metric, kept for one release: from the job state across restarts
+reconcile_last_run_timestamp.set(_jobs.last_success("reconcile") or 0)
 
 
 def _drain_retries(now: float, submit) -> None:
@@ -912,26 +966,14 @@ async def lifespan(app):
                 os.unlink(f.path)
             except OSError:
                 pass
-    tasks = []
-    is_reconcile_leader = _acquire_reconcile_leadership()
-    if is_reconcile_leader:
-        try:
-            tasks.append(asyncio.create_task(_reconcile_loop()))
-        except Exception as exc:
-            logger.error("Failed to start reconcile loop: %s", exc)
-    else:
-        logger.info("Reconcile loop not started: another worker already holds leadership")
+    tasks = [asyncio.create_task(_jobs.scheduler())]
     try:
         tasks.append(asyncio.create_task(_retry_loop()))
     except Exception as exc:
         logger.error("Failed to start retry loop: %s", exc)
-    if is_reconcile_leader and _LIBRARY_METRICS_INTERVAL > 0 and _IFACE_SOURCE_CF:
-        tasks.append(asyncio.create_task(_types_bare_loop()))
     yield
     for task in tasks:
         task.cancel()
-    if is_reconcile_leader:
-        _release_reconcile_leadership()
 
 
 # ── App ────────────────────────────────────────────────────────────────────────
@@ -983,46 +1025,6 @@ def _inflight_hosts() -> list[str]:
         )
     except OSError:
         return []
-
-
-# Reconcile leader election: with DISCOBOX_WORKERS>1, lifespan() runs once per worker
-# process, so only one worker may run _reconcile_loop() or every run's max_enqueue/gap
-# scan gets multiplied by the worker count. The lock stores the leader's PID so a crashed
-# leader (without a clean shutdown) doesn't permanently wedge reconcile for other workers.
-_RECONCILE_LEADER_FILE: str = os.path.join(_INFLIGHT_DIR, "discobox.reconcile-leader.pid")
-
-
-def _acquire_reconcile_leadership() -> bool:
-    for _ in range(2):
-        try:
-            fd = os.open(_RECONCILE_LEADER_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode())
-            os.close(fd)
-            return True
-        except FileExistsError:
-            try:
-                with open(_RECONCILE_LEADER_FILE) as f:
-                    leader_pid = int(f.read().strip())
-                # A restarted container reuses its PID (PID 1) and a volume keeps the
-                # file: the "live leader" it names is this very process.
-                if leader_pid == os.getpid():
-                    return True
-                os.kill(leader_pid, 0)
-                return False  # leader still alive
-            except (OSError, ValueError):
-                pass  # stale lock (leader pid gone or file unreadable): reclaim it
-            try:
-                os.unlink(_RECONCILE_LEADER_FILE)
-            except FileNotFoundError:
-                pass
-    return False
-
-
-def _release_reconcile_leadership() -> None:
-    try:
-        os.unlink(_RECONCILE_LEADER_FILE)
-    except FileNotFoundError:
-        pass
 
 
 def _recently_synced(host: str) -> bool:
@@ -1832,7 +1834,7 @@ async def index() -> str:
     with _unknown_devices_lock:
         unknown_count = len(_load_unknown_devices())
     in_flight = _inflight_hosts()
-    last_reconcile = reconcile_last_run_timestamp._value.get() if hasattr(reconcile_last_run_timestamp, "_value") else 0
+    last_reconcile = _jobs.last_success("reconcile") or 0
     last_reconcile_str = (
         time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(last_reconcile))
         if last_reconcile else "never"
@@ -1988,7 +1990,7 @@ async def stats() -> dict:
         not_in_netdisco_list = _load_gap(_NOT_IN_NETDISCO_FILE)
         not_in_netbox_list = _load_gap(_NOT_IN_NETBOX_FILE)
         tag_mismatches_count = len(_load_gap(_TAG_MISMATCHES_FILE))
-    last_reconcile = reconcile_last_run_timestamp._value.get() if hasattr(reconcile_last_run_timestamp, "_value") else 0
+    last_reconcile = _jobs.last_success("reconcile") or 0
     return {
         "version": __version__,
         "paused": _is_paused(),
@@ -2087,13 +2089,13 @@ def discover(
     summary="Reconcile and act: enqueue Netdisco discovers for missing devices (and auto-create), in the background",
 )
 async def trigger_reconcile(
-    background_tasks: BackgroundTasks,
     max_enqueue: Annotated[Optional[int], Query(description="Max devices to enqueue (overrides DISCOBOX_RECONCILE_MAX_ENQUEUE)")] = None,
     offset: Annotated[Optional[int], Query(description="Skip first N missing devices (for manual pagination)")] = None,
 ) -> dict:
     effective_max = max_enqueue if max_enqueue is not None else _RECONCILE_MAX_ENQUEUE
-    background_tasks.add_task(_run_reconcile, max_enqueue=effective_max, offset=offset)
-    return {"status": "reconcile queued", "max_enqueue": effective_max, "offset": offset}
+    started = _jobs.start("reconcile", max_enqueue=effective_max, offset=offset, manual=True)
+    return {"status": "reconcile queued" if started else "reconcile already running",
+            "max_enqueue": effective_max, "offset": offset}
 
 
 _DIFF_KEYS = ("netbox_total", "netdisco_total", "already_known", "not_in_netdisco", "skipped_offline",
@@ -2118,14 +2120,13 @@ def reconcile_diff(
     """
     # Plain def: runs in FastAPI's threadpool
     if wait:
-        try:
-            _run_reconcile_compare()
-        except Exception as exc:
-            raise HTTPException(502, f"Compare failed: {exc}")
+        run = _jobs.run("compare", wait_if_running=True)
+        if run and run["status"] == "error":
+            raise HTTPException(502, f"Compare failed: {run['error']}")
     last = _load_reconcile_last()
     started = False
     if not wait and (refresh or not last):
-        started = _start_background_compare()
+        started = _jobs.start("compare")
     result: dict = dict(last.get("counts") or {})
     result.update({
         "mode": last.get("mode"),
@@ -2133,7 +2134,7 @@ def reconcile_diff(
         "age_s": round(time.time() - last["finished"]) if last.get("finished") else None,
         "duration_s": last.get("duration_s"),
         "error": last.get("error"),
-        "running": _compare_running.locked(),
+        "running": _jobs.is_running("compare"),
         "refresh_started": started,
     })
     if lists:
@@ -2153,35 +2154,6 @@ def _diff_counts(counts: dict) -> dict:
     return result
 
 
-_compare_running = threading.Lock()
-
-
-def _run_reconcile_compare() -> None:
-    """One compare-only reconcile; a second caller waits for the running one instead of doubling it."""
-    if not _compare_running.acquire(blocking=False):
-        with _compare_running:       # wait for the running compare, whose result is then current
-            return
-    try:
-        _run_reconcile(compare_only=True)
-    finally:
-        _compare_running.release()
-
-
-def _start_background_compare() -> bool:
-    """Start a compare-only reconcile in a thread; False when one is running already."""
-    if _compare_running.locked():
-        return False
-
-    def _bg() -> None:
-        try:
-            _run_reconcile_compare()
-        except Exception as exc:
-            logger.error("Reconcile compare failed: %s", exc)
-
-    threading.Thread(target=_bg, name="reconcile-compare", daemon=True).start()
-    return True
-
-
 @app.api_route(
     "/reconcile/fix-tags",
     methods=["GET", "POST"],
@@ -2189,13 +2161,13 @@ def _start_background_compare() -> bool:
     summary="Re-enqueue Netdisco discovery for devices from the last reconcile's tag-mismatch report",
 )
 async def trigger_fix_tags(
-    background_tasks: BackgroundTasks,
     max_enqueue: Annotated[Optional[int], Query(description="Max devices to re-enqueue")] = None,
 ) -> dict:
     with _reconcile_gaps_lock:
         pending = len(_load_gap(_TAG_MISMATCHES_FILE))
-    background_tasks.add_task(_run_fix_tag_mismatches, max_enqueue=max_enqueue)
-    return {"status": "fix-tags queued", "max_enqueue": max_enqueue, "pending": pending}
+    started = _jobs.start("fix-tags", max_enqueue=max_enqueue)
+    return {"status": "fix-tags queued" if started else "fix-tags already running",
+            "max_enqueue": max_enqueue, "pending": pending}
 
 
 @app.api_route(
@@ -2234,15 +2206,6 @@ def types_library(
         raise HTTPException(502, f"types/library failed: {exc}")
 
 
-async def _types_bare_loop() -> None:
-    """Refresh discobox_types_bare every library.metrics_interval (first one shortly after start)."""
-    loop = asyncio.get_running_loop()
-    await asyncio.sleep(30)          # let startup settle
-    while True:
-        await loop.run_in_executor(None, _refresh_types_bare_safe)
-        await asyncio.sleep(_LIBRARY_METRICS_INTERVAL)
-
-
 @app.get("/unknown-devices", summary="Devices Netdisco sent a sync hook for but not in Netbox")
 async def unknown_devices() -> list:
     with _unknown_devices_lock:
@@ -2273,7 +2236,10 @@ async def tag_mismatches() -> list:
 if __name__ == "__main__":
     import socket
     port = int(os.getenv("DISCOBOX_LISTEN_PORT", os.getenv("DISCOBOX_PORT", "8080")))
-    workers = int(os.getenv("DISCOBOX_WORKERS", "4"))
+    # one process: jobs, in-flight tracking and metrics are in-memory, per process
+    if int(os.getenv("DISCOBOX_WORKERS", "1")) > 1:
+        logger.warning("DISCOBOX_WORKERS > 1 is no longer supported: running one worker")
+    workers = 1
     try:
         local_ip = socket.gethostbyname(socket.gethostname())
     except Exception:

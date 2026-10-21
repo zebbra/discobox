@@ -131,8 +131,7 @@ def test_reconcile_diff_answers_immediately_and_refreshes_in_background(monkeypa
     r2 = server.reconcile_diff(lists=False, refresh=True, wait=False)   # already running → not doubled
     assert r2["refresh_started"] is False and r2["running"] is True
     gate.set()
-    with server._compare_running:        # wait for the background compare
-        pass
+    server._jobs.wait("compare")
     for _ in range(50):
         r3 = server.reconcile_diff(lists=False, refresh=False, wait=False)
         if r3["finished"]:
