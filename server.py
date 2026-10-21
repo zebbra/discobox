@@ -1977,6 +1977,50 @@ async def index() -> str:
 </body></html>"""
 
 
+def _retries_snapshot() -> dict:
+    """The per-device retry queue (drained every 10s, not a job): pending count and the next one due."""
+    with _retry_lock:
+        due = [v["retry_after"] for v in _retry_pending.values()]
+    return {"pending": len(due), "next_due": min(due) if due else None}
+
+
+@app.get("/jobs", summary="Every job: schedule, last run and result, next run; plus the retry queue")
+def jobs_list() -> dict:
+    return {"jobs": _jobs.snapshot(), "retries": _retries_snapshot()}
+
+
+@app.post(
+    "/jobs/{name}/run",
+    dependencies=[Depends(require_auth)],
+    summary="Run a job now: 202 in the background, or with ?wait=true its result (409 while it's running)",
+    status_code=202,
+)
+def jobs_run(
+    name: str,
+    response: Response,
+    wait: Annotated[bool, Query(description="Run in this request and answer with the result")] = False,
+    max_enqueue: Annotated[Optional[int], Query(description="reconcile / fix-tags: max devices to enqueue")] = None,
+    offset: Annotated[Optional[int], Query(description="reconcile: skip the first N missing devices")] = None,
+) -> dict:
+    # Plain def: a ?wait=true run blocks FastAPI's threadpool, not the event loop.
+    if name not in _jobs:
+        raise HTTPException(404, f"unknown job {name!r}, known: {', '.join(_jobs.names())}")
+    kwargs: dict = {}
+    if name == "reconcile":
+        kwargs = {"max_enqueue": max_enqueue, "offset": offset, "manual": True}
+    elif name == "fix-tags":
+        kwargs = {"max_enqueue": max_enqueue}
+    if wait:
+        run = _jobs.run(name, **kwargs)
+        if run is None:
+            raise HTTPException(409, f"job {name} is already running")
+        response.status_code = 200
+        return {"job": name, **{k: v for k, v in run.items() if k != "data"}}
+    if not _jobs.start(name, **kwargs):
+        raise HTTPException(409, f"job {name} is already running")
+    return {"job": name, "status": "started"}
+
+
 @app.get("/health", summary="Liveness check")
 async def health() -> dict:
     return {"status": "ok", "version": __version__, "paused": _is_paused(), "in_flight": _inflight_hosts()}

@@ -119,3 +119,36 @@ def test_start_runs_once_at_a_time(tmp_path) -> None:
     jobs.wait("r")
     assert calls == [{"max_enqueue": 5}]
     assert jobs.is_running("r") is False and jobs.last("r")["status"] == "ok"
+
+
+# ── /jobs endpoints ──
+
+def _server(monkeypatch, tmp_path):
+    import tempfile
+    os.environ.setdefault("PROMETHEUS_MULTIPROC_DIR", tempfile.mkdtemp(prefix="discobox-test-"))
+    import server
+    jobs = JobRegistry(str(tmp_path / "jobs.json"), registry=CollectorRegistry())
+    monkeypatch.setattr(server, "_jobs", jobs)
+    return server, jobs
+
+
+def test_jobs_endpoints(monkeypatch, tmp_path) -> None:
+    import pytest
+    from fastapi import HTTPException, Response
+
+    server, jobs = _server(monkeypatch, tmp_path)
+    seen = []
+    jobs.register(Job("reconcile", lambda **kw: seen.append(kw) or JobResult(summary="2 enqueued"), interval=60))
+    jobs.register(Job("compare", lambda: JobResult()))
+
+    r = server.jobs_run("reconcile", Response(), wait=True, max_enqueue=5, offset=None)
+    assert r["status"] == "ok" and r["summary"] == "2 enqueued"
+    assert seen == [{"max_enqueue": 5, "offset": None, "manual": True}]
+    listed = server.jobs_list()
+    assert [j["job"] for j in listed["jobs"]] == ["reconcile", "compare"]
+    assert listed["jobs"][0]["last"]["summary"] == "2 enqueued" and listed["retries"]["pending"] >= 0
+    with pytest.raises(HTTPException) as exc:
+        server.jobs_run("nope", Response())
+    assert exc.value.status_code == 404
+    assert server.jobs_run("compare", Response()) == {"job": "compare", "status": "started"}
+    jobs.wait("compare")
