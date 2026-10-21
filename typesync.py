@@ -3,11 +3,8 @@
 typesync: enrich existing Netbox DeviceTypes from the netbox-community
 devicetype-library (fill-blank only, never overwrites or renames).
 
-Primary interface is discobox's HTTP API (GET/POST /types/library, see
-server.py); this file also runs standalone. Dry-run by default.
-
-    python typesync.py --library ../devicetype-library --role lwapp-ap
-    python typesync.py --library ../devicetype-library --type 9120AX --apply
+Used through discobox's HTTP API (GET/POST /types/library, see server.py).
+Dry-run unless apply.
 
 What it adds, only where Netbox has nothing yet:
   - DeviceType fields: weight (+unit), airflow, description, comments
@@ -29,11 +26,8 @@ the model Netdisco reported, so review the "match" column before --apply.
 """
 from __future__ import annotations
 
-import argparse
 import logging
-import os
 import re
-import sys
 import threading
 from pathlib import Path
 from typing import Iterable, Optional
@@ -440,92 +434,3 @@ def sync_types(
     if apply:
         apply_report(nb, items, dts, source_cf)
     return {"apply": apply, "summary": summarize(items), "types": items}
-
-
-def log_report(result: dict) -> None:
-    for item in result["types"]:
-        label = f"{item['manufacturer']} / {item['model']} (pn={item['part_number'] or '-'}, devices={item['devices']})"
-        if not item["library"]:
-            log.info("%-60s no library match: add it to library.device_types or the overlay", label)
-            if item.get("set_source"):
-                log.info("    set source      %s", item["set_source"])
-            continue
-        log.info("%-60s → %s (%s)", label, item["library"], item["match"])
-        for k, v in item["set"].items():
-            log.info("    set %-12s %s", k, v if k != "comments" else (str(v).splitlines() or [""])[0])
-        for key, comps in item["add"].items():
-            log.info("    add %-20s %s", key, ", ".join(c["name"] for c in comps))
-        if item["not_imported"]:
-            log.info("    not imported: %s", ", ".join(item["not_imported"]))
-        if item["images_in_library"]:
-            log.info("    images available in library (not imported)")
-        if item.get("set_source"):
-            log.info("    set source      %s", item["set_source"])
-        if not item["set"] and not item["add"] and not item.get("set_source"):
-            log.info("    nothing to add")
-        if item.get("error"):
-            log.info("    ERROR: %s", item["error"])
-    log.info("%s: %s", "Applied" if result["apply"] else "Dry-run (use --apply to write)",
-             "  ".join(f"{k}={v}" for k, v in result["summary"].items()))
-
-
-def _load_config(path: str) -> dict:
-    """The library section, plus _source_cf / _source_value from custom_fields."""
-    try:
-        with open(path) as f:
-            full = yaml.safe_load(f) or {}
-    except FileNotFoundError:
-        full = {}
-    cfg = dict(full.get("library") or {})
-    cf = full.get("custom_fields") or {}
-    cfg["_source_cf"] = cf.get("source", "source")
-    cfg["_source_value"] = cf.get("source_value", "netdisco")
-    return cfg
-
-
-def main(argv: Optional[list[str]] = None) -> int:
-    cfg = _load_config(os.getenv("DISCOBOX_CONFIG") or "discobox.yaml")
-    p = argparse.ArgumentParser(description="Enrich Netbox DeviceTypes from the devicetype-library (fill-blank).")
-    p.add_argument("--library", default=cfg.get("path"), help="devicetype-library checkout (library.path)")
-    p.add_argument("--overlay", default=cfg.get("overlay"),
-                   help="extra dir with the same layout, wins over the library (library.overlay)")
-    p.add_argument("--role", action="append", default=None,
-                   help="only DeviceTypes used by devices of this role slug (repeatable; library.roles)")
-    p.add_argument("--type", action="append", default=[], dest="types",
-                   help="DeviceType model/slug/part_number to include (repeatable)")
-    p.add_argument("--bare", action="store_true",
-                   help="include every type discobox created without templates (source=netdisco, or its comment)")
-    p.add_argument("--apply", action="store_true", help="write changes (default: dry-run report)")
-    p.add_argument("--debug", action="store_true")
-    args = p.parse_args(argv)
-
-    logging.basicConfig(
-        level=logging.DEBUG if args.debug else logging.INFO,
-        format="%(asctime)s %(levelname)-8s %(name)s  %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-    )
-    if not args.library:
-        log.error("No library: pass --library or set library.path")
-        return 2
-    roles = args.role if args.role is not None else list(cfg.get("roles") or [])
-    if not roles and not args.types and not args.bare:
-        log.error("Nothing selected: pass --role and/or --type (a full-catalog run is deliberately not supported)")
-        return 2
-
-    library = Library([Path(args.library)] + ([Path(args.overlay)] if args.overlay else []))
-    nb = NetboxClient(
-        url=os.environ["NETBOX_URL"],
-        token=os.environ["NETBOX_TOKEN"],
-        verify_tls=os.getenv("NETBOX_TLS_VERIFY", "true").lower() != "false",
-    )
-    result = sync_types(
-        nb, library, cfg.get("device_types") or {}, roles, args.types, apply=args.apply, bare=args.bare,
-        source_cf=cfg["_source_cf"], bare_value=cfg["_source_value"],
-        library_value=cfg.get("source_value") or "devicetype-library",
-    )
-    log_report(result)
-    return 1 if result["summary"]["errors"] else 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

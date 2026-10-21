@@ -26,21 +26,6 @@ services:
       traefik.http.services.discobox-service.loadbalancer.server.port: "8080"
       traefik.http.services.discobox-service.loadbalancer.server.scheme: http
 
-  # One-shot CLI sync — override entrypoint:
-  #   docker compose run --rm cli --host 10.0.0.1
-  cli:
-    build:
-      context: .
-      args:
-        - http_proxy
-        - https_proxy
-        - no_proxy
-    env_file:
-      - .env
-    entrypoint: ["python", "cli.py"]
-    profiles:
-      - cli
-
 networks:
   traefik:
     external: true

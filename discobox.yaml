@@ -113,10 +113,6 @@ library:                    # DeviceType enrichment from the devicetype-library 
                             # part_number/model/slug, same vendor, e.g.
                             #   "9120AX": C9120AXI-E
                             # without a mapping: exact part_number, then exact model (same manufacturer)
-  metrics_interval: 3600    # seconds: refresh of discobox_types_bare{kind,manufacturer,model,
-                            # part_number,library} from Netbox (types with source=netdisco, i.e.
-                            # created bare by a sync; value = devices using it). Also refreshed
-                            # right after a sync creates one and after an apply. 0 = only those
   source_value: devicetype-library  # custom_fields.source value an apply sets on a library-filled
                             # type (only over an empty or netdisco source, never manual/other)
 
@@ -133,8 +129,13 @@ aps:                        # access points reported by a WLC (updated during th
                             # still retried. A rebuild (dry_run=false) always does the full pass
   full_pass_days: 7         # full AP pass at least this often anyway (repairs hand edits in Netbox)
 
+jobs:                       # schedules (status page, /jobs); 0 = on demand only
+  reconcile:
+    interval: 86400         # seconds (default: reconcile.interval)
+  types-bare:               # discobox_types_bare from Netbox (also right after a dummy is created or an apply)
+    interval: 3600          # seconds (default: library.metrics_interval)
+
 reconcile:
-  interval: 86400           # seconds
   max_queued: null          # abort reconcile if Netdisco queue exceeds this
   max_failed: null
   max_enqueue: null         # cap devices enqueued per reconcile run

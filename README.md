@@ -33,13 +33,9 @@ flowchart LR
 
 ---
 
-## Run Modes
+## Running
 
-discobox can be run in two modes:
-
-### Server mode (recommended)
-
-A FastAPI server that receives webhook calls from Netdisco after each discovery and runs syncs in the background. Exposes Prometheus metrics and a Swagger UI.
+A FastAPI server that receives webhook calls from Netdisco after each discovery and runs syncs in the background. Exposes a status page, Prometheus metrics and a Swagger UI. One process: jobs, in-flight tracking and metrics live in it.
 
 ```bash
 # Docker
@@ -49,28 +45,7 @@ docker compose up -d discobox
 python server.py
 ```
 
-### One-shot CLI
-
-Sync a single device by IP directly from the command line. Useful for manual runs, testing, or scripting.
-
-```bash
-# Docker
-docker compose run --rm cli --host 10.0.0.1
-
-# venv
-python cli.py --host 10.0.0.1
-```
-
-```
---host <IP>        Management IP of the device to sync (required)
---no-mac           Skip MAC address sync
---no-ip            Skip IP address sync (the management IP is always synced)
---no-modules       Skip module bay / module sync
---no-sfp           Skip SFP inventory item sync
---no-poe           Skip PoE mode sync
---housekeeping     Remove stale device bays and empty dummy interfaces
---debug            Enable debug logging
-```
+A one-off sync of one device: `curl -X POST "http://discobox:8080/sync?host=10.0.0.1"` (add `&debug=true` to get its log as plain text).
 
 ---
 
@@ -184,12 +159,10 @@ NETBOX_TOKEN=your-token-here
 
 # Server mode
 DISCOBOX_LISTEN_PORT=8080   # default: 8080 (avoid DISCOBOX_PORT — Docker overrides it with a service URL)
-DISCOBOX_WORKERS=4          # uvicorn worker count, default: 4. Metrics are plain in-memory (no
-                            # cross-process aggregation): with >1 worker, /metrics only reflects
-                            # whichever worker answers that particular scrape. Recommended: 1.
 DISCOBOX_AUTH_TOKEN=secret  # bearer token for /sync; leave unset to disable auth
-DISCOBOX_STATE_DIR=/tmp/discobox  # writable dir for pause flag, circuit breaker, reconcile
-                                   # leadership/gap reports, in-flight sync claims; default: /tmp/discobox
+DISCOBOX_STATE_DIR=/tmp/discobox  # writable dir for job results, gap reports, pause flag, circuit
+                                   # breaker, in-flight sync claims; default: /tmp/discobox. On a volume
+                                   # that outlives the pod, job schedules survive a redeploy too
 
 # Sync concurrency
 DISCOBOX_MAX_CONCURRENT_SYNCS=3   # max parallel syncs (semaphore), default: 3
@@ -211,16 +184,7 @@ DISCOBOX_LLDP_CLEAR_STALE=true  # clear neighbor fields + delete stale discobox-
 # off                — do nothing
 DISCOBOX_VIP_MODE=threenode
 
-# Reconcile loop — daily job comparing Netbox against Netdisco; enqueues discovery for devices
-# present in Netbox (SoT) but missing from Netdisco
-DISCOBOX_RECONCILE_INTERVAL=86400  # seconds between runs, default: 86400 (24h)
-DISCOBOX_RECONCILE_MAX_ENQUEUE=200 # max devices enqueued per run; unset = no limit
-                                   # use this to throttle the initial backfill on large inventories
-                                   # 0 = never enqueue, but still run the gap scan (report-only mode)
-DISCOBOX_RECONCILE_MAX_QUEUED=500  # abort run if Netdisco queue has more than N jobs queued (default: 500)
-DISCOBOX_RECONCILE_MAX_FAILED=500  # abort run if Netdisco reports more than N failures (default: 500)
-# A few reconcile options are yaml-only (no env var): reconcile.roles, reconcile.statuses,
-# reconcile.require_auth_tag, reconcile.not_in_netbox_stale_hours — see discobox.yaml for defaults and comments.
+# Reconcile and the other jobs are configured in discobox.yaml (jobs:, reconcile:), not by env vars.
 
 # Liveness gate (optional) — before enqueueing, query a Prometheus-compatible API
 # (VictoriaMetrics vmselect) and skip devices whose monitoring says they are down.
@@ -328,18 +292,24 @@ CDP/LLDP neighbor data from Netdisco, written on every interface sync. Text fiel
 
 ## Server Endpoints
 
+Actions are POST. Their GET form still works in v2.0 but is deprecated: logged, counted in `discobox_deprecated_requests_total{path}` and answered with a `Deprecation: true` header.
+
 | Endpoint | Method | Auth | Description |
 |---|---|---|---|
-| `/` | GET | no | Status page — endpoints, in-flight syncs, unknown devices |
-| `/sync?host=<ip>` | GET, POST | yes | Trigger device sync |
-| `/sync/all` | GET, POST | yes | Queue a sync for every device known to Netdisco; optional `?limit=N&force=true` (force bypasses the cooldown window). Any other query param is forwarded to the Netbox device filter, e.g. `?last_updated__lt=2026-10-01`, `?name__ic=foo`, `?site=zrh&role=switch` — selection is then intersected with Netdisco's device list |
-| `/rebuild?host=<ip>` | GET, POST | yes | Rebuild one device's inventory to match Netdisco: also deletes discobox-owned stale interfaces, modules, inventory items and SFPs, and force-corrects `stack_members`. `dry_run=true` (default) previews those deletions; the sync part still runs like a normal sync, so it never writes more than one. `dry_run=false` also forces housekeeping and a full WLC AP pass and stamps `inventory_last_rebuild`. Synchronous: a large WLC can exceed a proxy timeout while the rebuild finishes in the background |
-| `/sync/pause` | GET, POST | yes | Pause queued syncs (also skips reconcile) |
-| `/sync/resume` | GET, POST | yes | Resume queued syncs |
-| `/reconcile` | GET | yes | The last Netbox↔Netdisco compare's gaps as JSON, answered immediately (read-only: no discover jobs, no auto-create). `?refresh=true` starts a new compare in the background (`running` shows it's in progress; the first call without a result starts one too), `?lists=true` adds the device lists, `?wait=true` runs it synchronously (may exceed proxy timeouts). Reconcile-loop and `/reconcile/enqueue` runs update the result too (`mode`) |
-| `/reconcile/enqueue` | GET, POST | yes | Reconcile and act: enqueue discovers for missing devices (and auto-create) in the background; optional `?max_enqueue=N&offset=N` |
-| `/discover` | GET, POST | yes | Enqueue a Netdisco discover for one device: `?host=<ip or Netbox name>`, tag hint from `snmp_auth_profile` and per-request SNMP timeout derived from `snmp_polling_timeout` (`netdisco.discover_snmptimeout`), or `&tag=` / `&timeout=` (per-request, used as-is) |
-| `/unknown-devices` | GET | no | Devices Netdisco sent a sync hook for but not in Netbox (JSON) |
+| `/` | GET | no | Status page: status, jobs, gaps, dummy types, actions (POST buttons) |
+| `/sync?host=<ip>` | POST | yes | Trigger device sync (the Netdisco hook) |
+| `/sync/all` | POST | yes | Queue a sync for every device known to Netdisco; optional `?limit=N&force=true` (force bypasses the cooldown window). Any other query param is forwarded to the Netbox device filter, e.g. `?last_updated__lt=2026-10-01`, `?name__ic=foo`, `?site=zrh&role=switch` — selection is then intersected with Netdisco's device list |
+| `/rebuild?host=<ip>` | POST | yes | Rebuild one device's inventory to match Netdisco: also deletes discobox-owned stale interfaces, modules, inventory items and SFPs, and force-corrects `stack_members`. `dry_run=true` (default) previews those deletions; the sync part still runs like a normal sync, so it never writes more than one. `dry_run=false` also forces housekeeping and a full WLC AP pass and stamps `inventory_last_rebuild`. Synchronous: a large WLC can exceed a proxy timeout while the rebuild finishes in the background |
+| `/sync/pause` | POST | yes | Pause queued syncs (reconcile and fix-tags are skipped while paused) |
+| `/sync/resume` | POST | yes | Resume queued syncs |
+| `/discover` | POST | yes | Enqueue a Netdisco discover for one device: `?host=<ip or Netbox name>`, tag hint from `snmp_auth_profile` and per-request SNMP timeout derived from `snmp_polling_timeout` (`netdisco.discover_snmptimeout`), or `&tag=` / `&timeout=` (per-request, used as-is) |
+| `/jobs` | GET | no | Every job: schedule, last run and result, next run; plus the retry queue (JSON) |
+| `/jobs/<name>/run` | POST | yes | Run a job now: `202` in the background, `?wait=true` answers with the result; `409` while it's running. reconcile and fix-tags take `?max_enqueue=N`, reconcile `&offset=N` |
+| `/reconcile` | GET | yes | The last Netbox↔Netdisco compare's gaps as JSON, answered immediately (read-only: no discover jobs, no auto-create). `?refresh=true` starts the compare job in the background (`running` shows it's in progress; the first call without a result starts one too), `?lists=true` adds the device lists, `?wait=true` runs it synchronously (may exceed proxy timeouts). Reconcile runs update the result too (`mode`) |
+| `/reconcile/enqueue`, `/reconcile/fix-tags` | POST | yes | Same as `/jobs/reconcile/run` and `/jobs/fix-tags/run` (kept for existing callers) |
+| `/not-in-netdisco`, `/not-in-netbox`, `/tag-mismatches`, `/unknown-devices` | GET | no | The gap lists (JSON) |
+| `/types/library` | GET, POST | yes | DeviceType enrichment report; `POST …&apply=true` writes (see Features) |
+| `/stats` | GET | no | Aggregated status as JSON (for external status dashboards) |
 | `/metrics` | GET | no | Prometheus metrics |
 | `/health` | GET | no | Liveness check + in-flight hosts |
 | `/docs` | GET | no | Swagger UI |
@@ -352,6 +322,29 @@ POST /sync  {"host": "10.0.0.1", "housekeeping": true, "sync_mac": false}
 ```
 
 Syncs run in a background thread pool. Duplicate requests for the same host are dropped while a sync is in progress. Concurrent syncs log under `discobox.<ip>` so they are distinguishable in the log stream.
+
+---
+
+## Jobs
+
+Periodic and on-demand work runs as jobs, listed on the status page and at `/jobs`:
+
+| Job | Default schedule | What it does |
+|---|---|---|
+| `reconcile` | every 24h | Compare Netbox with Netdisco; enqueue discovery for Netbox devices Netdisco doesn't know (and auto-create). Deferred while syncs are queued (`reconcile.defer_if_queued`, retried after `reconcile.defer_seconds`), skipped while paused |
+| `compare` | on demand | Compare only: refresh the gap reports, no discovery, no auto-create (`/reconcile?refresh=true`) |
+| `fix-tags` | on demand | Re-enqueue discovery with Netbox's auth tag for the last reconcile's tag mismatches |
+| `types-bare` | every 1h | Refresh `discobox_types_bare` (only with `custom_fields.source` set) |
+
+```yaml
+jobs:
+  reconcile:
+    interval: 86400     # seconds; 0 = on demand only (default: reconcile.interval)
+  types-bare:
+    interval: 3600      # default: library.metrics_interval
+```
+
+Each job's last result (start, end, status `ok | deferred | skipped | aborted | error`, summary) is kept in `discobox.jobs.json` in the state dir, so after a restart the next run follows the last one; an overdue job runs shortly after startup (reconcile after 5 minutes, types-bare after 30 s). Any job also runs on demand: the status page's "run now", or `POST /jobs/<name>/run` (e.g. from an external scheduler). Metrics per job: `discobox_job_last_run_timestamp_seconds`, `discobox_job_last_success_timestamp_seconds`, `discobox_job_duration_seconds`, `discobox_job_next_run_timestamp_seconds`, `discobox_job_runs_total{status}`. The older `discobox_reconcile_runs_total` and `discobox_reconcile_last_run_timestamp_seconds` still work in v2.0.
 
 ---
 
