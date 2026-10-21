@@ -10,7 +10,7 @@ import sys
 import tempfile
 
 _TMPDIR = tempfile.mkdtemp(prefix="discobox-test-")
-os.environ.setdefault("PROMETHEUS_MULTIPROC_DIR", _TMPDIR)
+os.environ.setdefault("DISCOBOX_STATE_DIR", _TMPDIR)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -19,8 +19,8 @@ import server  # noqa: E402
 
 def _reset() -> None:
     server._in_flight.clear()
-    for f in os.scandir(server._INFLIGHT_DIR):
-        if f.name.startswith(("discobox.inflight.", "discobox.synced.")):
+    for f in os.scandir(server._STATE_DIR):
+        if f.name.startswith("discobox.synced."):
             os.unlink(f.path)
     server._MAX_QUEUE = 10_000
     server._SYNC_COOLDOWN = 3600

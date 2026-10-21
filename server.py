@@ -107,35 +107,19 @@ _UVICORN_LOG_CONFIG = {
 }
 
 # ── Persistent state directory ──────────────────────────────────────────────────
-# Shared writable directory for file-based state that must survive a container
-# restart: pause flag, circuit breaker, reconcile leadership/gap reports,
-# in-flight sync claims (also used for cross-worker dedup, moot at
-# DISCOBOX_WORKERS=1 but harmless to keep). Not Prometheus-related — see below.
+# Writable directory for state that survives a restart: job results, gap
+# reports, pause flag, sync cooldown markers, unknown devices, AP fingerprints.
 
 _STATE_DIR = os.environ.get("DISCOBOX_STATE_DIR", "/tmp/discobox")
 os.makedirs(_STATE_DIR, exist_ok=True)
 
 # ── Prometheus metrics ─────────────────────────────────────────────────────────
-# Plain in-memory metrics: DISCOBOX_WORKERS=1 means there is exactly one process,
-# so Prometheus's multiprocess mode (aggregating separate processes' metrics via
-# shared mmap files) has nothing to aggregate — it only added failure modes
-# (an import-order bug made every metric silently in-memory-only anyway: the
-# multiprocess value class is decided once, at prometheus_client's own import
-# time, based on PROMETHEUS_MULTIPROC_DIR already being set — but this module
-# only set it *after* that import, so it was never actually active).
-#
-# Always register metrics to a private registry so the default global REGISTRY
-# (and its built-in process/GC collectors) is never touched, and so the second
-# of the two times uvicorn imports this module per process (once as __main__,
-# once as "server" for the "server:app" import string) doesn't crash with
-# "Duplicated timeseries in CollectorRegistry".
+# One process, plain in-memory metrics, on a private registry so the default
+# global REGISTRY (and its built-in collectors) is never touched.
 _custom_registry = CollectorRegistry()
 _reg = {"registry": _custom_registry}
 
-# process_resident_memory_bytes / process_virtual_memory_bytes / process_cpu_seconds_total /
-# process_open_fds / process_start_time_seconds, right on this same /metrics — same
-# per-worker-process caveat as everything else in this private registry (see above):
-# only reports this one process, meaningful as-is at DISCOBOX_WORKERS=1.
+# process_resident_memory_bytes / process_cpu_seconds_total / process_start_time_seconds, ...
 ProcessCollector(registry=_custom_registry)
 
 hooks_received_total = Counter(
@@ -874,7 +858,6 @@ def _drain_retries(now: float, submit) -> None:
                 if not _claim_host(host):
                     logger.debug("Retry for %s: already in flight, dropping", host)
                     continue
-                _in_flight.add(host)
         if queue_full:
             with _retry_lock:
                 if host not in _retry_pending:
@@ -900,12 +883,6 @@ async def _retry_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app):
-    for f in os.scandir(_INFLIGHT_DIR):
-        if f.name.startswith("discobox.inflight."):
-            try:
-                os.unlink(f.path)
-            except OSError:
-                pass
     tasks = [asyncio.create_task(_jobs.scheduler())]
     try:
         tasks.append(asyncio.create_task(_retry_loop()))
@@ -949,53 +926,34 @@ async def _deprecated_get(request: Request, call_next):
         return response
     return await call_next(request)
 
-# Hosts currently being synced.
-# _in_flight is per-process (queue-size tracking / listing only).
-# _claim_host / _release_host use O_CREAT|O_EXCL files for cross-worker dedup.
+# Hosts queued or syncing. One process, so a set is the whole story.
 _in_flight: set[str] = set()
 _in_flight_lock = threading.Lock()
-_INFLIGHT_DIR: str = _STATE_DIR
 
 
 def _claim_host(host: str) -> bool:
-    """Atomically mark host as in-flight across all workers. Returns False if already claimed."""
-    path = os.path.join(_INFLIGHT_DIR, f"discobox.inflight.{host}")
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.close(fd)
-        return True
-    except FileExistsError:
+    """Mark host as in flight; False when it already is. Callers hold _in_flight_lock."""
+    if host in _in_flight:
         return False
+    _in_flight.add(host)
+    return True
 
 
 def _release_host(host: str) -> None:
-    path = os.path.join(_INFLIGHT_DIR, f"discobox.inflight.{host}")
-    try:
-        os.unlink(path)
-    except FileNotFoundError:
-        pass
+    with _in_flight_lock:
+        _in_flight.discard(host)
 
 
 def _inflight_hosts() -> list[str]:
-    """Cross-worker in-flight list from the claim files. The per-process
-    _in_flight set only sees hosts queued via the worker serving the request,
-    so status displays must read the files instead."""
-    prefix = "discobox.inflight."
-    try:
-        return sorted(
-            f.name[len(prefix):]
-            for f in os.scandir(_INFLIGHT_DIR)
-            if f.name.startswith(prefix)
-        )
-    except OSError:
-        return []
+    with _in_flight_lock:
+        return sorted(_in_flight)
 
 
 def _recently_synced(host: str) -> bool:
     """Return True if host was successfully synced within the cooldown window."""
     if not _SYNC_COOLDOWN:
         return False
-    path = os.path.join(_INFLIGHT_DIR, f"discobox.synced.{host}")
+    path = os.path.join(_STATE_DIR, f"discobox.synced.{host}")
     try:
         return (time.time() - os.stat(path).st_mtime) < _SYNC_COOLDOWN
     except FileNotFoundError:
@@ -1003,14 +961,14 @@ def _recently_synced(host: str) -> bool:
 
 
 def _mark_synced(host: str) -> None:
-    path = os.path.join(_INFLIGHT_DIR, f"discobox.synced.{host}")
+    path = os.path.join(_STATE_DIR, f"discobox.synced.{host}")
     try:
         open(path, "w").close()
     except OSError:
         pass
 
-# Devices Netdisco sent a sync hook for but not in Netbox: file-backed so all
-# workers share state. An entry goes once a sync finds the device in Netbox, or
+# Devices Netdisco sent a sync hook for but not in Netbox (kept across restarts).
+# An entry goes once a sync finds the device in Netbox, or
 # when no hook has come for it in _UNKNOWN_MAX_AGE_S (gone from Netdisco too).
 _UNKNOWN_DEVICES_FILE: str = os.path.join(
     _STATE_DIR, "discobox.unknown.json"
@@ -1103,20 +1061,19 @@ def _save_liveness_status(status: dict) -> None:
     with open(_LIVENESS_FILE, "w") as f:
         json.dump(status, f)
 
-# Limit concurrent Netbox API load: all workers share this semaphore via the
-# threading module (workers are forked from the same parent process).
+# Limit concurrent Netbox API load.
 _MAX_CONCURRENT: int = _S.sync.max_concurrent
 _sync_semaphore = threading.Semaphore(_MAX_CONCURRENT)
 _MAX_QUEUE: int = _S.sync.max_queue
 
-# Pause gate: file-based so all workers see it regardless of which handled the request.
+# Pause gate: a file in the state dir, so a pause survives a restart.
 # Presence of the file = paused; absence = running.
 _PAUSE_FILE: str = os.path.join(
     _STATE_DIR, "discobox.pause"
 )
 
-# Circuit-breaker state: file stores resume-at timestamp (float JSON).
-_CB_FILE: str = os.path.join(_STATE_DIR, "discobox.cb.json")
+# Circuit breaker: intake held until this time (0: not tripped).
+_cb_resume_at: float = 0.0
 _recent_timeouts: deque = deque()
 _timeout_lock = threading.Lock()
 
@@ -1126,24 +1083,12 @@ _retry_lock = threading.Lock()
 
 
 def _cb_is_active() -> bool:
-    try:
-        with open(_CB_FILE) as f:
-            resume_at = json.load(f)
-        if time.time() < resume_at:
-            return True
-        try:
-            os.unlink(_CB_FILE)
-        except FileNotFoundError:
-            pass
-        return False
-    except (FileNotFoundError, json.JSONDecodeError):
-        return False
+    return time.time() < _cb_resume_at
 
 
 def _trip_circuit_breaker() -> None:
-    resume_at = time.time() + _CB_BACKOFF
-    with open(_CB_FILE, "w") as f:
-        json.dump(resume_at, f)
+    global _cb_resume_at
+    _cb_resume_at = time.time() + _CB_BACKOFF
     circuit_breaker_trips_total.inc()
     logger.warning(
         "Circuit breaker tripped: %d timeouts in %ds — holding intake for %ds",
@@ -1349,8 +1294,6 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
         sync_duration.observe(elapsed)
         sync_in_progress.dec()
         _release_host(host)
-        with _in_flight_lock:
-            _in_flight.discard(host)
         # Per-device metrics: duration/timestamp only on success so a persistently
         # failing device goes stale and timestamp-based alerts fire correctly.
         # device_sync_failed is always updated so failure is immediately visible.
@@ -1460,7 +1403,6 @@ async def sync(
             logger.info("hook from %s: %s  already in progress: dropping", caller, resolved_host)
             syncs_skipped_total.labels(reason="in_progress").inc()
             return SyncResponse(status="skipped", host=resolved_host, reason="already in progress")
-        _in_flight.add(resolved_host)
 
     sync_in_progress.inc()
 
@@ -1545,7 +1487,6 @@ async def rebuild(
             return RebuildResponse(
                 status="skipped", host=resolved_host, dry_run=dry_run, reason="already in progress",
             )
-        _in_flight.add(resolved_host)
 
     nd = _get_netdisco_client()
     nb = _get_netbox_client()
@@ -1597,8 +1538,6 @@ async def rebuild(
         raise HTTPException(status_code=502, detail=f"rebuild failed: {exc}")
     finally:
         _release_host(resolved_host)
-        with _in_flight_lock:
-            _in_flight.discard(resolved_host)
 
     reason = result.get("reason")
     status = "skipped" if reason else ("ok" if result.get("ok") else "error")
@@ -1652,7 +1591,6 @@ def _enqueue_all(hosts: list, submit, limit: Optional[int] = None, force: bool =
                 counts["in_progress"] += 1
                 syncs_skipped_total.labels(reason="in_progress").inc()
                 continue
-            _in_flight.add(host)
         sync_in_progress.inc()
         submit(host)
         counts["queued"] += 1
@@ -1772,7 +1710,7 @@ async def metrics() -> Response:
 
 @app.api_route("/sync/pause", methods=["GET", "POST"], dependencies=[Depends(require_auth)], summary="Pause queued syncs")
 async def pause() -> dict:
-    """Hold queued syncs from starting across all workers. Already-running syncs finish."""
+    """Hold queued syncs from starting. Already-running syncs finish."""
     _set_paused(True)
     sync_paused.set(1)
     logger.warning("Sync paused: %d task(s) queued", len(_in_flight))

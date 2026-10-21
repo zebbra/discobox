@@ -10,13 +10,9 @@ import sys
 import tempfile
 import time
 
-# Isolate all file-based state (metrics, inflight claims, circuit breaker)
-# in a throwaway dir before server.py is imported. Only takes effect if no
-# other test file has already imported "server" first this session — a
-# plain `import server` is cached process-wide (see server._MULTIPROC_DIR),
-# so _reset() below scans server._INFLIGHT_DIR rather than this local
-# variable to always match whichever directory is actually in use.
-os.environ.setdefault("PROMETHEUS_MULTIPROC_DIR", tempfile.mkdtemp(prefix="discobox-test-"))
+# Only takes effect if no other test file has already imported "server"
+# first this session (a plain `import server` is cached process-wide).
+os.environ.setdefault("DISCOBOX_STATE_DIR", tempfile.mkdtemp(prefix="discobox-test-"))
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -31,9 +27,7 @@ def _reset() -> None:
     server._retry_pending.clear()
     server._recent_timeouts.clear()
     server._in_flight.clear()
-    for f in os.scandir(server._INFLIGHT_DIR):
-        if f.name.startswith(("discobox.inflight.", "discobox.cb.")):
-            os.unlink(f.path)
+    server._cb_resume_at = 0.0
     # Keep the circuit breaker out of these tests
     server._CB_THRESHOLD = 10_000
     server._RETRY_DELAY = 480

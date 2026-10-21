@@ -1,11 +1,8 @@
 """Regression test: server.py must be importable twice in one process.
 
-Under uvicorn multiprocessing the module is loaded twice in the same
-process (once as __main__ via spawn re-import, once as "server" for the
-server:app import string). Any metric registered to prometheus_client's
-global default REGISTRY instead of the module's private _custom_registry
-raises "Duplicated timeseries in CollectorRegistry" on the second import
-and crashes the worker at startup.
+Every metric must go to the module's private _custom_registry: one on
+prometheus_client's global REGISTRY raises "Duplicated timeseries in
+CollectorRegistry" on a second import (tests import server more than once).
 
 Run with `pytest tests/` or directly:
     python -m pytest tests/test_metrics_registry.py
@@ -18,7 +15,7 @@ import sys
 import tempfile
 
 _TMPDIR = tempfile.mkdtemp(prefix="discobox-test-")
-os.environ["PROMETHEUS_MULTIPROC_DIR"] = _TMPDIR
+os.environ["DISCOBOX_STATE_DIR"] = _TMPDIR
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)

@@ -125,7 +125,7 @@ def test_start_runs_once_at_a_time(tmp_path) -> None:
 
 def _server(monkeypatch, tmp_path):
     import tempfile
-    os.environ.setdefault("PROMETHEUS_MULTIPROC_DIR", tempfile.mkdtemp(prefix="discobox-test-"))
+    os.environ.setdefault("DISCOBOX_STATE_DIR", tempfile.mkdtemp(prefix="discobox-test-"))
     import server
     jobs = JobRegistry(str(tmp_path / "jobs.json"), registry=CollectorRegistry())
     monkeypatch.setattr(server, "_jobs", jobs)
