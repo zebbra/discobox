@@ -6,6 +6,16 @@
 # Set any value to null (or omit it) to disable that feature/mapping.
 
 sync:
+  max_concurrent: 3         # syncs running at once (Netbox load)
+  max_queue: 10000          # devices queued at once (running + waiting); more hooks are dropped
+  retry:                    # a sync that timed out is retried (circuit breaker not tripped)
+    delay: 480              # seconds before the first retry, doubling each attempt
+    max_delay: 1800         # cap on the backoff
+    max: 6                  # retries per device, then dropped
+  circuit_breaker:          # threshold timeouts within window seconds hold new syncs for backoff seconds
+    window: 120
+    threshold: 3
+    backoff: 120
   vip_mode: threenode       # threenode | soft | hard | off; fallback for any vendor not
                             # listed in vip_mode_by_vendor below
   # vip_mode_by_vendor:     # override vip_mode per vendor (nd_device["vendor"], already
@@ -162,6 +172,7 @@ reconcile:
     label: netbox_primary_ip  # series label identifying the device
     key: ip                 # device attribute compared to the label: ip | name
     timeout: 15             # query timeout, seconds
+    tls_verify: true
 
 auto_create:
   role: null                # NetBox device-role slug; null disables auto-create

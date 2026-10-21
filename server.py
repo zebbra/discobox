@@ -262,22 +262,6 @@ reconcile_enqueued_total = Counter(
     "Devices enqueued for Netdisco discovery by the reconcile loop",
     **_reg,
 )
-reconcile_runs_total = Counter(
-    "discobox_reconcile_runs_total",
-    "Reconcile loop runs",
-    ["status"],   # success | error | deferred
-    **_reg,
-)
-reconcile_last_run_timestamp = Gauge(
-    "discobox_reconcile_last_run_timestamp_seconds",
-    "Unix timestamp of the last completed reconcile run",
-    **_reg,
-)
-reconcile_aborted_total = Counter(
-    "discobox_reconcile_aborted_total",
-    "Reconcile runs skipped because the Netdisco queue exceeded thresholds",
-    **_reg,
-)
 unknown_devices_total = Counter(
     "discobox_unknown_devices_total",
     "Sync webhooks received for devices in Netdisco but not in Netbox",
@@ -299,11 +283,6 @@ types_bare = Gauge(
     "value = devices/modules using it; library: whether the devicetype-library has the model "
     "(available: /types/library can fill it, none: fix by hand or upstream, unknown: not checked)",
     ["kind", "manufacturer", "model", "part_number", "library"],
-    **_reg,
-)
-types_bare_timestamp = Gauge(
-    "discobox_types_bare_timestamp_seconds",
-    "Unix timestamp of the last discobox_types_bare refresh",
     **_reg,
 )
 
@@ -650,7 +629,6 @@ def _refresh_types_bare() -> int:
         types_bare.clear()
         for labels, value in rows:
             types_bare.labels(*labels).set(value)
-        types_bare_timestamp.set(time.time())
     return len(rows)
 
 
@@ -730,7 +708,6 @@ def _reconcile_once(max_enqueue: Optional[int], offset: Optional[int], compare_o
         not_in_netbox_stale_hours=_NOT_IN_NETBOX_STALE_HOURS,
     )
     if counts.get("aborted"):
-        reconcile_aborted_total.inc()
         return None
     reconcile_netbox_devices.set(counts.get("netbox_total", 0))
     reconcile_netdisco_devices.set(counts.get("netdisco_total", 0))
@@ -744,8 +721,6 @@ def _reconcile_once(max_enqueue: Optional[int], offset: Optional[int], compare_o
         _save_gap(_NOT_IN_NETDISCO_FILE, counts.get("not_in_netdisco_list", []))
         _save_gap(_NOT_IN_NETBOX_FILE, counts.get("not_in_netbox_list", []))
         _save_gap(_TAG_MISMATCHES_FILE, counts.get("tag_mismatches_list", []))
-    reconcile_runs_total.labels(status="success").inc()
-    reconcile_last_run_timestamp.set(time.time())
     return counts
 
 
@@ -792,13 +767,8 @@ def _job_reconcile(max_enqueue: Optional[int] = None, offset: Optional[int] = No
         return JobResult("skipped", "sync is paused", retry_in=_RECONCILE_DEFER_SECONDS)
     queued = len(_inflight_hosts())
     if _RECONCILE_DEFER_IF_QUEUED and queued and not manual:
-        reconcile_runs_total.labels(status="deferred").inc()
         return JobResult("deferred", f"{queued} sync(s) still queued/in-flight", retry_in=_RECONCILE_DEFER_SECONDS)
-    try:
-        counts = _run_reconcile(max_enqueue=max_enqueue, offset=offset)
-    except Exception:
-        reconcile_runs_total.labels(status="error").inc()
-        raise
+    counts = _run_reconcile(max_enqueue=max_enqueue, offset=offset)
     if counts is None:
         return JobResult("aborted", "Netdisco queue too busy or its status unreachable (see log)")
     return JobResult(summary=_reconcile_summary(counts))
@@ -835,8 +805,6 @@ _jobs.register(Job("fix-tags", _job_fix_tags,
 if _IFACE_SOURCE_CF:
     _jobs.register(Job("types-bare", _job_types_bare, interval=_LIBRARY_METRICS_INTERVAL,
                        description="Refresh discobox_types_bare (dummy types and what the library can fill)"))
-# deprecated reconcile metric, kept for one release: from the job state across restarts
-reconcile_last_run_timestamp.set(_jobs.last_success("reconcile") or 0)
 
 
 def _drain_retries(now: float, submit) -> None:
@@ -902,12 +870,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Actions are POST; their GET form still works for one release (v2.x) but is
-# deprecated: logged, counted and marked with a Deprecation header.
-_GET_DEPRECATED_PATHS = frozenset({
-    "/sync", "/sync/all", "/sync/pause", "/sync/resume", "/rebuild", "/discover",
-    "/reconcile/enqueue", "/reconcile/fix-tags",
-})
+# Actions are POST. GET still works on /sync and /rebuild until netbox-lens
+# calls them with POST: deprecated, so logged, counted and marked.
+_GET_DEPRECATED_PATHS = frozenset({"/sync", "/rebuild"})
 deprecated_requests_total = Counter(
     "discobox_deprecated_requests_total",
     "Requests using a deprecated form (GET on an action endpoint), by path",
@@ -1607,7 +1572,7 @@ _SYNC_ALL_PARAMS = {
 
 @app.api_route(
     "/sync/all",
-    methods=["GET", "POST"],
+    methods=["POST"],
     status_code=202,
     dependencies=[Depends(require_auth)],
     summary="Queue a sync for every device known to Netdisco",
@@ -1708,7 +1673,7 @@ async def metrics() -> Response:
     return Response(content=generate_latest(_custom_registry), media_type=CONTENT_TYPE_LATEST)
 
 
-@app.api_route("/sync/pause", methods=["GET", "POST"], dependencies=[Depends(require_auth)], summary="Pause queued syncs")
+@app.api_route("/sync/pause", methods=["POST"], dependencies=[Depends(require_auth)], summary="Pause queued syncs")
 async def pause() -> dict:
     """Hold queued syncs from starting. Already-running syncs finish."""
     _set_paused(True)
@@ -1717,7 +1682,7 @@ async def pause() -> dict:
     return {"status": "paused", "queued": len(_in_flight)}
 
 
-@app.api_route("/sync/resume", methods=["GET", "POST"], dependencies=[Depends(require_auth)], summary="Resume queued syncs")
+@app.api_route("/sync/resume", methods=["POST"], dependencies=[Depends(require_auth)], summary="Resume queued syncs")
 async def resume() -> dict:
     """Release the pause gate; queued syncs start draining (up to MAX_CONCURRENT at a time)."""
     _set_paused(False)
@@ -1890,7 +1855,7 @@ def _nb_device_for_host(nb: NetboxClient, host: str, ip: Optional[str]):
 
 @app.api_route(
     "/discover",
-    methods=["GET", "POST"],
+    methods=["POST"],
     dependencies=[Depends(require_auth)],
     summary="Enqueue a Netdisco discover for one device, with its Netbox SNMP profile and timeout",
 )
@@ -1952,22 +1917,6 @@ def discover(
             "timeout_us": effective_timeout, "timeout_source": timeout_source}
 
 
-@app.api_route(
-    "/reconcile/enqueue",
-    methods=["GET", "POST"],
-    dependencies=[Depends(require_auth)],
-    summary="Reconcile and act: enqueue Netdisco discovers for missing devices (and auto-create), in the background",
-)
-async def trigger_reconcile(
-    max_enqueue: Annotated[Optional[int], Query(description="Max devices to enqueue (overrides DISCOBOX_RECONCILE_MAX_ENQUEUE)")] = None,
-    offset: Annotated[Optional[int], Query(description="Skip first N missing devices (for manual pagination)")] = None,
-) -> dict:
-    effective_max = max_enqueue if max_enqueue is not None else _RECONCILE_MAX_ENQUEUE
-    started = _jobs.start("reconcile", max_enqueue=effective_max, offset=offset, manual=True)
-    return {"status": "reconcile queued" if started else "reconcile already running",
-            "max_enqueue": effective_max, "offset": offset}
-
-
 _DIFF_KEYS = ("netbox_total", "netdisco_total", "already_known", "not_in_netdisco", "skipped_offline",
               "not_in_netbox", "not_in_netbox_stale", "tag_mismatches")
 
@@ -2022,22 +1971,6 @@ def _diff_counts(counts: dict) -> dict:
     if counts.get("enqueued"):
         result["enqueued"] = counts["enqueued"]
     return result
-
-
-@app.api_route(
-    "/reconcile/fix-tags",
-    methods=["GET", "POST"],
-    dependencies=[Depends(require_auth)],
-    summary="Re-enqueue Netdisco discovery for devices from the last reconcile's tag-mismatch report",
-)
-async def trigger_fix_tags(
-    max_enqueue: Annotated[Optional[int], Query(description="Max devices to re-enqueue")] = None,
-) -> dict:
-    with _reconcile_gaps_lock:
-        pending = len(_load_gap(_TAG_MISMATCHES_FILE))
-    started = _jobs.start("fix-tags", max_enqueue=max_enqueue)
-    return {"status": "fix-tags queued" if started else "fix-tags already running",
-            "max_enqueue": max_enqueue, "pending": pending}
 
 
 @app.api_route(

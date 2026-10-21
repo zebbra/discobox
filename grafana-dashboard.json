@@ -332,7 +332,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "time() - discobox_reconcile_last_run_timestamp_seconds",
+          "expr": "time() - discobox_job_last_success_timestamp_seconds{job=\"reconcile\"}",
           "instant": true,
           "legendFormat": "ago",
           "refId": "A"
@@ -760,7 +760,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "increase(discobox_reconcile_enqueued_total[1h]) / increase(discobox_reconcile_runs_total[1h])",
+          "expr": "increase(discobox_reconcile_enqueued_total[1h]) / increase(discobox_job_runs_total{job=\"reconcile\",status=\"ok\"}[1h])",
           "legendFormat": "__auto",
           "refId": "A"
         }
@@ -792,7 +792,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "sum(discobox_reconcile_runs_total)",
+          "expr": "sum(discobox_job_runs_total{job=\"reconcile\"})",
           "instant": true,
           "legendFormat": "__auto",
           "refId": "A"
@@ -831,7 +831,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "discobox_reconcile_aborted_total",
+          "expr": "discobox_job_runs_total{job=\"reconcile\",status=\"aborted\"}",
           "instant": true,
           "legendFormat": "__auto",
           "refId": "A"

@@ -168,9 +168,9 @@ def test_get_on_action_is_deprecated_not_refused(monkeypatch, tmp_path) -> None:
     def req(method: str, path: str) -> Request:
         return Request({"type": "http", "method": method, "path": path, "headers": [], "query_string": b""})
 
-    before = server.deprecated_requests_total.labels("/sync/pause")._value.get()
-    r = asyncio.run(server._deprecated_get(req("GET", "/sync/pause"), call_next))
+    before = server.deprecated_requests_total.labels("/rebuild")._value.get()
+    r = asyncio.run(server._deprecated_get(req("GET", "/rebuild"), call_next))
     assert r.headers["Deprecation"] == "true"
-    assert server.deprecated_requests_total.labels("/sync/pause")._value.get() == before + 1
-    assert "Deprecation" not in asyncio.run(server._deprecated_get(req("POST", "/sync/pause"), call_next)).headers
+    assert server.deprecated_requests_total.labels("/rebuild")._value.get() == before + 1
+    assert "Deprecation" not in asyncio.run(server._deprecated_get(req("POST", "/rebuild"), call_next)).headers
     assert "Deprecation" not in asyncio.run(server._deprecated_get(req("GET", "/jobs"), call_next)).headers

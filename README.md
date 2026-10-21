@@ -64,7 +64,7 @@ A one-off sync of one device: `curl -X POST "http://discobox:8080/sync?host=10.0
 - **HA / VIP detection** — detects cluster VIPs by hostname mismatch; redirects sync to the real active node; creates a Virtual Chassis linking both HA members; optionally deletes the VIP device (housekeeping)
 - **Wireless APs** — during a WLC's sync, updates each AP it reports (found by serial, then name): DeviceType, serial, `os_version`, an optional `controller` link to the WLC (the WLC then gets a `## Wireless controller` comments block linking the list of its APs), a `## Wireless` block in the comments (controller, location, uplink — linked to the switch by id when its IP or name resolves unambiguously, else a search, plus its port when the WLC reports it —, the C9800 Policy/Site/RF tags when Netdisco reports them, MACs, radios; no DHCP IP or timestamp, so it only changes when something real does; text outside its markers is never touched), a `GigabitEthernet0` interface with the Ethernet MAC, and a `Dot11Radio<slot>` per reported radio (devicetype-library names, so template interfaces are adopted), the radio base MAC on the first radio only (the WLC reports the same one for every slot). The WLC's per-AP radio "ports" are not synced as its own interfaces. Every other AP interface (import placeholders like `main`/`Vlan2`, ports from a wrong DeviceType template) is removed on every WLC sync unless it has a cable, an IP or another source's ownership, and so are empty device/module bays (`aps.prune_interfaces`, default on). Once an AP's model resolves to a DeviceType, a `fixme-model` tag is removed from it (`aps.type_confirmed_untag`). While everything the AP pass reads from Netdisco (AP list, descriptions, serials, models, radio MACs) is unchanged since the last pass, a WLC sync skips its APs (log: `aps=… (unchanged: N skipped)`) and only retries the ones not found or failed last time (`aps.skip_unchanged`, default on); a full pass still runs every `aps.full_pass_days` (7) and on every `/rebuild` with `dry_run=false`
 - **WLC HA pairs** — a Cisco 9800 HA SSO pair (ENTITY-MIB root "Multi Chassis System") becomes one Netbox device per unit in a Virtual Chassis, by chassis position (chassis 1 = the controller's own device, chassis 2 = `<name>-2`), so roles can switch over without devices swapping. A missing `-2` peer is created (role/site/tenant/status/type from the controller, serial from its chassis; location/rack left empty) with a `## HA peer` comments block that flags the missing location until it's set. Each unit gets its own chassis serial (the controller's combined "A B" serial is never written); chassis module bays from the earlier modelling are removed
-- **DeviceType enrichment** — `GET /types/library?role=…|type=…` reports what the [devicetype-library](https://github.com/netbox-community/devicetype-library) would add to existing DeviceTypes; `POST …&apply=true` writes it. Fortinet types also match by the SKU decoded from the MIB product name Netdisco reports (`fac3kf` → `FAC-3000F`, `fgt101F` → `FG-101F`), only when the library has exactly that part_number. Fill-blank only (weight, airflow, description, datasheet comment; `u_height` only while no device of the type is racked) plus missing interface/console/power templates. Never renames types, never imports bays, front/rear ports or images. Templates only affect devices created afterwards. A pinned copy (Cisco, Fortinet; build args `DEVICETYPE_LIBRARY_REF` / `DEVICETYPE_LIBRARY_VENDORS`) is baked into the image, and `library.device_types` maps Netbox types to library entries. Also runs standalone: `python typesync.py --library ../devicetype-library --role lwapp-ap`. `role=` takes slugs, names or ids. `?bare=true` selects every type discobox created without templates (`source=netdisco`, or no source and its "Created by discobox" comment). Source on types (`custom_fields.source`, if the field exists on DeviceType/ModuleType): a type a sync has to create bare (`types.create_missing`) gets `source=netdisco` and a warning log line; an apply sets `devicetype-library` (`library.source_value`) on a library-matched type whose source is empty or `netdisco`, and `netdisco` on an unmatched discobox-created one without a source (the backfill: `POST /types/library?bare=true&apply=true`). A type fixed by hand gets `source=manual` and is never touched. Metric `discobox_types_bare{kind,manufacturer,model,part_number,library}` = devices (modules) using each `source=netdisco` type, read from Netbox every `library.metrics_interval` and right after a creation or apply; `library=available` means `/types/library` can fill it, `none` fix it by hand or upstream it (`discobox_types_bare_timestamp_seconds`)
+- **DeviceType enrichment** — `GET /types/library?role=…|type=…` reports what the [devicetype-library](https://github.com/netbox-community/devicetype-library) would add to existing DeviceTypes; `POST …&apply=true` writes it. Fortinet types also match by the SKU decoded from the MIB product name Netdisco reports (`fac3kf` → `FAC-3000F`, `fgt101F` → `FG-101F`), only when the library has exactly that part_number. Fill-blank only (weight, airflow, description, datasheet comment; `u_height` only while no device of the type is racked) plus missing interface/console/power templates. Never renames types, never imports bays, front/rear ports or images. Templates only affect devices created afterwards. A pinned copy (Cisco, Fortinet; build args `DEVICETYPE_LIBRARY_REF` / `DEVICETYPE_LIBRARY_VENDORS`) is baked into the image, and `library.device_types` maps Netbox types to library entries. Also runs standalone: `python typesync.py --library ../devicetype-library --role lwapp-ap`. `role=` takes slugs, names or ids. `?bare=true` selects every type discobox created without templates (`source=netdisco`, or no source and its "Created by discobox" comment). Source on types (`custom_fields.source`, if the field exists on DeviceType/ModuleType): a type a sync has to create bare (`types.create_missing`) gets `source=netdisco` and a warning log line; an apply sets `devicetype-library` (`library.source_value`) on a library-matched type whose source is empty or `netdisco`, and `netdisco` on an unmatched discobox-created one without a source (the backfill: `POST /types/library?bare=true&apply=true`). A type fixed by hand gets `source=manual` and is never touched. Metric `discobox_types_bare{kind,manufacturer,model,part_number,library}` = devices (modules) using each `source=netdisco` type, read from Netbox by the `types-bare` job (`jobs.types-bare.interval`) and right after a creation or apply; `library=available` means `/types/library` can fill it, `none` fix it by hand or upstream it
 - **Housekeeping** — removes stale device bays auto-created from DeviceType templates (e.g. `PS-A`, `Fan 1`, `Slot 1`) and deletes empty dummy interfaces
 - **Orphaned interfaces** — interfaces in Netbox that Netdisco doesn't report: discobox's own (`source=netdisco`) are removed on every sync; source-less ones (imported, manual) only with `sync.remove_orphaned_interfaces: true` (unset: follows `housekeeping`); another source's never. Never one with a cable or an IP. Brake: nothing is removed when Netdisco reports no ports, or when more than `sync.orphan_delete_max_percent` (default 25) of a device's interfaces would go — except discobox's own digit-only names (an ifIndex from a failed SNMP walk), when Netdisco reports none of its own ports digit-only (HP/Aruba `1`…`48` stay braked). Shown as `orphans=-N` in the sync summary
 
@@ -147,66 +147,38 @@ A one-off sync of one device: `curl -X POST "http://discobox:8080/sync?host=10.0
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in the values:
+Connections and secrets come from the environment (`.env.example`), everything else from `discobox.yaml` (path in `DISCOBOX_CONFIG`; the annotated `discobox.yaml` in this repo lists every key with its default). The file is checked at startup: an unknown key or a wrong type stops discobox with the offending path, e.g. `sync.cooldwn: Extra inputs are not permitted`. `GET /config` shows the effective settings, secrets masked.
 
 ```env
 NETDISCO_URL=https://netdisco.example.com
-NETDISCO_TOKEN=your-long-lived-token    # preferred; takes priority over username/password (Bearer prefix added automatically)
+NETDISCO_TOKEN=your-long-lived-token    # preferred (Bearer prefix added automatically)
 NETDISCO_USERNAME=admin                 # fallback if NETDISCO_TOKEN is not set
 NETDISCO_PASSWORD=secret
 NETBOX_URL=https://netbox.example.com
 NETBOX_TOKEN=your-token-here
+NETBOX_TLS_VERIFY=true                  # false for self-signed certificates
+NETDISCO_TLS_VERIFY=true
 
-# Server mode
-DISCOBOX_LISTEN_PORT=8080   # default: 8080 (avoid DISCOBOX_PORT — Docker overrides it with a service URL)
-DISCOBOX_AUTH_TOKEN=secret  # bearer token for /sync; leave unset to disable auth
-DISCOBOX_STATE_DIR=/tmp/discobox  # writable dir for job results, gap reports, pause flag, circuit
-                                   # breaker, in-flight sync claims; default: /tmp/discobox. On a volume
-                                   # that outlives the pod, job schedules survive a redeploy too
-
-# Sync concurrency
-DISCOBOX_MAX_CONCURRENT_SYNCS=3   # max parallel syncs (semaphore), default: 3
-DISCOBOX_MAX_QUEUE=10000          # max devices queued at once; excess hooks are dropped, default: 10000
-
-# Sync feature defaults (server mode) — can be overridden per-request
-DISCOBOX_NO_MAC=true        # disable MAC sync globally
-DISCOBOX_NO_IP=true         # disable IP sync globally (e.g. if Netdisco is not VRF-aware)
-DISCOBOX_NO_MODULES=true    # disable module bay sync globally
-DISCOBOX_NO_SFP=true        # disable SFP inventory sync globally
-DISCOBOX_NO_POE=true        # disable PoE sync globally
-DISCOBOX_HOUSEKEEPING=true       # enable housekeeping globally
-DISCOBOX_LLDP_CLEAR_STALE=true  # clear neighbor fields + delete stale discobox-owned cables when a port loses its neighbor
-
-# HA / VIP device handling — controls what happens to the VIP placeholder device (e.g. p0h)
-# threenode (default) — add VIP device as VC member at pos 0; management VIP IP stays on it (role=vip)
-# soft               — unassign all IPs from VIP device so physical nodes can claim them; keep device
-# hard               — delete VIP device entirely
-# off                — do nothing
-DISCOBOX_VIP_MODE=threenode
-
-# Reconcile and the other jobs are configured in discobox.yaml (jobs:, reconcile:), not by env vars.
-
-# Liveness gate (optional) — before enqueueing, query a Prometheus-compatible API
-# (VictoriaMetrics vmselect) and skip devices whose monitoring says they are down.
-# Dead devices would only produce failed Netdisco jobs and burn the MAX_FAILED budget.
-# Fail-open: devices absent from the query result (not yet monitored) are still
-# enqueued, and a failed/unreachable query disables the gate for that run.
-DISCOBOX_LIVENESS_URL=              # query API base incl. tenant prefix, e.g.
-                                    # http://vmselect:8481/select/0/prometheus; unset = disabled
-DISCOBOX_LIVENESS_QUERY='max_over_time(up{job="snmp"}[6h])'  # >0 alive, 0 down, absent unknown
-DISCOBOX_LIVENESS_LABEL=netbox_primary_ip  # series label identifying the device
-DISCOBOX_LIVENESS_KEY=ip            # device attribute compared to the label: ip | name
-DISCOBOX_LIVENESS_TIMEOUT=15        # query timeout in seconds, default: 15
-DISCOBOX_LIVENESS_TLS_VERIFY=true   # set to false for self-signed certs
-
-# Overload protection — circuit breaker and per-device retry (see below)
-DISCOBOX_CB_WINDOW=120      # look-back window in seconds for counting timeouts, default: 120
-DISCOBOX_CB_THRESHOLD=3     # number of timeouts within window to trip the breaker, default: 3
-DISCOBOX_CB_BACKOFF=120     # seconds to hold new syncs after breaker trips, default: 120
-DISCOBOX_RETRY_DELAY=480    # seconds before first retry, default: 480 (8m); doubles each attempt
-DISCOBOX_RETRY_MAX_DELAY=1800  # cap on backoff growth, default: 1800 (30m)
-DISCOBOX_RETRY_MAX=6        # max per-device retries before dropping, default: 6
+DISCOBOX_LISTEN_PORT=8080               # default: 8080
+DISCOBOX_AUTH_TOKEN=secret              # bearer token for the action endpoints; unset = no auth
+DISCOBOX_CONFIG=/app/discobox.yaml      # default: ./discobox.yaml if present, else built-in defaults
+DISCOBOX_STATE_DIR=/tmp/discobox        # writable dir for job results, gap reports, pause flag, sync
+                                        # cooldown markers, AP fingerprints; default: /tmp/discobox. On a
+                                        # volume that outlives the pod, job schedules survive a redeploy too
 ```
+
+The main `discobox.yaml` sections:
+
+| Section | What it sets |
+|---|---|
+| `sync` | Feature defaults per sync (`no_mac`, `no_ip`, `no_modules`, `no_sfp`, `no_poe`, `housekeeping`, `lldp_clear_stale`; per request overridable), cooldown, VIP handling (`vip_mode`, `vip_mode_by_vendor`), concurrency (`max_concurrent`, `max_queue`), `retry`, `circuit_breaker`, `pause_on_error`, orphan removal, Fortinet HA resolution (`ha_resolve`) |
+| `custom_fields`, `cabling` | Custom field names discobox writes and reads; null disables one |
+| `types`, `library` | DeviceType resolution (aliases, `create_missing`) and devicetype-library enrichment |
+| `aps` | WLC access point pass |
+| `reconcile`, `auto_create` | Reconcile limits and selection, the `liveness` gate, auto-created devices |
+| `jobs` | Job schedules (see Jobs) |
+| `netdisco` | Per-request SNMP timeout of the discover jobs discobox enqueues |
+| `auth` | `metrics_path`; `token` (prefer `DISCOBOX_AUTH_TOKEN`) |
 
 **venv setup:**
 ```bash
@@ -292,7 +264,7 @@ CDP/LLDP neighbor data from Netdisco, written on every interface sync. Text fiel
 
 ## Server Endpoints
 
-Actions are POST. Their GET form still works in v2.0 but is deprecated: logged, counted in `discobox_deprecated_requests_total{path}` and answered with a `Deprecation: true` header.
+Actions are POST. `GET /sync` and `GET /rebuild` still work but are deprecated: logged, counted in `discobox_deprecated_requests_total{path}` and answered with a `Deprecation: true` header.
 
 | Endpoint | Method | Auth | Description |
 |---|---|---|---|
@@ -306,9 +278,9 @@ Actions are POST. Their GET form still works in v2.0 but is deprecated: logged, 
 | `/jobs` | GET | no | Every job: schedule, last run and result, next run; plus the retry queue (JSON) |
 | `/jobs/<name>/run` | POST | yes | Run a job now: `202` in the background, `?wait=true` answers with the result; `409` while it's running. reconcile and fix-tags take `?max_enqueue=N`, reconcile `&offset=N` |
 | `/reconcile` | GET | yes | The last Netbox↔Netdisco compare's gaps as JSON, answered immediately (read-only: no discover jobs, no auto-create). `?refresh=true` starts the compare job in the background (`running` shows it's in progress; the first call without a result starts one too), `?lists=true` adds the device lists, `?wait=true` runs it synchronously (may exceed proxy timeouts). Reconcile runs update the result too (`mode`) |
-| `/reconcile/enqueue`, `/reconcile/fix-tags` | POST | yes | Same as `/jobs/reconcile/run` and `/jobs/fix-tags/run` (kept for existing callers) |
 | `/not-in-netdisco`, `/not-in-netbox`, `/tag-mismatches`, `/unknown-devices` | GET | no | The gap lists (JSON) |
 | `/types/library` | GET, POST | yes | DeviceType enrichment report; `POST …&apply=true` writes (see Features) |
+| `/config` | GET | yes | Effective settings (secrets masked) and the env vars in use |
 | `/stats` | GET | no | Aggregated status as JSON (for external status dashboards) |
 | `/metrics` | GET | no | Prometheus metrics |
 | `/health` | GET | no | Liveness check + in-flight hosts |
@@ -339,12 +311,12 @@ Periodic and on-demand work runs as jobs, listed on the status page and at `/job
 ```yaml
 jobs:
   reconcile:
-    interval: 86400     # seconds; 0 = on demand only (default: reconcile.interval)
+    interval: 86400     # seconds; 0 = on demand only
   types-bare:
-    interval: 3600      # default: library.metrics_interval
+    interval: 3600
 ```
 
-Each job's last result (start, end, status `ok | deferred | skipped | aborted | error`, summary) is kept in `discobox.jobs.json` in the state dir, so after a restart the next run follows the last one; an overdue job runs shortly after startup (reconcile after 5 minutes, types-bare after 30 s). Any job also runs on demand: the status page's "run now", or `POST /jobs/<name>/run` (e.g. from an external scheduler). Metrics per job: `discobox_job_last_run_timestamp_seconds`, `discobox_job_last_success_timestamp_seconds`, `discobox_job_duration_seconds`, `discobox_job_next_run_timestamp_seconds`, `discobox_job_runs_total{status}`. The older `discobox_reconcile_runs_total` and `discobox_reconcile_last_run_timestamp_seconds` still work in v2.0.
+Each job's last result (start, end, status `ok | deferred | skipped | aborted | error`, summary) is kept in `discobox.jobs.json` in the state dir, so after a restart the next run follows the last one; an overdue job runs shortly after startup (reconcile after 5 minutes, types-bare after 30 s). Any job also runs on demand: the status page's "run now", or `POST /jobs/<name>/run` (e.g. from an external scheduler). Metrics per job: `discobox_job_last_run_timestamp_seconds`, `discobox_job_last_success_timestamp_seconds`, `discobox_job_duration_seconds`, `discobox_job_next_run_timestamp_seconds`, `discobox_job_runs_total{status}`.
 
 ---
 
@@ -356,22 +328,22 @@ discobox distinguishes between isolated device timeouts and global Netdisco over
 
 ### Circuit breaker
 
-When ≥ `DISCOBOX_CB_THRESHOLD` (default 3) timeout errors occur within `DISCOBOX_CB_WINDOW` seconds (default 120), the circuit breaker trips:
+When ≥ `sync.circuit_breaker.threshold` (default 3) timeout errors occur within `sync.circuit_breaker.window` seconds (default 120), the circuit breaker trips:
 
-- All new and queued syncs are held for `DISCOBOX_CB_BACKOFF` seconds (default 120)
+- All new and queued syncs are held for `sync.circuit_breaker.backoff` seconds (default 120)
 - After the backoff the breaker resets automatically — no manual intervention needed
 - The reconcile loop also skips while the breaker is active
 - Metric: `discobox_circuit_breaker_trips_total`
 
-This is distinct from `DISCOBOX_PAUSE_ON_ERROR` / `/sync/pause`, which pause permanently until manually resumed.
+This is distinct from `sync.pause_on_error` / `/sync/pause`, which pause permanently until manually resumed.
 
 ### Per-device retry
 
 When a sync times out but the circuit breaker has **not** tripped (isolated failure), the device is automatically retried:
 
-- Retry is scheduled after `DISCOBOX_RETRY_DELAY` seconds (default 480 = 8m), doubling each attempt
-  up to a cap of `DISCOBOX_RETRY_MAX_DELAY` (default 1800 = 30m)
-- Up to `DISCOBOX_RETRY_MAX` retries (default 6: 8m, 16m, 30m, 30m, 30m, 30m — then dropped)
+- Retry is scheduled after `sync.retry.delay` seconds (default 480 = 8m), doubling each attempt
+  up to a cap of `sync.retry.max_delay` (default 1800 = 30m)
+- Up to `sync.retry.max` retries (default 6: 8m, 16m, 30m, 30m, 30m, 30m — then dropped)
 - If a retry fires while the circuit breaker is active, it waits until the breaker clears
 - If the queue is full when a retry becomes due, it is deferred 60s and re-attempted
   (the attempt is not consumed) rather than dropped
