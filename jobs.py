@@ -197,8 +197,9 @@ class JobRegistry:
         try:
             result = job.func(**kwargs) or JobResult()
         except Exception as exc:
-            log.error("Job %s failed: %s", job.name, exc)
-            result, error = JobResult(status="error", summary=str(exc)), str(exc)
+            error = f"{type(exc).__name__}: {exc}"
+            log.error("Job %s failed: %s", job.name, error)
+            result = JobResult(status="error", summary=error)
         finally:
             self._running.pop(job.name, None)
         finished = self.clock()

@@ -1,0 +1,199 @@
+{%- macro gap_table(devices) -%}
+{%- if devices -%}
+{%- set has_status = devices|selectattr("status", "defined")|list -%}
+{%- set has_discover = devices|selectattr("last_discover", "defined")|list -%}
+<table><tr><th>IP</th><th>Name</th>{% if has_status %}<th>Liveness</th>{% endif %}{% if has_discover %}<th>Last discover</th>{% endif %}</tr>
+{% for d in devices %}<tr><td>{{ d.ip }}</td><td>{{ d.name }}</td>
+{%- if has_status %}<td class="s-{{ d.status or 'unknown' }}">{{ d.status or "unknown" }}</td>{% endif %}
+{%- if has_discover %}<td>{{ d.last_discover or "never" }}</td>{% endif %}</tr>
+{% endfor %}</table>
+{%- else %}<p class="muted">none</p>{% endif -%}
+{%- endmacro -%}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>discobox</title>
+<style>
+  :root { --bg: #1a1a2e; --fg: #eee; --muted: #888; --line: #333; --head: #a29bfe; --link: #74b9ff;
+          --ok: #2ecc71; --warn: #fdcb6e; --bad: #e74c3c; }
+  body { font-family: monospace; max-width: 1000px; margin: 1.5em auto; padding: 0 1em; background: var(--bg); color: var(--fg); }
+  h1 { color: var(--head); margin-bottom: .2em; display: flex; align-items: center; gap: .6em; flex-wrap: wrap; }
+  h1 small { color: var(--muted); font-size: .5em; }
+  h2 { color: var(--link); border-bottom: 1px solid #444; padding-bottom: .3em; margin-top: 1.6em; }
+  a { color: var(--link); }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: .35em .7em; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--head); }
+  .muted { color: var(--muted); }
+  .badge { display: inline-block; padding: .1em .6em; border-radius: 4px; font-weight: bold; color: #fff; }
+  .s-ok, .s-running, .s-up { color: var(--ok); } .s-deferred, .s-skipped, .s-unknown { color: var(--warn); }
+  .s-aborted, .s-error, .s-down { color: var(--bad); }
+  .bg-ok { background: var(--ok); } .bg-bad { background: var(--bad); } .bg-warn { background: var(--warn); color: #1a1a2e; }
+  .btn { display: inline-block; padding: .1em .6em; border: 1px solid var(--link); border-radius: 4px; background: none;
+         color: var(--link); font: inherit; cursor: pointer; text-decoration: none; }
+  .btn:hover { background: var(--link); color: var(--bg); }
+  .btn.danger { border-color: var(--bad); color: var(--bad); } .btn.danger:hover { background: var(--bad); color: #fff; }
+  form.act { display: inline; margin: 0; }
+  h1 .btn { font-size: .45em; font-weight: normal; } h1 .badge { font-size: .5em; }
+  .nowrap, .jobs td:first-child, .jobs td:nth-child(2), .jobs td:last-child { white-space: nowrap; }
+  select { width: auto; }
+  input, select { font: inherit; background: #10101f; color: var(--fg); border: 1px solid #444; border-radius: 4px; padding: .1em .4em; }
+  input[type=text] { width: 11em; }
+  .status span { margin-right: 1.4em; white-space: nowrap; }
+  .actions td:first-child { white-space: nowrap; color: var(--head); }
+  #result { display: none; margin: 1em 0; padding: .6em .8em; border: 1px solid #444; border-radius: 4px; white-space: pre-wrap;
+            max-height: 18em; overflow: auto; }
+  #result.ok { border-color: var(--ok); } #result.bad { border-color: var(--bad); }
+  details { margin: .5em 0; } summary { cursor: pointer; }
+  footer { margin: 2.5em 0 1em; color: var(--muted); }
+  @media (max-width: 640px) { th, td { padding: .3em .4em; } .hide-narrow { display: none; } }
+</style>
+</head>
+<body>
+
+<h1>discobox <small>v{{ version }}</small>
+  {% if breaker %}<span class="badge bg-bad">circuit breaker open</span>
+  {% elif paused %}<span class="badge bg-warn">paused</span>
+  {% else %}<span class="badge bg-ok">running</span>{% endif %}
+  {% if paused %}
+  <form class="act" method="post" action="/sync/resume"><button class="btn">resume</button></form>
+  {% else %}
+  <form class="act" method="post" action="/sync/pause"><button class="btn">pause</button></form>
+  {% endif %}
+</h1>
+
+<div class="status">
+  <span>in flight <b>{{ in_flight|length }}</b></span>
+  <span>retries <b>{{ retries.pending }}</b></span>
+  <span>liveness
+    {% if not liveness.enabled %}<span class="muted">disabled</span>
+    {% elif not liveness.checked %}<span class="muted">no data yet</span>
+    {% elif liveness.ok %}<b class="s-ok">ok</b> <span class="muted">({{ liveness.devices }} devices, {{ liveness.checked|ago }})</span>
+    {% else %}<b class="s-error">error</b> {{ liveness.error }}{% endif %}
+  </span>
+</div>
+
+<div id="result"></div>
+
+<h2>Jobs</h2>
+<table class="jobs">
+  <tr><th>Job</th><th class="hide-narrow">Schedule</th><th>Last run</th><th>Result</th><th>Next run</th><th></th></tr>
+  {% for j in jobs %}
+  <tr>
+    <td title="{{ j.description }}">{{ j.job }}</td>
+    <td class="hide-narrow">{{ j.interval_s|every if j.interval_s else "on demand" }}</td>
+    <td>{% if j.running %}<span class="s-running">running</span> <span class="muted">since {{ j.running_since|ago }}</span>
+        {% elif j.last %}{{ j.last.finished|ts }} <span class="muted">({{ j.last.duration_s }}s)</span>
+        {% else %}<span class="muted">never</span>{% endif %}</td>
+    <td>{% if j.last %}<span class="s-{{ j.last.status }}">{{ j.last.status }}</span>{% if j.last.summary %} · {{ j.last.summary }}{% endif %}{% endif %}</td>
+    <td>{% if j.next_run %}{{ j.next_run|ts }} <span class="muted">({{ j.next_run|ago }})</span>{% else %}<span class="muted">–</span>{% endif %}</td>
+    <td><form class="act" method="post" action="/jobs/{{ j.job }}/run"><button class="btn"{% if j.running %} disabled{% endif %}>run now</button></form></td>
+  </tr>
+  {% endfor %}
+  <tr>
+    <td title="Per-device sync retries after a timeout, checked every 10s">retries</td>
+    <td class="hide-narrow">every 10s</td>
+    <td colspan="2">{{ retries.pending }} pending</td>
+    <td>{% if retries.next_due %}{{ retries.next_due|ts }} <span class="muted">({{ retries.next_due|ago }})</span>{% else %}<span class="muted">–</span>{% endif %}</td>
+    <td></td>
+  </tr>
+</table>
+
+<h2>Gaps <small class="muted">from the last reconcile or compare · <a href="/reconcile">JSON</a></small></h2>
+
+<details{% if missing %} open{% endif %}><summary>In Netbox, not in Netdisco: <b>{{ missing|length }}</b>{% if offline %} <span class="muted">(+{{ offline|length }} offline per liveness, ignored)</span>{% endif %} · <a href="/not-in-netdisco">JSON</a></summary>
+  {{ gap_table(missing) }}
+  {% if offline %}<details><summary>offline ({{ offline|length }})</summary>{{ gap_table(offline) }}</details>{% endif %}
+</details>
+
+<details><summary>In Netdisco, not in Netbox: <b>{{ not_in_netbox|length }}</b>{% if stale %} <span class="muted">(+{{ stale|length }} not discovered for {{ stale_hours }}h+, ignored)</span>{% endif %} · <a href="/not-in-netbox">JSON</a></summary>
+  {{ gap_table(not_in_netbox) }}
+  {% if stale %}<details><summary>stale ({{ stale|length }})</summary>{{ gap_table(stale) }}</details>{% endif %}
+</details>
+
+<details><summary>Auth tag mismatches: <b>{{ tag_mismatches|length }}</b> · <a href="/tag-mismatches">JSON</a>
+  {% if tag_mismatches %}<form class="act" method="post" action="/jobs/fix-tags/run"> <button class="btn">fix tags</button></form>{% endif %}</summary>
+  {% if tag_mismatches %}
+  <table><tr><th>IP</th><th>Name</th><th>Netbox tag</th><th>Netdisco tag</th><th>Reason</th></tr>
+  {% for d in tag_mismatches %}<tr><td>{{ d.ip }}</td><td>{{ d.name }}</td><td>{{ d.netbox_tag or "" }}</td><td>{{ d.netdisco_tag or "" }}</td><td>{{ d.reason or "" }}</td></tr>{% endfor %}
+  </table>{% else %}<p class="muted">none</p>{% endif %}
+</details>
+
+<details><summary>Hooks for devices not in Netbox: <b>{{ unknown|length }}</b> · <a href="/unknown-devices">JSON</a></summary>
+  {% if unknown %}
+  <table><tr><th>IP</th><th>Hostname</th><th>Last seen</th></tr>
+  {% for d in unknown %}<tr><td>{{ d.ip }}</td><td>{{ d.hostname }}</td><td>{{ d.last_seen|ts }}</td></tr>{% endfor %}
+  </table>{% else %}<p class="muted">none</p>{% endif %}
+</details>
+
+<h2>Types</h2>
+<div>
+  {% if types is none %}<span class="muted">dummy tracking off (no source custom field configured)</span>
+  {% else %}dummy types <b>{{ types.dummies }}</b>, the library can fill <b>{{ types.available }}</b>
+  <span class="muted">({{ types.checked|ago if types.checked else "not checked yet" }})</span>{% endif %}
+  &nbsp; <a class="btn" href="/types/library?bare=true">report</a>
+  <form class="act" method="post" action="/types/library" data-confirm="Enrich every dummy type the library matches?">
+    <input type="hidden" name="bare" value="true"><input type="hidden" name="apply" value="true">
+    <button class="btn">apply</button></form>
+  <br><span class="muted">dummy = a type a sync created without templates (source=netdisco). Apply fills blanks and templates from the devicetype-library, never renames.</span>
+</div>
+
+<h2>Actions</h2>
+<table class="actions">
+  <tr><td>sync device</td><td>
+    <form class="act" method="post" action="/sync"><input type="text" name="host" placeholder="IP" required>
+      <label><input type="checkbox" name="force" value="true"> ignore cooldown</label> <button class="btn">sync</button></form></td></tr>
+  <tr><td>rebuild</td><td>
+    <form class="act" method="post" action="/rebuild"><input type="text" name="host" placeholder="IP" required>
+      <select name="dry_run"><option value="true">dry-run</option><option value="false">apply (deletes stale)</option></select>
+      <button class="btn">rebuild</button></form>
+    <span class="muted">match the inventory exactly to Netdisco</span></td></tr>
+  <tr><td>discover</td><td>
+    <form class="act" method="post" action="/discover"><input type="text" name="host" placeholder="IP or Netbox name" required>
+      <button class="btn">enqueue</button></form>
+    <span class="muted">Netdisco discover with the device's Netbox auth profile</span></td></tr>
+  <tr><td>sync all</td><td>
+    <form class="act" method="post" action="/sync/all" data-confirm-empty="last_updated__lt" data-confirm="No filter: queue a sync for the entire fleet?">
+      last updated before <input type="text" name="last_updated__lt" value="{{ yesterday }}">
+      limit <input type="text" name="limit" placeholder="all" style="width:5em">
+      <button class="btn danger">queue</button></form>
+    <span class="muted">any Netbox device filter works via the API, e.g. site=, role=</span></td></tr>
+</table>
+
+<footer>
+  <a href="/docs">API docs</a> · <a href="/jobs">/jobs</a> · <a href="/stats">/stats</a> · <a href="/metrics">/metrics</a> · <a href="/health">/health</a>
+</footer>
+
+<script>
+// Every action is a POST to the API endpoint (query params from the form); the
+// result is shown above the jobs table after a reload. Without JS the form posts
+// directly and the browser shows the JSON answer.
+const box = document.getElementById("result");
+function show(text, ok) { box.textContent = text; box.className = ok ? "ok" : "bad"; box.style.display = "block"; }
+try {
+  const saved = JSON.parse(sessionStorage.getItem("discobox-result") || "null");
+  if (saved) { show(saved.text, saved.ok); sessionStorage.removeItem("discobox-result"); }
+} catch (e) {}
+document.querySelectorAll("form.act").forEach(form => form.addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const params = new URLSearchParams();
+  for (const [k, v] of new FormData(form)) if (v !== "") params.append(k, v);
+  const empty = form.dataset.confirmEmpty;
+  if (form.dataset.confirm && (!empty || !params.get(empty)) && !confirm(form.dataset.confirm)) return;
+  const url = form.getAttribute("action") + (params.toString() ? "?" + params : "");
+  show("POST " + url + " …", true);
+  let text, ok;
+  try {
+    const r = await fetch(url, { method: "POST" });
+    const body = await r.text();
+    try { text = JSON.stringify(JSON.parse(body), null, 2); } catch (e) { text = body; }
+    text = `POST ${url} → ${r.status}\n${text}`; ok = r.ok;
+  } catch (e) { text = `POST ${url} failed: ${e}`; ok = false; }
+  try { sessionStorage.setItem("discobox-result", JSON.stringify({ text, ok })); location.reload(); }
+  catch (e) { show(text, ok); }
+}));
+</script>
+</body>
+</html>

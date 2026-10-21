@@ -39,6 +39,7 @@ import uvicorn
 import yaml
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
+from fastapi.templating import Jinja2Templates
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -1827,154 +1828,76 @@ async def resume() -> dict:
     return {"status": "running", "queued": len(_in_flight)}
 
 
-@app.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def index() -> str:
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
-    paused = _is_paused()
-    with _unknown_devices_lock:
-        unknown_count = len(_load_unknown_devices())
-    in_flight = _inflight_hosts()
-    last_reconcile = _jobs.last_success("reconcile") or 0
-    last_reconcile_str = (
-        time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(last_reconcile))
-        if last_reconcile else "never"
-    )
-    status_color = "#e74c3c" if paused else "#2ecc71"
-    status_label = "PAUSED" if paused else "running"
-    unknown_rows = ""
-    with _unknown_devices_lock:
-        for d in sorted(_load_unknown_devices().values(), key=lambda x: x["last_seen"], reverse=True):
-            ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(d["last_seen"]))
-            unknown_rows += f"<tr><td>{d['ip']}</td><td>{d['hostname']}</td><td>{ts}</td></tr>"
-    unknown_section = f"""
-    <h2>Hooks for devices not in Netbox ({unknown_count})</h2>
-    <table><tr><th>IP</th><th>Hostname</th><th>Last seen</th></tr>{unknown_rows}</table>
-    """ if unknown_count else "<h2>Hooks for devices not in Netbox</h2><p>None</p>"
+def _fmt_ts(ts: Optional[float]) -> str:
+    return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(ts)) if ts else ""
 
-    with _reconcile_gaps_lock:
-        not_in_netdisco_list = _load_gap(_NOT_IN_NETDISCO_FILE)
-        not_in_netbox_list = _load_gap(_NOT_IN_NETBOX_FILE)
-        tag_mismatches_list = _load_gap(_TAG_MISMATCHES_FILE)
 
-    if not _LIVENESS_URL:
-        liveness_str = '<span style="color:#888">disabled</span>'
+def _fmt_ago(ts: Optional[float]) -> str:
+    """5m ago / in 3h (rounded to the largest unit)."""
+    if not ts:
+        return ""
+    delta = ts - time.time()
+    secs = abs(delta)
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= size:
+            text = f"{int(secs // size)}{unit}"
+            break
     else:
-        ls = _load_liveness_status()
-        if not ls:
-            liveness_str = '<span style="color:#888">no data yet</span>'
-        elif ls.get("ok"):
-            checked = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(ls.get("checked", 0)))
-            liveness_str = f'<span style="color:#2ecc71">OK</span> ({ls.get("devices", 0)} devices, {checked})'
-        else:
-            liveness_str = f'<span style="color:#e74c3c">ERROR</span> {ls.get("error", "")}'
+        text = f"{int(secs)}s"
+    return f"in {text}" if delta > 0 else f"{text} ago"
 
-    _STATUS_COLORS = {"up": "#2ecc71", "down": "#e74c3c", "unknown": "#888"}
 
-    def _gap_table(devices: list[dict]) -> str:
-        has_status = any("status" in d for d in devices)
-        has_discover = any("last_discover" in d for d in devices)
-        header = ("<tr><th>IP</th><th>Name</th>" + ("<th>Liveness</th>" if has_status else "")
-                  + ("<th>Last discover</th>" if has_discover else "") + "</tr>")
-        rows = ""
-        for d in devices:
-            cell = ""
-            if has_status:
-                s = d.get("status", "unknown")
-                cell = f'<td style="color:{_STATUS_COLORS.get(s, "#888")}">{s}</td>'
-            if has_discover:
-                cell += f"<td>{d.get('last_discover') or 'never'}</td>"
-            rows += f"<tr><td>{d['ip']}</td><td>{d['name']}</td>{cell}</tr>"
-        return f"<table>{header}{rows}</table>"
+def _fmt_every(seconds: Optional[float]) -> str:
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds and seconds >= size and seconds % size == 0:
+            return f"every {int(seconds // size)}{unit}"
+    return f"every {int(seconds or 0)}s"
 
-    offline_list = [d for d in not_in_netdisco_list if d.get("status") == "down"]
-    missing_list = [d for d in not_in_netdisco_list if d.get("status") != "down"]
-    not_in_netdisco_section = (
-        f"<h2>In Netbox, not in Netdisco ({len(missing_list)})</h2>{_gap_table(missing_list)}"
-        if missing_list else "<h2>In Netbox, not in Netdisco</h2><p>None</p>"
-    )
-    if offline_list:
-        not_in_netdisco_section += (
-            f"<details><summary>Offline per liveness, ignored ({len(offline_list)})</summary>"
-            f"{_gap_table(offline_list)}</details>"
-        )
-    stale_list = [d for d in not_in_netbox_list if d.get("stale")]
-    current_list = [d for d in not_in_netbox_list if not d.get("stale")]
-    not_in_netbox_section = (
-        f"<h2>In Netdisco, not in Netbox ({len(current_list)})</h2>{_gap_table(current_list)}"
-        if current_list else "<h2>In Netdisco, not in Netbox</h2><p>None</p>"
-    )
-    if stale_list:
-        not_in_netbox_section += (
-            f"<details><summary>Not discovered for {_NOT_IN_NETBOX_STALE_HOURS:g}h+, ignored ({len(stale_list)})</summary>"
-            f"{_gap_table(stale_list)}</details>"
-        )
 
-    def _tag_mismatch_table(devices: list[dict]) -> str:
-        header = "<tr><th>IP</th><th>Name</th><th>Netbox tag</th><th>Netdisco tag</th><th>Reason</th></tr>"
-        rows = ""
-        for d in devices:
-            rows += (
-                f"<tr><td>{d['ip']}</td><td>{d['name']}</td>"
-                f"<td>{d.get('netbox_tag') or ''}</td><td>{d.get('netdisco_tag') or ''}</td>"
-                f"<td>{d.get('reason', '')}</td></tr>"
-            )
-        return f"<table>{header}{rows}</table>"
+_templates = Jinja2Templates(directory=os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates"))
+_templates.env.filters.update(ts=_fmt_ts, ago=_fmt_ago, every=_fmt_every)
 
-    tag_mismatches_section = (
-        f"<h2>Auth tag mismatches ({len(tag_mismatches_list)})</h2>{_tag_mismatch_table(tag_mismatches_list)}"
-        if tag_mismatches_list else "<h2>Auth tag mismatches</h2><p>None</p>"
-    )
 
-    return f"""<!doctype html><html><head><meta charset=utf-8>
-<title>discobox</title>
-<style>
-  body {{ font-family: monospace; max-width: 860px; margin: 2em auto; padding: 0 1em; background: #1a1a2e; color: #eee; }}
-  h1 {{ color: #a29bfe; }} h2 {{ color: #74b9ff; border-bottom: 1px solid #444; padding-bottom: .3em; }}
-  .badge {{ display:inline-block; padding: .2em .7em; border-radius: 4px; font-weight: bold; background: {status_color}; color: #fff; }}
-  table {{ border-collapse: collapse; width: 100%; }} th, td {{ text-align: left; padding: .4em .8em; border-bottom: 1px solid #333; }}
-  th {{ color: #a29bfe; }}
-  .endpoints td:first-child {{ color: #55efc4; }} .endpoints td:nth-child(2) {{ color: #fdcb6e; }}
-  a {{ color: #74b9ff; }}
-  .btn {{ display:inline-block; padding: .1em .6em; border: 1px solid #74b9ff; border-radius: 4px; text-decoration: none; }}
-  .btn:hover {{ background: #74b9ff; color: #1a1a2e; }}
-  button.btn {{ background: none; color: #74b9ff; font: inherit; cursor: pointer; }}
-</style></head><body>
-<h1>discobox <small style="color:#888;font-size:.5em">v{__version__}</small></h1>
-<p>Status: <span class="badge">{status_label}</span>
-&nbsp; In-flight: <b>{len(in_flight)}</b>
-&nbsp; Hooks not in Netbox: <b>{unknown_count}</b>
-&nbsp; Last reconcile: <b>{last_reconcile_str}</b> <a class=btn href="/reconcile?refresh=true">refresh</a>
-&nbsp; Liveness (vmselect): <b>{liveness_str}</b></p>
+def _types_summary() -> Optional[dict]:
+    """Dummy type counts from the last types-bare refresh (None: no source CF, so no tracking)."""
+    if "types-bare" not in _jobs:
+        return None
+    samples = [smp for m in types_bare.collect() for smp in m.samples if smp.name == "discobox_types_bare"]
+    return {
+        "dummies": len(samples),
+        "available": sum(1 for smp in samples if smp.labels.get("library") == "available"),
+        "checked": (_jobs.last("types-bare") or {}).get("finished"),
+    }
 
-<h2>Endpoints</h2>
-<table class="endpoints">
-  <tr><th>Method</th><th>Path</th><th>Description</th></tr>
-  <tr><td>GET/POST</td><td><a href=/docs#/default/sync_sync_post>/sync</a>?host=&lt;ip&gt;</td><td>Sync one device's details from Netdisco to Netbox</td></tr>
-  <tr><td>GET/POST</td><td><a href="/sync/all?last_updated__lt={yesterday}">/sync/all?last_updated__lt={yesterday}</a></td><td>Queue a sync for every known device from Netdisco to Netbox — sample filters devices to Netbox's own <code>last_updated</code> (any Netbox device filter works, e.g. <code>site=</code>, <code>role=</code>); no filter at all queues the entire fleet</td></tr>
-  <tr><td>GET/POST</td><td><a href=/docs#/default/rebuild_rebuild_post>/rebuild</a>?host=&lt;ip&gt;&dry_run=true</td><td>Rebuild one device's inventory to exactly match Netdisco — deletes stale interfaces/modules/inventory (dry_run=true by default)</td></tr>
-  <tr><td>GET/POST</td><td><a href=/sync/pause>/sync/pause</a></td><td>Pause queued syncs</td></tr>
-  <tr><td>GET/POST</td><td><a href=/sync/resume>/sync/resume</a></td><td>Resume queued syncs</td></tr>
-  <tr><td>GET/POST</td><td><a href=/reconcile/enqueue>/reconcile/enqueue</a></td><td>Reconcile and enqueue Netdisco discovery for Netbox devices Netdisco doesn't know yet (and auto-create)</td></tr>
-  <tr><td>GET/POST</td><td><a href=/reconcile/fix-tags>/reconcile/fix-tags</a></td><td>Re-enqueue discovery (with Netbox's expected auth tag as a hint) for the last reconcile's tag mismatches</td></tr>
-  <tr><td>GET</td><td><a href=/reconcile>/reconcile</a></td><td>The last Netbox↔Netdisco compare: the gaps as JSON (read-only; ?refresh=true re-runs it in the background, ?lists=true adds the device lists)</td></tr>
-  <tr><td>GET/POST</td><td>/discover?host=…</td><td>Enqueue a Netdisco discover for one device, with its Netbox snmp_auth_profile / snmp_polling_timeout (or &amp;tag= / &amp;timeout=)</td></tr>
-  <tr><td>GET</td><td><a href=/unknown-devices>/unknown-devices</a></td><td>Devices Netdisco sent a sync hook for but not in Netbox (JSON)</td></tr>
-  <tr><td>GET</td><td><a href=/not-in-netdisco>/not-in-netdisco</a></td><td>Active Netbox devices not in Netdisco (JSON)</td></tr>
-  <tr><td>GET/POST</td><td>/types/library?role=…</td><td>DeviceType enrichment from the devicetype-library (dry-run; POST apply=true writes)</td></tr>
-  <tr><td>GET</td><td><a href="/types/library?bare=true">/types/library?bare=true</a></td><td>Dummy types (created by a sync without templates, source=netdisco) and what the library would fill (JSON, dry-run)</td></tr>
-  <tr><td>POST</td><td><form method=post action="/types/library?bare=true&amp;apply=true" style="margin:0"><button class=btn>/types/library?bare=true&amp;apply=true</button></form></td><td>Enrich every dummy type the library matches (fill-blank + templates, source → devicetype-library; never renames)</td></tr>
-  <tr><td>GET</td><td><a href=/not-in-netbox>/not-in-netbox</a></td><td>Netdisco devices not in Netbox, stale ones marked (JSON)</td></tr>
-  <tr><td>GET</td><td><a href=/tag-mismatches>/tag-mismatches</a></td><td>Devices with a missing or Netbox-mismatched auth tag (JSON)</td></tr>
-  <tr><td>GET</td><td><a href=/metrics>/metrics</a></td><td>Prometheus metrics</td></tr>
-  <tr><td>GET</td><td><a href=/health>/health</a></td><td>Liveness check</td></tr>
-  <tr><td>GET</td><td><a href=/stats>/stats</a></td><td>Aggregated operational status as JSON (last reconcile, liveness, unknown/mismatch counts) — for external status dashboards</td></tr>
-  <tr><td>GET</td><td><a href=/docs>/docs</a></td><td>Swagger UI</td></tr>
-</table>
-{unknown_section}
-{not_in_netdisco_section}
-{not_in_netbox_section}
-{tag_mismatches_section}
-</body></html>"""
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def index(request: Request) -> HTMLResponse:
+    with _unknown_devices_lock:
+        unknown = sorted(_load_unknown_devices().values(), key=lambda d: d["last_seen"], reverse=True)
+    with _reconcile_gaps_lock:
+        not_in_netdisco = _load_gap(_NOT_IN_NETDISCO_FILE)
+        not_in_netbox = _load_gap(_NOT_IN_NETBOX_FILE)
+        tag_mismatches = _load_gap(_TAG_MISMATCHES_FILE)
+    ls = _load_liveness_status() if _LIVENESS_URL else {}
+    return _templates.TemplateResponse(request, "index.html", {
+        "version": __version__,
+        "paused": _is_paused(),
+        "breaker": _cb_is_active(),
+        "in_flight": _inflight_hosts(),
+        "retries": _retries_snapshot(),
+        "liveness": {"enabled": bool(_LIVENESS_URL), "ok": ls.get("ok"), "devices": ls.get("devices", 0),
+                     "checked": ls.get("checked"), "error": ls.get("error")},
+        "jobs": _jobs.snapshot(),
+        "missing": [d for d in not_in_netdisco if d.get("status") != "down"],
+        "offline": [d for d in not_in_netdisco if d.get("status") == "down"],
+        "not_in_netbox": [d for d in not_in_netbox if not d.get("stale")],
+        "stale": [d for d in not_in_netbox if d.get("stale")],
+        "stale_hours": f"{_NOT_IN_NETBOX_STALE_HOURS:g}" if _NOT_IN_NETBOX_STALE_HOURS else "",
+        "tag_mismatches": tag_mismatches,
+        "unknown": unknown,
+        "types": _types_summary(),
+        "yesterday": (date.today() - timedelta(days=1)).isoformat(),
+    })
 
 
 def _retries_snapshot() -> dict:

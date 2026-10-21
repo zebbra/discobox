@@ -70,7 +70,7 @@ def test_error_is_recorded_not_raised(tmp_path) -> None:
 
     jobs.register(Job("r", boom, interval=60))
     rec = jobs.run("r")
-    assert rec["status"] == "error" and rec["error"] == "netdisco down"
+    assert rec["status"] == "error" and rec["error"] == "ConnectionError: netdisco down"
     assert jobs.last_success("r") is None
     assert reg.get_sample_value("discobox_job_runs_total", {"job": "r", "status": "error"}) == 1
 

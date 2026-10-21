@@ -49,7 +49,8 @@ print(f"devicetype-library {repo}@{ref} ({', '.join(sorted(vendors)) or 'all ven
 if not n:
     raise SystemExit("no device-types extracted: check DEVICETYPE_LIBRARY_VENDORS")
 PY
-COPY discobox.py server.py cli.py typesync.py ./
+COPY discobox.py server.py cli.py typesync.py jobs.py ./
+COPY templates/ templates/
 
 # Server mode by default; use cli.py for one-shot syncs
 ENTRYPOINT ["python", "server.py"]
