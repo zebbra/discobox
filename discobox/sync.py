@@ -55,6 +55,8 @@ from .interfaces import (
     _match_existing_iface,
     _remove_misplaced_vss_interfaces,
     _remove_orphaned_interfaces,
+    apply_interface_defaults,
+    interface_defaults_for,
     port_to_netbox,
 )
 from .log import _DeviceLogAdapter, _sync_error_tls, logger
@@ -306,6 +308,8 @@ def _sync_device(
     ap_type_confirmed_untag: Optional[list[str]] = None,  # tag slugs removed once an AP's model
                                                            # resolves to a type (aps.type_confirmed_untag)
     ap_full: bool = False,  # WLC: update every AP even when the AP list's fingerprint is unchanged
+    interface_defaults: Optional[list[dict]] = None,  # fill empty interface CFs per device CF
+                                                      # (config interface_defaults; see apply_interface_defaults)
     prune: bool = False,
     dry_run: bool = True,
     _held_locks: Optional[list] = None,
@@ -1963,6 +1967,16 @@ def _sync_device(
                 poe_counts["updated"], poe_counts["unchanged"], poe_counts["skipped"], poe_counts["error"],
             )
 
+    # ── Interface defaults ──────────────────────────────────────────────────────
+
+    default_counts: dict[str, int] = {}
+    rules = [r for r in interface_defaults_for(nb_device, interface_defaults or [])
+             if nb.cf_on(r["field"], "dcim.interface")]
+    if rules:
+        default_counts = apply_interface_defaults(nb, nb.fetch_interfaces(nb_device.id), rules, log)
+        if default_counts:
+            device_changed = True
+
     if not device_changed:
         for _name in ("counts", "ip_counts", "mod_counts", "sfp_counts",
                       "fan_counts", "psu_counts", "blade_counts",
@@ -2098,6 +2112,7 @@ def _sync_device(
         "modules": mod_counts if sync_modules else {},
         "sfps": sfp_counts if sync_sfp else {},
         "aps": ap_counts if sync_modules else {},
+        "interface_defaults": default_counts,
         "ha_vip": vip_device is not None,
         "orphans": {"removed": orphans_removed, "braked": orphan_stats["braked"]},
         **({"prune": prune_counts} if prune else {}),

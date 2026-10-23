@@ -199,6 +199,15 @@ class Jobs(_Section):
     types_bare: JobSchedule = Field(default=JobSchedule(interval=3600), alias="types-bare")
 
 
+class InterfaceDefault(_Section):
+    field: str                        # interface custom field to fill where it's empty
+    value: Any                        # the value it gets
+    device_cf: str                    # device custom field that selects the devices ...
+    device_values: StrList            # ... by any of these values (case-insensitive; select,
+                                      # multi-select, object name/slug or text)
+    physical_only: bool = True        # skip virtual, LAG, bridge and wireless interfaces
+
+
 class Settings(_Section):
     auth: Auth = Auth()
     sync: Sync = Sync()
@@ -211,6 +220,7 @@ class Settings(_Section):
     reconcile: Reconcile = Reconcile()
     auto_create: AutoCreate = AutoCreate()
     jobs: Jobs = Jobs()
+    interface_defaults: list[InterfaceDefault] = []
 
 
 class ConfigError(Exception):

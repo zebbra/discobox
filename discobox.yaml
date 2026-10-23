@@ -182,6 +182,15 @@ reconcile:                  # gaps selection and discover-missing limits
     timeout: 15             # query timeout, seconds
     tls_verify: true
 
+# interface_defaults:       # fill an interface custom field where it's empty (never overwritten,
+#                           # a deliberate value like "none" included), on every sync of a device
+#                           # whose device custom field matches; also the backfill for existing ones
+#   - field: interface_severity
+#     value: warning
+#     device_cf: service_team
+#     device_values: [paf, acm]
+#     physical_only: true   # skip virtual (SVI, tunnel, loopback), LAG, bridge and wireless interfaces
+
 auto_create:
   role: null                # NetBox device-role slug; null disables auto-create
   site: null                # fallback NetBox site slug (overridden by SNMP location)

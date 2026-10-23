@@ -197,6 +197,12 @@ gaps_tag_mismatches = Gauge(
     "Netdisco devices with a missing or Netbox-mismatched auth tag (last gaps run)",
     **_reg,
 )
+interface_defaults_total = Counter(
+    "discobox_interface_defaults_total",
+    "Interface custom fields filled from interface_defaults (empty ones only), by field",
+    ["field"],
+    **_reg,
+)
 fix_tags_enqueued_total = Counter(
     "discobox_fix_tags_enqueued_total",
     "Devices re-enqueued for Netdisco discovery to correct an auth tag mismatch",

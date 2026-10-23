@@ -327,3 +327,62 @@ def _match_existing_iface(
             existing.pop(k)
     existing[name] = keeper
     return keeper
+
+
+# Netbox interface types that aren't a physical port: interface defaults with
+# physical_only skip them (virtual covers SVIs, tunnels, loopbacks, subinterfaces).
+NON_PHYSICAL_IFACE_TYPES = frozenset({"virtual", "bridge", "lag"})
+
+
+def _is_physical_iface(iface) -> bool:
+    t = getattr(getattr(iface, "type", None), "value", None) or ""
+    return t not in NON_PHYSICAL_IFACE_TYPES and not t.startswith("ieee802.11") and t != "other-wireless"
+
+
+def _cf_values(value) -> set[str]:
+    """A custom field's value as a set of comparable strings: select, multi-select, object or text."""
+    if value is None or value == "":
+        return set()
+    if isinstance(value, (list, tuple)):
+        return set().union(*(_cf_values(v) for v in value)) if value else set()
+    if isinstance(value, dict):
+        return {str(value[k]).lower() for k in ("name", "slug", "value", "label") if value.get(k) not in (None, "")}
+    return {str(value).lower()}
+
+
+def interface_defaults_for(device, rules: list[dict]) -> list[dict]:
+    """The rules whose device custom field matches this device (device_cf value in device_values)."""
+    cf = getattr(device, "custom_fields", {}) or {}
+    return [r for r in rules
+            if _cf_values(cf.get(r["device_cf"])) & {v.lower() for v in r["device_values"]}]
+
+
+def apply_interface_defaults(nb, ifaces: dict, rules: list[dict], log) -> dict[str, int]:
+    """
+    Fill each rule's interface custom field where it's empty (None or ""), never
+    overwriting a value (a deliberate "none" included), on every interface of
+    the device regardless of who owns it; physical_only skips virtual, LAG,
+    bridge and wireless ones. One bulk PATCH per device. Returns {field: set}.
+    """
+    counts: dict[str, int] = {}
+    batch: list[dict] = []
+    for iface in ifaces.values():
+        current = dict(getattr(iface, "custom_fields", {}) or {})
+        patch = {}
+        for rule in rules:
+            field = rule["field"]
+            if field in patch or current.get(field) not in (None, ""):
+                continue
+            if rule.get("physical_only", True) and not _is_physical_iface(iface):
+                continue
+            patch[field] = rule["value"]
+        if patch:
+            batch.append({"id": iface.id, "custom_fields": {**current, **patch}})
+            for field in patch:
+                counts[field] = counts.get(field, 0) + 1
+    if batch:
+        failed = nb.flush_interface_updates(batch, log)
+        if failed:
+            log.error("Interface defaults: %d interface(s) failed", len(failed))
+        log.info("Interface defaults set: %s", "  ".join(f"{f}={n}" for f, n in sorted(counts.items())))
+    return counts

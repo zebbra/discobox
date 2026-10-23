@@ -51,6 +51,7 @@ flowchart LR
 - **DeviceType enrichment**: fill-blank from the devicetype-library, `GET`/`POST /types/library` ([features](docs/features.md))
 - **Housekeeping**: stale template device bays and empty dummy interfaces removed ([features](docs/features.md))
 - **Orphaned interfaces**: interfaces Netdisco doesn't report removed, with a mass-deletion brake ([features](docs/features.md))
+- **Interface defaults**: fill empty interface custom fields by device custom field, e.g. `interface_severity` per team ([features](docs/features.md))
 
 ---
 

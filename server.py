@@ -87,6 +87,7 @@ from metrics import (
     gaps_tag_mismatches,
     ha_vip_total,
     hooks_received_total,
+    interface_defaults_total,
     interfaces_total,
     ips_total,
     liveness_query_up,
@@ -222,6 +223,7 @@ _AP_PRUNE_INTERFACES: bool          = _S.aps.prune_interfaces
 # source-less (imported/manual) ones only with this. Unset → follows housekeeping.
 _REMOVE_ORPHANED: Optional[bool]    = _S.sync.remove_orphaned_interfaces
 _ORPHAN_DELETE_MAX_PERCENT: int     = _S.sync.orphan_delete_max_percent
+_INTERFACE_DEFAULTS: list[dict]     = [r.model_dump() for r in _S.interface_defaults]
 _AP_TYPE_CONFIRMED_UNTAG: list      = list(_S.aps.type_confirmed_untag)
 _TOUCH_COOLDOWN_DAYS: int           = _S.sync.touch_cooldown_days
 
@@ -1007,6 +1009,7 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             ap_type_confirmed_untag=_AP_TYPE_CONFIRMED_UNTAG,
             remove_orphaned_interfaces=_REMOVE_ORPHANED,
             orphan_delete_max_percent=_ORPHAN_DELETE_MAX_PERCENT,
+            interface_defaults=_INTERFACE_DEFAULTS,
         )
         status = "success" if result.get("ok") else "error"
         if result.get("reason") in ("discovery_incomplete", "recently_touched"):
@@ -1096,6 +1099,8 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             sfps_total.labels(action=action).inc(count)
         for action, count in result.get("aps", {}).items():
             aps_total.labels(action=action).inc(count)
+        for field, count in result.get("interface_defaults", {}).items():
+            interface_defaults_total.labels(field=field).inc(count)
         if "errors" in result:
             sync_errors_total.inc(result["errors"])
             device_sync_errors.labels(instance=instance).set(result["errors"])
@@ -1296,6 +1301,7 @@ async def rebuild(
                 ap_prune_interfaces=_AP_PRUNE_INTERFACES,
                 ap_type_confirmed_untag=_AP_TYPE_CONFIRMED_UNTAG,
                 orphan_delete_max_percent=_ORPHAN_DELETE_MAX_PERCENT,
+                interface_defaults=_INTERFACE_DEFAULTS,
                 prune=True, dry_run=dry_run,
             )
         finally:
