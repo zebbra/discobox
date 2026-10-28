@@ -202,7 +202,8 @@ class Jobs(_Section):
 class InterfaceDefault(_Section):
     field: str                        # interface custom field to fill where it's empty
     value: Any                        # the value it gets
-    device_cf: str                    # device custom field that selects the devices ...
+    device_field: str                 # device field that selects the devices: cf_<name> for a
+                                      # custom field, else a device field (status, role, site, ...)
     device_values: StrList            # ... by any of these values (case-insensitive; select,
                                       # multi-select, object name/slug or text)
     physical_only: bool = True        # skip virtual, LAG, bridge and wireless interfaces

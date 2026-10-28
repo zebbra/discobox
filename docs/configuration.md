@@ -31,7 +31,7 @@ The main `discobox.yaml` sections:
 | `types`, `library` | DeviceType resolution (aliases, `create_missing`) and devicetype-library enrichment |
 | `aps` | WLC access point pass |
 | `reconcile`, `auto_create` | Device selection for the gaps job, the `liveness` gate, discover-missing limits, auto-created devices |
-| `interface_defaults` | Rules that fill an empty interface custom field on devices whose device custom field matches (e.g. `interface_severity: warning` for `service_team` netops/campus); see [Features](features.md) |
+| `interface_defaults` | Rules that fill an empty interface custom field on devices whose device custom field matches (e.g. `interface_severity: warning` for `cf_service_team` netops/campus); see [Features](features.md) |
 | `jobs` | Job schedules (see [Jobs](operations.md#jobs)) |
 | `netdisco` | Per-request SNMP timeout of the discover jobs discobox enqueues |
 | `auth` | `metrics_path`; `token` (prefer `DISCOBOX_AUTH_TOKEN`) |

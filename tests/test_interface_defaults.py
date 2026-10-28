@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import parse_settings  # noqa: E402
 from discobox.interfaces import apply_interface_defaults, interface_defaults_for  # noqa: E402
 
-RULE = {"field": "interface_severity", "value": "warning", "device_cf": "service_team",
+RULE = {"field": "interface_severity", "value": "warning", "device_field": "cf_service_team",
         "device_values": ["netops", "campus"], "physical_only": True}
 LOG = logging.getLogger("test")
 
@@ -76,7 +76,29 @@ def test_physical_only_off_includes_virtual_and_nothing_to_do_sends_nothing() ->
 
 def test_config_schema() -> None:
     s = parse_settings({"interface_defaults": [{"field": "interface_severity", "value": "warning",
-                                                "device_cf": "service_team", "device_values": "netops, campus"}]})
+                                                "device_field": "cf_service_team", "device_values": "netops, campus"}]})
     rule = s.interface_defaults[0]
     assert rule.device_values == ["netops", "campus"] and rule.physical_only is True
     assert parse_settings({}).interface_defaults == []
+
+
+class _Record:
+    """pynetbox Record stand-in: dict(record) gives its fields, like the real one."""
+    def __init__(self, **kw):
+        self._kw = kw
+
+    def __iter__(self):
+        return iter(self._kw.items())
+
+
+def test_device_field_builtin_and_debug_log(caplog) -> None:
+    rule = {**RULE, "device_field": "status", "device_values": ["active"]}
+    active = SimpleNamespace(status=_Record(value="active", label="Active"), custom_fields={})
+    planned = SimpleNamespace(status=_Record(value="planned", label="Planned"), custom_fields={})
+    assert interface_defaults_for(active, [rule]) == [rule]
+    role = {**RULE, "device_field": "role", "device_values": ["Access-Switch"]}
+    assert interface_defaults_for(SimpleNamespace(role=_Record(id=1, name="Access Switch", slug="access-switch")),
+                                  [role]) == [role]
+    with caplog.at_level(logging.DEBUG, logger="test"):
+        assert interface_defaults_for(planned, [rule], LOG) == []
+    assert "status=['planned'] not in ['active']" in caplog.text

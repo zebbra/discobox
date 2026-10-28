@@ -184,10 +184,10 @@ reconcile:                  # gaps selection and discover-missing limits
 
 # interface_defaults:       # fill an interface custom field where it's empty (never overwritten,
 #                           # a deliberate value like "none" included), on every sync of a device
-#                           # whose device custom field matches; also the backfill for existing ones
+#                           # whose device_field (cf_<name> or a device field like status) matches
 #   - field: interface_severity
 #     value: warning
-#     device_cf: service_team
+#     device_field: cf_service_team
 #     device_values: [netops, campus]
 #     physical_only: true   # skip virtual (SVI, tunnel, loopback), LAG, bridge and wireless interfaces
 

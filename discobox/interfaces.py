@@ -339,22 +339,41 @@ def _is_physical_iface(iface) -> bool:
     return t not in NON_PHYSICAL_IFACE_TYPES and not t.startswith("ieee802.11") and t != "other-wireless"
 
 
-def _cf_values(value) -> set[str]:
-    """A custom field's value as a set of comparable strings: select, multi-select, object or text."""
+def _field_values(value) -> set[str]:
+    """A field's value as a set of comparable strings: choice, object, select, multi-select or text."""
     if value is None or value == "":
         return set()
     if isinstance(value, (list, tuple)):
-        return set().union(*(_cf_values(v) for v in value)) if value else set()
+        return set().union(*(_field_values(v) for v in value)) if value else set()
+    if not isinstance(value, (str, int, float, bool, dict)):
+        try:
+            value = dict(value)       # pynetbox Record (status, role, site, ...), no extra API call
+        except (TypeError, ValueError):
+            return {str(value).lower()}
     if isinstance(value, dict):
         return {str(value[k]).lower() for k in ("name", "slug", "value", "label") if value.get(k) not in (None, "")}
     return {str(value).lower()}
 
 
-def interface_defaults_for(device, rules: list[dict]) -> list[dict]:
-    """The rules whose device custom field matches this device (device_cf value in device_values)."""
-    cf = getattr(device, "custom_fields", {}) or {}
-    return [r for r in rules
-            if _cf_values(cf.get(r["device_cf"])) & {v.lower() for v in r["device_values"]}]
+def device_field_value(device, name: str):
+    """The device's value for device_field: cf_<name> is a custom field, anything else a device field."""
+    if name.startswith("cf_"):
+        return (getattr(device, "custom_fields", {}) or {}).get(name[3:])
+    return getattr(device, name, None)
+
+
+def interface_defaults_for(device, rules: list[dict], log=None) -> list[dict]:
+    """The rules whose device_field value is one of device_values on this device."""
+    matching = []
+    for r in rules:
+        value = device_field_value(device, r["device_field"])
+        if _field_values(value) & {v.lower() for v in r["device_values"]}:
+            matching.append(r)
+        elif log:
+            log.debug("Interface defaults: %s skipped, %s=%s not in %s",
+                      r["field"], r["device_field"], sorted(_field_values(value)) or "empty",
+                      r["device_values"])
+    return matching
 
 
 def apply_interface_defaults(nb, ifaces: dict, rules: list[dict], log) -> dict[str, int]:

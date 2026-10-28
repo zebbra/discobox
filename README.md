@@ -108,7 +108,7 @@ hooks:
 
 ## Interface defaults
 
-`interface_defaults` fills an interface custom field where it's empty, on every sync of a device whose device custom field (`device_cf`) has one of `device_values` (case-insensitive; select, multi-select, object name/slug or text). A value already set is never overwritten, a deliberate `none` included; a value cleared by hand is filled again on the next sync, so set `none` to opt a port out. `physical_only` (default `true`) skips virtual (SVI, tunnel, loopback), LAG, bridge and wireless interfaces. Rules for the same field: the first matching one wins. A rule whose field doesn't exist on Interface is skipped, and `value` must be a valid choice of that field.
+`interface_defaults` fills an interface custom field where it's empty, on every sync of a device whose `device_field` has one of `device_values` (case-insensitive). `device_field` is `cf_<name>` for a custom field (select, multi-select, object or text), like NetBox's API filters, or a device field such as `status`, `role`, `site`, `tenant` or `platform` (matched by value, label, name or slug). A value already set is never overwritten, a deliberate `none` included; a value cleared by hand is filled again on the next sync, so set `none` to opt a port out. `physical_only` (default `true`) skips virtual (SVI, tunnel, loopback), LAG, bridge and wireless interfaces. Rules for the same field: the first matching one wins. A rule whose field doesn't exist on Interface is skipped, and `value` must be a valid choice of that field.
 
 One severity for two teams:
 
@@ -116,7 +116,7 @@ One severity for two teams:
 interface_defaults:
   - field: interface_severity
     value: warning
-    device_cf: service_team
+    device_field: cf_service_team
     device_values: [netops, campus]
 ```
 
@@ -126,30 +126,30 @@ Tiered, the first matching rule wins (core switches of netops get `critical`, th
 interface_defaults:
   - field: interface_severity
     value: critical
-    device_cf: device_tier
+    device_field: cf_device_tier
     device_values: [core, datacenter]
   - field: interface_severity
     value: warning
-    device_cf: service_team
+    device_field: cf_service_team
     device_values: [netops]
 ```
 
-Two independent fields, one including virtual interfaces:
+Two independent fields, one by device status and including virtual interfaces:
 
 ```yaml
 interface_defaults:
   - field: monitoring_profile
     value: standard
-    device_cf: site_type
-    device_values: [branch]
+    device_field: status
+    device_values: [active]
     physical_only: false
   - field: interface_severity
     value: warning
-    device_cf: service_team
+    device_field: cf_service_team
     device_values: [campus]
 ```
 
-Existing devices get their values on their next sync; to backfill right away: `curl -X POST "http://discobox:8080/sync/all?cf_service_team=netops&force=true"`. Metric `discobox_interface_defaults_total{field}`.
+Existing devices get their values on their next sync; to backfill right away: `curl -X POST "http://discobox:8080/sync/all?cf_service_team=netops&force=true"`. Metric `discobox_interface_defaults_total{field}`. Why a rule didn't apply shows in a debug sync (`/sync?host=...&force=true&debug=true`): `Interface defaults: ... skipped, ...`, or a warning when the field doesn't exist on Interface.
 
 ---
 
