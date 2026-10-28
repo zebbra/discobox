@@ -25,7 +25,7 @@ from discobox.aps import (
     _merge_ap_note,
     _parse_ap_description,
 )
-from discobox.ha import _guess_prefix_len, _ha_node_info
+from discobox.ha import _guess_prefix_len, _ha_node_info, _is_own_vip
 from discobox.interfaces import port_to_netbox
 from discobox.sync import (
     _all_descriptions_missing,
@@ -414,6 +414,17 @@ def test_ha_node_info() -> None:
     assert _ha_node_info("switch01") is None
 
 
+def test_is_own_vip() -> None:
+    # Member at the synced IP, lookup (HA metrics / serial) landed on its VIP: no redirect
+    assert _is_own_vip("fwha0001p1h.example.net", "fwha0001p0h.example.net")
+    assert _is_own_vip("fwha0001p2h", "FWHA0001P0H.example.net")
+    # The real VIP hook: the device at the IP is the VIP, the lookup found a member
+    assert not _is_own_vip("fwha0001p0h.example.net", "fwha0001p1h.example.net")
+    assert not _is_own_vip("fwha0001p1h", "fwha0001p2h")       # partner, not the VIP
+    assert not _is_own_vip("fwha0001p1h", "fwha0002p0h")       # other cluster
+    assert not _is_own_vip("core-sw01", "core-sw00")
+
+
 # ── upsert_virtual_chassis: rejected member update must not poison the record ──
 
 class _FakeVC:
@@ -577,6 +588,22 @@ def test_upsert_virtual_chassis_absorbs_stale_single_member_vc() -> None:
     assert dev.virtual_chassis == 5
     assert stale_vc.updates == [{"master": None}]
     assert stale_vc.deleted
+
+
+def test_upsert_virtual_chassis_moves_vip_out_of_its_own_stale_vc() -> None:
+    # A VIP lookup gone wrong left the VIP device alone in a VC named after a
+    # member; the member sync (threenode) moves it into the cluster VC at pos 0.
+    target_vc = _FakeVC(id=5, name="fwha0001p0h")
+    stale_vc = _FakeVC(id=9, name="fwha0001p2h")
+    p1 = _FakeDevice("fwha0001p1h", virtual_chassis=target_vc, vc_position=1)
+    p2 = _FakeDevice("fwha0001p2h", virtual_chassis=target_vc, vc_position=2)
+    vip = _FakeDevice("fwha0001p0h", virtual_chassis=stale_vc, vc_position=0)
+    stale_vc.master = vip
+    client = _make_client([target_vc, stale_vc], [p1, p2, vip])
+    action, vc = client.upsert_virtual_chassis("fwha0001p0h", [(p1, 1), (p2, 2), (vip, 0)])
+    assert vc is target_vc and action == "updated"
+    assert vip.virtual_chassis == 5 and vip.vc_position == 0
+    assert stale_vc.updates == [{"master": None}] and stale_vc.deleted
 
 
 # ── _fill_module_names ─────────────────────────────────────────────────────────

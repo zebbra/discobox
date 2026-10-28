@@ -75,6 +75,12 @@ def _ha_node_info(short: str) -> Optional[tuple[int, str, str]]:
     return node_num, vc_base, vip_short
 
 
+def _is_own_vip(member_name: str, other_name: str) -> bool:
+    """True when other_name is the VIP of cluster member member_name ("x0001p1h" → "x0001p0h")."""
+    info = _ha_node_info((member_name or "").split(".")[0])
+    return bool(info) and (other_name or "").split(".")[0].lower() == info[2].lower()
+
+
 # ── Sync logic ─────────────────────────────────────────────────────────────────
 
 def _handle_vip_device(

@@ -46,6 +46,7 @@ from .ha import (
     _ha_note_block,
     _ha_peer_name,
     _handle_vip_device,
+    _is_own_vip,
     _pick_primary_chassis,
     _resolve_ha_member_ip,
 )
@@ -469,7 +470,16 @@ def _sync_device(
                 if serial_match and serial_match.id != nb_device.id:
                     real_device = serial_match
 
-            if real_device and real_device.id != nb_device.id:
+            own_vip = bool(real_device) and _is_own_vip(nb_device.name, real_device.name)
+            if own_vip:
+                # The IP belongs to a cluster member and the lookup (HA metrics,
+                # serial) landed on that member's own VIP: not a VIP hook, sync it
+                # as an HA member (the peer path below builds the VC).
+                log.info(
+                    "Netdisco hostname %r resolves to %r, the VIP of %r: no redirect, syncing as HA member",
+                    nd_hostname, real_device.name, nb_device.name,
+                )
+            elif real_device and real_device.id != nb_device.id:
                 pre_redirect = nb_device
                 nb_device = real_device
                 vip_redirected = True
