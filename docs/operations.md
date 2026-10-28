@@ -8,7 +8,7 @@ Periodic and on-demand work runs as jobs, listed on the status page and at `/job
 
 | Job | Default schedule | What it does |
 |---|---|---|
-| `gaps` | every 1h | Compare Netbox with Netdisco, read-only on both: Netbox devices (`reconcile.roles` / `statuses`, with a primary IP) Netdisco doesn't know, Netdisco devices missing from Netbox, auth tag mismatches. Also runs the liveness query (status line, `discobox_liveness_query_up`). Saves the gap lists the next two jobs act on (`GET /gaps`) |
+| `gaps` | every 1h | Compare Netbox with Netdisco, read-only on both: Netbox devices (`reconcile.roles` / `statuses`, with a primary IP) Netdisco doesn't know, Netdisco devices missing from Netbox, auth tag mismatches. Devices are matched by IP (Netbox primary IPv4 = Netdisco device IP), then by hostname without domain (case-insensitive): a device found by name under a different IP is listed as an IP mismatch with both IPs (`netdisco_duplicate` when Netdisco has the Netbox IP too, i.e. a leftover entry to delete there), never enqueued, auto-created or counted as missing. Also runs the liveness query (status line, `discobox_liveness_query_up`). Saves the gap lists the next two jobs act on (`GET /gaps`) |
 | `discover-missing` | every 24h | From the last gaps result: enqueue Netdisco discovery for the Netbox devices it doesn't know (not those liveness reports down; with `reconcile.require_auth_tag` only those with an auth tag; at most `reconcile.max_enqueue`), and with `auto_create` create Netbox devices for the non-stale Netdisco-only ones. Skipped when the gaps result is missing or older than `jobs.gaps.max_age` and while paused, deferred while syncs are queued (`reconcile.defer_if_queued`, retried after `reconcile.defer_seconds`), aborted while Netdisco's queue is over `reconcile.max_queued` / `max_failed` |
 | `fix-tags` | on demand | From the last gaps result: re-enqueue discovery with Netbox's auth tag for the tag mismatches (same freshness rule) |
 | `types-bare` | every 1h | Refresh `discobox_types_bare` (only with `custom_fields.source` set) |
@@ -44,7 +44,7 @@ Actions are POST. `GET /sync` and `GET /rebuild` still work but are deprecated: 
 | `/jobs` | GET | no | Every job: schedule, last run and result, next run; plus the retry queue (JSON) |
 | `/jobs/<name>/run` | POST | yes | Run a job now: `202` in the background, `?wait=true` answers with the result; `409` while it's running. discover-missing and fix-tags take `?max_enqueue=N`, discover-missing `&offset=N` |
 | `/gaps` | GET | yes | The last gaps result as JSON, answered immediately. `?refresh=true` starts the gaps job in the background (`running` shows it's in progress; the first call without a result starts one too), `?lists=true` adds the device lists, `?wait=true` runs it synchronously (may exceed proxy timeouts) |
-| `/not-in-netdisco`, `/not-in-netbox`, `/tag-mismatches`, `/unknown-devices` | GET | no | The gap lists (JSON) |
+| `/not-in-netdisco`, `/not-in-netbox`, `/tag-mismatches`, `/ip-mismatches`, `/unknown-devices` | GET | no | The gap lists (JSON) |
 | `/types/library` | GET, POST | yes | DeviceType enrichment report; `POST …&apply=true` writes (see [Features](features.md)) |
 | `/config` | GET | yes | Effective settings (secrets masked) and the env vars in use |
 | `/stats` | GET | no | Aggregated status as JSON (for external status dashboards) |

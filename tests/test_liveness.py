@@ -184,6 +184,9 @@ class FakeDeviceEndpoint:
         self.filter_calls.append(kwargs)
         return list(self._devices)
 
+    def all(self):
+        return list(self._devices)
+
 
 class FakeNB:
     def __init__(self, devices):
@@ -392,3 +395,34 @@ def test_reconcile_never_auto_creates_stale_devices(monkeypatch) -> None:
     reconcile_devices(FakeNDInventory(ND_INVENTORY), FakeNB(DEVICES[:1]), max_queued=None, max_failed=None,
                       max_enqueue=0, auto_create_role="switch", auto_create_site="lab")
     assert created == ["10.9.0.1"]
+
+
+# ── gaps: same hostname under a different IP ─────────────────────────────────────
+
+def test_gaps_matches_by_short_hostname_when_ips_differ() -> None:
+    nb_devices = [FakeDevice("fw-edge-01.example.net", "10.0.0.5"),    # Netdisco: other IP, no domain
+                  FakeDevice("sw-dup", "10.0.0.6"),                    # Netdisco: this IP and an old one
+                  FakeDevice("sw-ha-a", "10.0.0.7"),
+                  FakeDevice("sw-missing", "10.0.0.8")]
+    nd_devices = [
+        {"ip": "10.8.0.5", "name": "FW-EDGE-01", "last_discover": "2026-10-04 06:00:00"},
+        {"ip": "10.0.0.6", "name": "sw-dup", "last_discover": "2026-10-04 06:00:00"},
+        {"ip": "10.8.0.6", "name": "sw-dup", "last_discover": "2026-09-01 06:00:00"},
+        {"ip": "10.0.0.7", "name": "sw-ha-a", "last_discover": "2026-10-04 06:00:00"},
+        {"ip": "10.8.0.8", "name": "sw-missing", "last_discover": "2026-10-04 06:00:00"},
+        {"ip": "10.9.9.9", "name": "10.9.9.9", "last_discover": "2026-10-04 06:00:00"},   # IP as name: no match
+    ]
+    # sw-missing's Netdisco IP belongs to another Netbox device: not a name match
+    nb_devices.append(FakeDevice("other", "10.8.0.8"))
+    gaps = find_gaps(FakeNDInventory(nd_devices), FakeNB(nb_devices))
+    by_name = {e["name"]: e for e in gaps["ip_mismatches_list"]}
+    assert set(by_name) == {"fw-edge-01.example.net", "sw-dup"}
+    assert by_name["fw-edge-01.example.net"] == {
+        "name": "fw-edge-01.example.net", "netbox_ip": "10.0.0.5", "netdisco_ip": "10.8.0.5",
+        "netdisco_name": "FW-EDGE-01", "last_discover": "2026-10-04 06:00", "stale": False,
+        "netdisco_duplicate": False}
+    assert by_name["sw-dup"]["netdisco_ip"] == "10.8.0.6"
+    assert by_name["sw-dup"]["stale"] and by_name["sw-dup"]["netdisco_duplicate"]
+    assert gaps["ip_mismatches"] == 2
+    assert [e["ip"] for e in gaps["not_in_netdisco_list"]] == ["10.0.0.8"]
+    assert [e["ip"] for e in gaps["not_in_netbox_list"]] == ["10.9.9.9"]

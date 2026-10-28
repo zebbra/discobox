@@ -349,6 +349,18 @@ def _stale_cutoff(nd_devices: list[dict], hours: Optional[float]) -> Optional[da
     return newest - timedelta(hours=hours) if newest else None
 
 
+def _short_name(name) -> Optional[str]:
+    """Hostname without domain, lowercased; None for an empty name or an IP address."""
+    name = str(name or "").strip().lower()
+    if not name:
+        return None
+    try:
+        ipaddress.ip_address(name)
+        return None
+    except ValueError:
+        return name.split(".")[0] or None
+
+
 def find_gaps(
     nd: "NetdiscoClient",
     nb: "NetboxClient",
@@ -373,12 +385,51 @@ def find_gaps(
     not_in_netbox_stale_hours older than Netdisco's newest one are gone (or
     unreachable): listed with "stale": true, not counted, never auto-created.
 
+    A device whose IP differs between the two but whose hostname (without
+    domain, case-insensitive) matches is in both: listed in ip_mismatches
+    with both IPs, never enqueued, auto-created or counted as missing;
+    netdisco_duplicate when Netdisco has the Netbox IP too (the entry under
+    the other IP is a leftover to delete in Netdisco).
+
     Raises when Netdisco's device list can't be fetched.
     """
     log = logging.getLogger("discobox.reconcile")
     nd_all_devices = nd.get_all_devices()
     nd_by_ip = {d["ip"]: d for d in nd_all_devices if d.get("ip")}
     log.info("Netdisco knows %d devices", len(nd_by_ip))
+    nd_by_short: dict[str, dict] = {}
+    for d in nd_all_devices:
+        if d.get("ip"):
+            for n in (d.get("name"), d.get("dns")):
+                if _short_name(n):
+                    nd_by_short.setdefault(_short_name(n), d)
+    cutoff = _stale_cutoff(nd_all_devices, not_in_netbox_stale_hours)
+
+    def nd_seen(d: dict) -> tuple[Optional[str], bool]:
+        seen = _parse_nd_time(d.get("last_discover"))
+        return (seen.strftime("%Y-%m-%d %H:%M") if seen else None,
+                cutoff is not None and (seen is None or seen < cutoff))
+
+    # Deliberately NOT role/status-scoped: a device under any other role or
+    # status still counts as "in Netbox" for the not-in-Netbox list,
+    # and an IP another Netbox device owns is no name match.
+    nb_all_ips: set[str] = set()
+    nb_by_short: dict[str, object] = {}
+    for d in nb.nb.dcim.devices.all():
+        if d.primary_ip4:
+            nb_all_ips.add(str(d.primary_ip4).split("/")[0])
+        if _short_name(d.name):
+            nb_by_short.setdefault(_short_name(d.name), d)
+
+    ip_mismatches: list[dict] = []
+
+    def ip_mismatch(nb_name, nb_ip, d: dict) -> None:
+        last, stale = nd_seen(d)
+        ip_mismatches.append({"name": nb_name, "netbox_ip": nb_ip, "netdisco_ip": d["ip"],
+                              "netdisco_name": d.get("name") or d.get("dns"),
+                              "last_discover": last, "stale": stale,
+                              # Netdisco also has the Netbox IP: the other entry is an old duplicate
+                              "netdisco_duplicate": bool(nb_ip and nb_ip in nd_by_ip)})
 
     role_filter = {"role": roles} if roles else {}
     status_filter = statuses or ["active"]
@@ -408,42 +459,47 @@ def find_gaps(
                                        "reason": "mismatch", "snmp_polling_timeout": snmp_timeout})
             continue
 
+        nd_same_name = nd_by_short.get(_short_name(device.name) or "")
+        if nd_same_name and nd_same_name["ip"] not in nb_all_ips:
+            ip_mismatch(device.name, ip, nd_same_name)
+            continue
+
         entry = {"ip": ip, "name": device.name, "auth_tag": nb_tag, "snmp_timeout": snmp_timeout}
         if liveness is not None:
             alive = liveness.get(ip if liveness_key == "ip" else str(device.name or ""))
             entry["status"] = "unknown" if alive is None else ("up" if alive else "down")
         not_in_netdisco.append(entry)
 
-    # Deliberately NOT role/status-scoped: a device under any other role or
-    # status still counts as "in Netbox" for the not-in-Netbox list.
-    nb_all_ips = {
-        str(d.primary_ip4).split("/")[0]
-        for d in nb.nb.dcim.devices.filter(primary_ip4__isnull=False)
-        if d.primary_ip4
-    }
-    cutoff = _stale_cutoff(nd_all_devices, not_in_netbox_stale_hours)
+    listed = {e["netdisco_ip"] for e in ip_mismatches}
     not_in_netbox: list[dict] = []
     for d in nd_all_devices:
-        if not d.get("ip") or d["ip"] in nb_all_ips:
+        if not d.get("ip") or d["ip"] in nb_all_ips or d["ip"] in listed:
             continue
-        seen = _parse_nd_time(d.get("last_discover"))
+        nb_same_name = next((nb_by_short[n] for n in (_short_name(d.get("name")), _short_name(d.get("dns")))
+                             if n and n in nb_by_short), None)
+        if nb_same_name is not None:
+            primary = nb_same_name.primary_ip4
+            ip_mismatch(nb_same_name.name, str(primary).split("/")[0] if primary else None, d)
+            continue
+        last, stale = nd_seen(d)
         not_in_netbox.append({
             "ip": d["ip"], "name": d.get("name") or d.get("dns") or d["ip"],
-            "last_discover": seen.strftime("%Y-%m-%d %H:%M") if seen else None,
-            "stale": cutoff is not None and (seen is None or seen < cutoff),
+            "last_discover": last, "stale": stale,
         })
     offline = sum(1 for e in not_in_netdisco if e.get("status") == "down")
     stale = sum(1 for e in not_in_netbox if e["stale"])
     counts.update({
         "not_in_netdisco": len(not_in_netdisco) - offline, "offline": offline,
         "not_in_netbox": len(not_in_netbox) - stale, "not_in_netbox_stale": stale,
-        "tag_mismatches": len(tag_mismatches),
+        "tag_mismatches": len(tag_mismatches), "ip_mismatches": len(ip_mismatches),
     })
-    log.info("Gaps: not_in_netdisco=%d (+%d offline)  not_in_netbox=%d (+%d stale)  tag_mismatches=%d",
-             counts["not_in_netdisco"], offline, counts["not_in_netbox"], stale, len(tag_mismatches))
+    log.info("Gaps: not_in_netdisco=%d (+%d offline)  not_in_netbox=%d (+%d stale)  tag_mismatches=%d  "
+             "ip_mismatches=%d", counts["not_in_netdisco"], offline, counts["not_in_netbox"], stale,
+             len(tag_mismatches), len(ip_mismatches))
     counts["not_in_netdisco_list"] = not_in_netdisco
     counts["not_in_netbox_list"] = not_in_netbox
     counts["tag_mismatches_list"] = tag_mismatches
+    counts["ip_mismatches_list"] = ip_mismatches
     return counts
 
 
