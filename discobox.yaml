@@ -156,7 +156,7 @@ jobs:                       # schedules in seconds (status page, /jobs); 0 = on 
 reconcile:                  # gaps selection and discover-missing limits
   max_queued: null          # abort reconcile if Netdisco queue exceeds this
   max_failed: null
-  max_enqueue: null         # cap devices enqueued per reconcile run
+  max_enqueue: null         # cap devices enqueued per discover-missing run (least recently enqueued first)
   # roles: [router, switch, firewall, appliance]   # NetBox device-role slugs; default shown, empty/omitted = all roles
   # statuses: [active]                 # NetBox device statuses to reconcile; default shown.
                                         # Devices under maintenance still respond to SNMP in most

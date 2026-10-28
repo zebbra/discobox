@@ -531,6 +531,11 @@ def _job_gaps() -> JobResult:
     return JobResult(summary=", ".join(parts), data=c)
 
 
+def _load_attempts() -> dict:
+    attempts = _load_gap(_DISCOVER_ATTEMPTS_FILE)
+    return attempts if isinstance(attempts, dict) else {}
+
+
 def _job_discover_missing(max_enqueue: Optional[int] = None, offset: Optional[int] = None,
                           manual: bool = False) -> JobResult:
     if _is_paused():
@@ -544,6 +549,8 @@ def _job_discover_missing(max_enqueue: Optional[int] = None, offset: Optional[in
     with _reconcile_gaps_lock:
         not_in_netdisco = _load_gap(_NOT_IN_NETDISCO_FILE)
         not_in_netbox = _load_gap(_NOT_IN_NETBOX_FILE)
+        missing = {e["ip"] for e in not_in_netdisco}
+        attempts = {ip: a for ip, a in _load_attempts().items() if ip in missing}
     c = discover_missing(
         _get_netdisco_client(), _get_netbox_client(), not_in_netdisco, not_in_netbox,
         max_queued=_RECONCILE_MAX_QUEUED,
@@ -557,7 +564,10 @@ def _job_discover_missing(max_enqueue: Optional[int] = None, offset: Optional[in
         auto_create_location=_AUTO_CREATE_LOCATION,
         iface_source_cf=_IFACE_SOURCE_CF,
         iface_source_value=_IFACE_SOURCE_VALUE,
+        attempts=attempts,
     )
+    with _reconcile_gaps_lock:
+        _save_gap(_DISCOVER_ATTEMPTS_FILE, attempts)
     if c["aborted"]:
         return JobResult("aborted", "Netdisco queue too busy or its status unreachable (see log)")
     discover_missing_enqueued_total.inc(c["enqueued"])
@@ -788,6 +798,10 @@ _TAG_MISMATCHES_FILE: str = os.path.join(
     _STATE_DIR, "discobox.tag_mismatches.json"
 )
 _reconcile_gaps_lock = threading.Lock()
+
+# discover-missing rotation: per IP when it was last enqueued and how often
+# (devices no longer missing are dropped on the next run).
+_DISCOVER_ATTEMPTS_FILE: str = os.path.join(_STATE_DIR, "discobox.discover_attempts.json")
 
 # WLC AP pass: skip the APs while the WLC's AP list is unchanged (per-WLC state
 # file here), full pass every aps.full_pass_days and on every rebuild.
@@ -1557,6 +1571,11 @@ def index(request: Request) -> HTMLResponse:
         not_in_netdisco = _load_gap(_NOT_IN_NETDISCO_FILE)
         not_in_netbox = _load_gap(_NOT_IN_NETBOX_FILE)
         tag_mismatches = _load_gap(_TAG_MISMATCHES_FILE)
+        attempts = _load_attempts()
+    for d in not_in_netdisco:
+        a = attempts.get(d["ip"])
+        if a:
+            d["tries"], d["last_try"] = a.get("count", 0), a.get("last")
     ls = _load_liveness_status() if _LIVENESS_URL else {}
     return _templates.TemplateResponse(request, "index.html", {
         "version": __version__,

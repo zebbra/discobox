@@ -2,6 +2,7 @@
 
 import ipaddress
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -463,6 +464,8 @@ def discover_missing(
     auto_create_location: bool = False,
     iface_source_cf: Optional[str] = None,
     iface_source_value: str = "netdisco",
+    attempts: Optional[dict] = None,
+    now: Optional[float] = None,
 ) -> dict:
     """
     Act on a find_gaps result: enqueue Netdisco discovery for the Netbox
@@ -475,6 +478,10 @@ def discover_missing(
     max_failed failed jobs (last 1h): returns aborted. max_enqueue caps the
     discover jobs per run (0: none), offset skips the first N candidates.
 
+    attempts ({ip: {"last": ts, "count": n}}, updated in place) rotates the
+    candidates: never tried first, then the longest ago, so a device that
+    never comes in (ACL, credentials) doesn't hold the cap every run.
+
     Returns counts: enqueued / skipped (no auth tag) / skipped_offline /
     offset_skipped / created / failed / aborted (bool).
     """
@@ -485,6 +492,8 @@ def discover_missing(
         return counts
 
     cap_logged = False
+    if attempts is not None:
+        not_in_netdisco = sorted(not_in_netdisco, key=lambda e: (attempts.get(e["ip"]) or {}).get("last", 0))
     for entry in not_in_netdisco:
         ip, name = entry["ip"], entry.get("name")
         if entry.get("status") == "down":
@@ -508,6 +517,9 @@ def discover_missing(
             nd.enqueue_discover(ip, device_auth_tag_hint=tag, snmp_timeout_us=timeout_us)
             log.info("Enqueued discover for %s (%s) device_auth_tag_hint=%r timeout=%dus", ip, name, tag, timeout_us)
             counts["enqueued"] += 1
+            if attempts is not None:
+                prev = attempts.get(ip) or {}
+                attempts[ip] = {"last": now or time.time(), "count": prev.get("count", 0) + 1}
         except Exception as exc:
             log.error("Failed to enqueue discover for %s: %s", ip, exc)
 

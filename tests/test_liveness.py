@@ -392,3 +392,20 @@ def test_reconcile_never_auto_creates_stale_devices(monkeypatch) -> None:
     reconcile_devices(FakeNDInventory(ND_INVENTORY), FakeNB(DEVICES[:1]), max_queued=None, max_failed=None,
                       max_enqueue=0, auto_create_role="switch", auto_create_site="lab")
     assert created == ["10.9.0.1"]
+
+
+# ── discover-missing: rotation over the capped candidates ────────────────────────
+
+def test_discover_missing_rotates_least_recently_tried_first() -> None:
+    missing = [{"ip": f"10.0.1.{i}", "name": f"sw-{i}"} for i in range(1, 6)]
+    attempts: dict = {}
+    runs = []
+    for t in (100.0, 200.0, 300.0):
+        nd = FakeND()
+        discover_missing(nd, FakeNB([]), missing, max_queued=None, max_failed=None, max_enqueue=2,
+                         attempts=attempts, now=t)
+        runs.append(nd.enqueued)
+    # the same first two never hold the cap: every device gets a turn, then the oldest again
+    assert runs == [["10.0.1.1", "10.0.1.2"], ["10.0.1.3", "10.0.1.4"], ["10.0.1.5", "10.0.1.1"]]
+    assert attempts["10.0.1.1"] == {"last": 300.0, "count": 2}
+    assert attempts["10.0.1.5"] == {"last": 300.0, "count": 1}

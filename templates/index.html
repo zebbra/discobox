@@ -2,10 +2,12 @@
 {%- if devices -%}
 {%- set has_status = devices|selectattr("status", "defined")|list -%}
 {%- set has_discover = devices|selectattr("last_discover", "defined")|list -%}
-<table><tr><th>IP</th><th>Name</th>{% if has_status %}<th>Liveness</th>{% endif %}{% if has_discover %}<th>Last discover</th>{% endif %}</tr>
+{%- set has_tries = devices|selectattr("tries", "defined")|list -%}
+<table><tr><th>IP</th><th>Name</th>{% if has_status %}<th>Liveness</th>{% endif %}{% if has_discover %}<th>Last discover</th>{% endif %}{% if has_tries %}<th>Enqueued</th>{% endif %}</tr>
 {% for d in devices %}<tr><td>{{ d.ip }}</td><td>{{ d.name }}</td>
 {%- if has_status %}<td class="s-{{ d.status or 'unknown' }}">{{ d.status or "unknown" }}</td>{% endif %}
-{%- if has_discover %}<td>{{ d.last_discover or "never" }}</td>{% endif %}</tr>
+{%- if has_discover %}<td>{{ d.last_discover or "never" }}</td>{% endif %}
+{%- if has_tries %}<td>{% if d.tries %}{{ d.tries }}× <span class="muted">(last {{ d.last_try|ago }})</span>{% else %}<span class="muted">not yet</span>{% endif %}</td>{% endif %}</tr>
 {% endfor %}</table>
 {%- else %}<p class="muted">none</p>{% endif -%}
 {%- endmacro -%}
