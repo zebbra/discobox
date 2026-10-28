@@ -16,7 +16,7 @@ from config import parse_settings  # noqa: E402
 from discobox.interfaces import apply_interface_defaults, interface_defaults_for  # noqa: E402
 
 RULE = {"field": "interface_severity", "value": "warning", "device_cf": "service_team",
-        "device_values": ["paf", "acm"], "physical_only": True}
+        "device_values": ["netops", "campus"], "physical_only": True}
 LOG = logging.getLogger("test")
 
 
@@ -36,9 +36,9 @@ class FakeNB:
 def test_device_match_by_select_multiselect_object_or_text() -> None:
     def dev(value):
         return SimpleNamespace(custom_fields={"service_team": value})
-    assert interface_defaults_for(dev("PAF"), [RULE]) == [RULE]
-    assert interface_defaults_for(dev(["xyz", "acm"]), [RULE]) == [RULE]
-    assert interface_defaults_for(dev({"id": 3, "name": "ACM", "slug": "acm"}), [RULE]) == [RULE]
+    assert interface_defaults_for(dev("NETOPS"), [RULE]) == [RULE]
+    assert interface_defaults_for(dev(["xyz", "campus"]), [RULE]) == [RULE]
+    assert interface_defaults_for(dev({"id": 3, "name": "Campus", "slug": "campus"}), [RULE]) == [RULE]
     assert interface_defaults_for(dev("other"), [RULE]) == []
     assert interface_defaults_for(dev(None), [RULE]) == []
     assert interface_defaults_for(SimpleNamespace(custom_fields=None), [RULE]) == []
@@ -76,7 +76,7 @@ def test_physical_only_off_includes_virtual_and_nothing_to_do_sends_nothing() ->
 
 def test_config_schema() -> None:
     s = parse_settings({"interface_defaults": [{"field": "interface_severity", "value": "warning",
-                                                "device_cf": "service_team", "device_values": "paf, acm"}]})
+                                                "device_cf": "service_team", "device_values": "netops, campus"}]})
     rule = s.interface_defaults[0]
-    assert rule.device_values == ["paf", "acm"] and rule.physical_only is True
+    assert rule.device_values == ["netops", "campus"] and rule.physical_only is True
     assert parse_settings({}).interface_defaults == []

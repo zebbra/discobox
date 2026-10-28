@@ -106,6 +106,53 @@ hooks:
 
 ---
 
+## Interface defaults
+
+`interface_defaults` fills an interface custom field where it's empty, on every sync of a device whose device custom field (`device_cf`) has one of `device_values` (case-insensitive; select, multi-select, object name/slug or text). A value already set is never overwritten, a deliberate `none` included; a value cleared by hand is filled again on the next sync, so set `none` to opt a port out. `physical_only` (default `true`) skips virtual (SVI, tunnel, loopback), LAG, bridge and wireless interfaces. Rules for the same field: the first matching one wins. A rule whose field doesn't exist on Interface is skipped, and `value` must be a valid choice of that field.
+
+One severity for two teams:
+
+```yaml
+interface_defaults:
+  - field: interface_severity
+    value: warning
+    device_cf: service_team
+    device_values: [netops, campus]
+```
+
+Tiered, the first matching rule wins (core switches of netops get `critical`, the rest `warning`):
+
+```yaml
+interface_defaults:
+  - field: interface_severity
+    value: critical
+    device_cf: device_tier
+    device_values: [core, datacenter]
+  - field: interface_severity
+    value: warning
+    device_cf: service_team
+    device_values: [netops]
+```
+
+Two independent fields, one including virtual interfaces:
+
+```yaml
+interface_defaults:
+  - field: monitoring_profile
+    value: standard
+    device_cf: site_type
+    device_values: [branch]
+    physical_only: false
+  - field: interface_severity
+    value: warning
+    device_cf: service_team
+    device_values: [campus]
+```
+
+Existing devices get their values on their next sync; to backfill right away: `curl -X POST "http://discobox:8080/sync/all?cf_service_team=netops&force=true"`. Metric `discobox_interface_defaults_total{field}`.
+
+---
+
 ## Documentation
 
 - [Configuration](docs/configuration.md): environment variables, `discobox.yaml` sections

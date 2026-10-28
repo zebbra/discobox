@@ -188,7 +188,7 @@ reconcile:                  # gaps selection and discover-missing limits
 #   - field: interface_severity
 #     value: warning
 #     device_cf: service_team
-#     device_values: [paf, acm]
+#     device_values: [netops, campus]
 #     physical_only: true   # skip virtual (SVI, tunnel, loopback), LAG, bridge and wireless interfaces
 
 auto_create:
