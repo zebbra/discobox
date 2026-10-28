@@ -192,11 +192,6 @@ gaps_not_in_netbox_stale = Gauge(
     "reconcile.not_in_netbox_stale_hours: listed, not counted (last gaps run)",
     **_reg,
 )
-gaps_ip_mismatches = Gauge(
-    "discobox_gaps_ip_mismatches",
-    "Devices in both by hostname but under a different IP in Netbox and Netdisco (last gaps run)",
-    **_reg,
-)
 gaps_tag_mismatches = Gauge(
     "discobox_gaps_tag_mismatches",
     "Netdisco devices with a missing or Netbox-mismatched auth tag (last gaps run)",

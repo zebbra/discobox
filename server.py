@@ -78,7 +78,6 @@ from metrics import (
     device_sync_timestamp,
     discover_missing_enqueued_total,
     fix_tags_enqueued_total,
-    gaps_ip_mismatches,
     gaps_netbox_devices,
     gaps_netdisco_devices,
     gaps_not_in_netbox,
@@ -496,13 +495,11 @@ def _run_gaps() -> dict:
     gaps_not_in_netbox.set(counts["not_in_netbox"])
     gaps_not_in_netbox_stale.set(counts["not_in_netbox_stale"])
     gaps_tag_mismatches.set(counts["tag_mismatches"])
-    gaps_ip_mismatches.set(counts.get("ip_mismatches", 0))
     summary = {k: v for k, v in counts.items() if not k.endswith("_list")}
     with _reconcile_gaps_lock:
         _save_gap(_NOT_IN_NETDISCO_FILE, counts["not_in_netdisco_list"])
         _save_gap(_NOT_IN_NETBOX_FILE, counts["not_in_netbox_list"])
         _save_gap(_TAG_MISMATCHES_FILE, counts["tag_mismatches_list"])
-        _save_gap(_IP_MISMATCHES_FILE, counts.get("ip_mismatches_list", []))
         _save_gaps_counts(summary)
     return summary
 
@@ -531,8 +528,6 @@ def _job_gaps() -> JobResult:
     if c["offline"]:
         parts.append(f"{c['offline']} offline")
     parts.append(f"{c['tag_mismatches']} tag mismatches")
-    if c.get("ip_mismatches"):
-        parts.append(f"{c['ip_mismatches']} IP mismatches")
     return JobResult(summary=", ".join(parts), data=c)
 
 
@@ -791,9 +786,6 @@ _NOT_IN_NETBOX_FILE: str = os.path.join(
 )
 _TAG_MISMATCHES_FILE: str = os.path.join(
     _STATE_DIR, "discobox.tag_mismatches.json"
-)
-_IP_MISMATCHES_FILE: str = os.path.join(
-    _STATE_DIR, "discobox.ip_mismatches.json"
 )
 _reconcile_gaps_lock = threading.Lock()
 
@@ -1565,7 +1557,6 @@ def index(request: Request) -> HTMLResponse:
         not_in_netdisco = _load_gap(_NOT_IN_NETDISCO_FILE)
         not_in_netbox = _load_gap(_NOT_IN_NETBOX_FILE)
         tag_mismatches = _load_gap(_TAG_MISMATCHES_FILE)
-        ip_mismatches = _load_gap(_IP_MISMATCHES_FILE)
     ls = _load_liveness_status() if _LIVENESS_URL else {}
     return _templates.TemplateResponse(request, "index.html", {
         "version": __version__,
@@ -1582,7 +1573,6 @@ def index(request: Request) -> HTMLResponse:
         "stale": [d for d in not_in_netbox if d.get("stale")],
         "stale_hours": f"{_NOT_IN_NETBOX_STALE_HOURS:g}" if _NOT_IN_NETBOX_STALE_HOURS else "",
         "tag_mismatches": tag_mismatches,
-        "ip_mismatches": ip_mismatches,
         "unknown": unknown,
         "types": _types_summary(),
         "yesterday": (date.today() - timedelta(days=1)).isoformat(),
@@ -1782,7 +1772,6 @@ def gaps_view(
             result["not_in_netdisco_list"] = _load_gap(_NOT_IN_NETDISCO_FILE)
             result["not_in_netbox_list"] = _load_gap(_NOT_IN_NETBOX_FILE)
             result["tag_mismatches_list"] = _load_gap(_TAG_MISMATCHES_FILE)
-            result["ip_mismatches_list"] = _load_gap(_IP_MISMATCHES_FILE)
     return result
 
 
@@ -1845,12 +1834,6 @@ async def not_in_netbox() -> list:
 async def tag_mismatches() -> list:
     with _reconcile_gaps_lock:
         return _load_gap(_TAG_MISMATCHES_FILE)
-
-
-@app.get("/ip-mismatches", summary="Devices in both by hostname but under a different IP in Netbox and Netdisco (last gaps run)")
-async def ip_mismatches() -> list:
-    with _reconcile_gaps_lock:
-        return _load_gap(_IP_MISMATCHES_FILE)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

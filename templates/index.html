@@ -115,13 +115,6 @@
   {% if stale %}<details><summary>stale ({{ stale|length }})</summary>{{ gap_table(stale) }}</details>{% endif %}
 </details>
 
-<details><summary>IP mismatches (same hostname, different IP): <b>{{ ip_mismatches|length }}</b> · <a href="/ip-mismatches">JSON</a></summary>
-  {% if ip_mismatches %}
-  <table><tr><th>Name</th><th>Netbox IP</th><th>Netdisco IP</th><th>Last discover</th><th></th></tr>
-  {% for d in ip_mismatches %}<tr><td>{{ d.name }}</td><td>{{ d.netbox_ip or "none" }}</td><td>{{ d.netdisco_ip }}</td><td>{{ d.last_discover or "never" }}{% if d.stale %} <span class="muted">(stale)</span>{% endif %}</td><td>{% if d.netdisco_duplicate %}<span class="muted">Netdisco duplicate: delete {{ d.netdisco_ip }} there</span>{% endif %}</td></tr>{% endfor %}
-  </table>{% else %}<p class="muted">none</p>{% endif %}
-</details>
-
 <details><summary>Auth tag mismatches: <b>{{ tag_mismatches|length }}</b> · <a href="/tag-mismatches">JSON</a>
   {% if tag_mismatches %}<form class="act" method="post" action="/jobs/fix-tags/run"> <button class="btn">fix tags</button></form>{% endif %}</summary>
   {% if tag_mismatches %}
