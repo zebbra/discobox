@@ -1972,16 +1972,17 @@ def _sync_device(
     default_counts: dict[str, int] = {}
     rules = []
     for r in interface_defaults_for(nb_device, interface_defaults or [], log):
-        if nb.cf_on(r["field"], "dcim.interface"):
-            rules.append(r)
-        else:
-            log.warning("Interface defaults: custom field %r does not exist on Interface: rule skipped", r["field"])
+        fields = {f: v for f, v in r["set"].items() if nb.cf_on(f, "dcim.interface")}
+        for f in r["set"].keys() - fields.keys():
+            log.warning("Interface defaults: custom field %r does not exist on Interface: skipped", f)
+        if fields:
+            rules.append({**r, "set": fields})
     if rules:
         default_counts = apply_interface_defaults(nb, nb.fetch_interfaces(nb_device.id), rules, log)
         if default_counts:
             device_changed = True
         else:
-            log.debug("Interface defaults: nothing to fill (%s)", ", ".join(r["field"] for r in rules))
+            log.debug("Interface defaults: nothing to fill (%s)", ", ".join(sorted({f for r in rules for f in r["set"]})))
 
     if not device_changed:
         for _name in ("counts", "ip_counts", "mod_counts", "sfp_counts",

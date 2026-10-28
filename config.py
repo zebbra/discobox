@@ -16,6 +16,7 @@ takes the default, null or "" turns the feature off.
 from __future__ import annotations
 
 import os
+import re
 from typing import Annotated, Any, Optional, Union
 
 import yaml
@@ -199,13 +200,26 @@ class Jobs(_Section):
     types_bare: JobSchedule = Field(default=JobSchedule(interval=3600), alias="types-bare")
 
 
+def _match_patterns(value: Any) -> Any:
+    if not isinstance(value, dict) or not value:
+        raise ValueError("match needs at least one path: pattern")
+    out = {}
+    for path, pattern in value.items():
+        pattern = "" if pattern is None else str(pattern)
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ValueError(f"match {path}: invalid pattern {pattern!r}: {exc}") from None
+        out[str(path)] = pattern
+    return out
+
+
 class InterfaceDefault(_Section):
-    field: str                        # interface custom field to fill where it's empty
-    value: Any                        # the value it gets
-    device_field: str                 # device field that selects the devices: cf_<name> for a
-                                      # custom field, else a device field (status, role, site, ...)
-    device_values: StrList            # ... by any of these values (case-insensitive; select,
-                                      # multi-select, object name/slug or text)
+    name: str = ""
+    match: Annotated[dict[str, str], BeforeValidator(_match_patterns)]
+                                      # dotted device path → regex (fullmatch, case-insensitive),
+                                      # all must match: status.value, role.slug, custom_fields.x, tags
+    set: dict[str, Any]               # interface custom field → value, filled where empty
     physical_only: bool = True        # skip virtual, LAG, bridge and wireless interfaces
 
 

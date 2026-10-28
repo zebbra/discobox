@@ -1,6 +1,8 @@
 """Interfaces: Netdisco port → Netbox interface, matching, PoE, orphan removal."""
 
+import functools
 import logging
+import re
 from typing import Optional
 
 from .netbox import NetboxClient
@@ -339,62 +341,76 @@ def _is_physical_iface(iface) -> bool:
     return t not in NON_PHYSICAL_IFACE_TYPES and not t.startswith("ieee802.11") and t != "other-wireless"
 
 
-def _field_values(value) -> set[str]:
-    """A field's value as a set of comparable strings: choice, object, select, multi-select or text."""
-    if value is None or value == "":
-        return set()
-    if isinstance(value, (list, tuple)):
-        return set().union(*(_field_values(v) for v in value)) if value else set()
-    if not isinstance(value, (str, int, float, bool, dict)):
-        try:
-            value = dict(value)       # pynetbox Record (status, role, site, ...), no extra API call
-        except (TypeError, ValueError):
-            return {str(value).lower()}
-    if isinstance(value, dict):
-        return {str(value[k]).lower() for k in ("name", "slug", "value", "label") if value.get(k) not in (None, "")}
-    return {str(value).lower()}
+def _get_path(obj, dotted: str):
+    """A pynetbox Record or nested dict by dot-notation: status.value, role.slug, custom_fields.team."""
+    for part in dotted.split("."):
+        if obj is None:
+            return None
+        obj = obj.get(part) if isinstance(obj, dict) else getattr(obj, part, None)
+    return obj
 
 
-def device_field_value(device, name: str):
-    """The device's value for device_field: cf_<name> is a custom field, anything else a device field."""
-    if name.startswith("cf_"):
-        return (getattr(device, "custom_fields", {}) or {}).get(name[3:])
-    return getattr(device, name, None)
+def _match_strings(raw) -> list[str]:
+    """The value(s) a pattern is matched against; list fields (tags, multi-select) by element, slug first."""
+    if isinstance(raw, (list, tuple)):
+        return [str((item.get("slug") if isinstance(item, dict) else getattr(item, "slug", None)) or item)
+                for item in raw]
+    return ["" if raw is None else str(raw)]
+
+
+@functools.lru_cache(maxsize=256)
+def _pattern(pattern: str) -> re.Pattern:
+    return re.compile(pattern, re.IGNORECASE)
 
 
 def interface_defaults_for(device, rules: list[dict], log=None) -> list[dict]:
-    """The rules whose device_field value is one of device_values on this device."""
+    """
+    The rules whose match all fit this device (the snmp-modulator semantics):
+    every dotted path's value fullmatches its pattern, case-insensitive; a list
+    field (tags, multi-select) matches when any element does.
+    """
     matching = []
-    for r in rules:
-        value = device_field_value(device, r["device_field"])
-        if _field_values(value) & {v.lower() for v in r["device_values"]}:
-            matching.append(r)
-        elif log:
-            log.debug("Interface defaults: %s skipped, %s=%s not in %s",
-                      r["field"], r["device_field"], sorted(_field_values(value)) or "empty",
-                      r["device_values"])
+    for i, rule in enumerate(rules):
+        label = rule.get("name") or f"#{i + 1}"
+        ok = True
+        for path, pattern in rule["match"].items():
+            values = _match_strings(_get_path(device, path))
+            hit = any(_pattern(pattern).fullmatch(v) for v in values)
+            if log:
+                log.debug("Interface defaults: rule [%s] %s %s pattern=%r value=%r",
+                          label, "MATCH" if hit else "MISS ", path, pattern,
+                          values if len(values) != 1 else values[0])
+            if not hit:
+                ok = False
+                break
+        if ok:
+            matching.append(rule)
     return matching
 
 
 def apply_interface_defaults(nb, ifaces: dict, rules: list[dict], log) -> dict[str, int]:
     """
-    Fill each rule's interface custom field where it's empty (None or ""), never
+    Fill each rule's set fields where they're empty (None or ""), never
     overwriting a value (a deliberate "none" included), on every interface of
-    the device regardless of who owns it; physical_only skips virtual, LAG,
-    bridge and wireless ones. One bulk PATCH per device. Returns {field: set}.
+    the device regardless of who owns it; per field the first rule wins;
+    physical_only skips virtual, LAG, bridge and wireless ones. One bulk PATCH
+    per device. Returns {field: interfaces set}.
     """
     counts: dict[str, int] = {}
     batch: list[dict] = []
     for iface in ifaces.values():
         current = dict(getattr(iface, "custom_fields", {}) or {})
         patch = {}
+        decided: set[str] = set()
         for rule in rules:
-            field = rule["field"]
-            if field in patch or current.get(field) not in (None, ""):
-                continue
             if rule.get("physical_only", True) and not _is_physical_iface(iface):
                 continue
-            patch[field] = rule["value"]
+            for field, value in rule["set"].items():
+                if field in decided:
+                    continue
+                decided.add(field)            # the first rule that covers the interface owns the field
+                if current.get(field) in (None, ""):
+                    patch[field] = value
         if patch:
             batch.append({"id": iface.id, "custom_fields": {**current, **patch}})
             for field in patch:
