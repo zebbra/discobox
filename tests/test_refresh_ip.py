@@ -62,10 +62,10 @@ class _EP:
         return rec
 
 
-def _nb(ips=(), ifaces=(), prefixes=()):
+def _nb(ips=(), ifaces=(), prefixes=(), devices=()):
     return NS(nb=NS(
         ipam=NS(ip_addresses=_EP(ips), prefixes=_EP(prefixes)),
-        dcim=NS(interfaces=_EP(ifaces)),
+        dcim=NS(interfaces=_EP(ifaces), devices=NS(get=lambda id_: next(d for d in devices if d.id == id_))),
     ))
 
 
@@ -118,8 +118,55 @@ def test_unchanged_foreign_address_and_unresolvable_are_reported_not_written() -
     assert item["action"] == "error" and item["error"] == "192.0.2.10 is assigned to sw-other (Vlan10)"
     assert not hasattr(dev, "updates")
     result = refresh_primary_ips(_nb(), [_Rec(id=3, name="sw9", primary_ip4=None), _dev()], _resolver())
-    assert result["summary"] == {"devices": 2, "set": 1, "replace": 0, "unchanged": 0, "error": 1}
+    assert result["summary"] == {"devices": 2, "set": 1, "replace": 0, "move": 0, "unchanged": 0, "error": 1, "excluded": 0}
     assert result["devices"][0]["error"] == "not in DNS"
+
+
+def test_excluded_role_is_never_written_error_when_named_left_out_when_filtered() -> None:
+    aps = [_Rec(id=i, name="sw1", primary_ip4=None, role=NS(slug="lwapp-ap")) for i in (10, 11)]
+    nb = _nb()
+    result = refresh_primary_ips(nb, [*aps, _dev()], _resolver(), dry_run=False,
+                                 exclude_roles=["LWAPP-AP"], named={10})
+    assert result["summary"] == {"devices": 2, "set": 1, "replace": 0, "move": 0, "unchanged": 0, "error": 1, "excluded": 2}
+    assert result["devices"][0] == {"id": 10, "device": "sw1", "old": None, "new": None,
+                                    "action": "error", "error": "role lwapp-ap is excluded"}
+    assert [d["id"] for d in result["devices"]] == [10, 1]
+    assert not any(hasattr(ap, "updates") for ap in aps) and len(nb.nb.ipam.ip_addresses.created) == 1
+
+
+def _foreign(owner_primary: bool, object_type="dcim.interface"):
+    ip = _Rec(id=5, address="192.0.2.10/24", assigned_object_type=object_type,
+              assigned_object=NS(id=40, name="Vlan10", device=NS(id=2, name="sw-other")))
+    other = _Rec(id=2, name="sw-other", primary_ip4=NS(id=5 if owner_primary else 6, address="x"))
+    return ip, other
+
+
+def test_move_takes_the_address_from_another_device_and_clears_its_primary() -> None:
+    ip, other = _foreign(owner_primary=True)
+    nb, dev = _nb(ips=[ip], devices=[other]), _dev()
+    dry = refresh_primary_ip(nb, dev, _resolver(), move=True)
+    assert dry == {"id": 1, "device": "sw1", "old": None, "new": "192.0.2.10", "source": "dns",
+                   "resolved": "sw1.net.example.com", "from_device": "sw-other", "from_device_id": 2,
+                   "from_interface": "Vlan10", "from_interface_id": 40, "from_primary": True,
+                   "interface": "main", "interface_created": True, "action": "move", "address": "192.0.2.10/24"}
+    assert not hasattr(other, "updates") and not hasattr(ip, "updates") and not hasattr(dev, "updates")
+    item = refresh_primary_ip(nb, dev, _resolver(), dry_run=False, move=True)
+    assert item["applied"] and other.updates == [{"primary_ip4": None}]
+    assert ip.updates == [{"assigned_object_type": "dcim.interface", "assigned_object_id": 901}]
+    assert dev.updates == [{"primary_ip4": 5}]
+
+
+def test_move_leaves_the_other_primary_alone_when_it_is_a_different_address() -> None:
+    ip, other = _foreign(owner_primary=False)
+    nb, dev = _nb(ips=[ip], devices=[other]), _dev()
+    item = refresh_primary_ip(nb, dev, _resolver(), dry_run=False, move=True)
+    assert item["from_primary"] is False and item["applied"] and not hasattr(other, "updates")
+
+
+def test_move_never_from_a_non_interface_owner() -> None:
+    ip, other = _foreign(owner_primary=True, object_type="virtualization.vminterface")
+    item = refresh_primary_ip(_nb(ips=[ip], devices=[other]), _dev(), _resolver(), dry_run=False, move=True)
+    assert item["action"] == "error" and not hasattr(ip, "updates")
 
 
 # ── endpoint ────────────────────────────────────────────────────────────────────
@@ -142,13 +189,15 @@ def seen(monkeypatch) -> dict:
     monkeypatch.setattr(server, "_get_netbox_client", lambda: nb)
     monkeypatch.setattr(server, "_get_netdisco_client", lambda: None)
     monkeypatch.setattr(server, "refresh_primary_ips",
-                        lambda nb, devs, resolver, dry_run, **kw: out.update(ids=[d.id for d in devs], dry_run=dry_run) or {})
+                        lambda nb, devs, resolver, dry_run, **kw: out.update(ids=[d.id for d in devs], dry_run=dry_run, named=kw["named"], move=kw["move"]) or {})
     return out
 
 
 def test_endpoint_selects_by_id_name_and_filter(seen) -> None:
     server.refresh_ip(_req(device=["2", "sw1"]), device=["2", "sw1"], dry_run=True)
-    assert seen["ids"] == [2, 1] and seen["dry_run"] is True
+    assert seen["ids"] == [2, 1] and seen["dry_run"] is True and seen["named"] == {1, 2}
+    server.refresh_ip(_req("POST", device="1", move="true", dry_run="false"), device=["1"], dry_run=False, move=True)
+    assert seen["ids"] == [1] and seen["move"] is True
     server.refresh_ip(_req("POST", has_primary_ip="false", role=["switch", "router"], dry_run="false"), device=None, dry_run=False)
     assert seen["filter"] == {"has_primary_ip": "false", "role": ["switch", "router"]} and seen["dry_run"] is False
 
@@ -157,6 +206,8 @@ def test_endpoint_rejects_write_by_get_empty_selection_and_unknown_device(seen) 
     for req, kw, code in [
         (_req(device="1", dry_run="false"), {"device": ["1"], "dry_run": False}, 405),
         (_req(), {"device": None, "dry_run": True}, 400),
+        (_req(device=["1", "2"], move="true"), {"device": ["1", "2"], "dry_run": True, "move": True}, 400),
+        (_req(device="1", role="switch", move="true"), {"device": ["1"], "dry_run": True, "move": True}, 400),
         (_req(device="99"), {"device": ["99"], "dry_run": True}, 404),
     ]:
         with pytest.raises(HTTPException) as exc:

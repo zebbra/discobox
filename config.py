@@ -149,6 +149,7 @@ class Library(_Section):
 
 class RefreshIp(_Section):
     domains: StrList = []
+    exclude_roles: StrList = ["lwapp-ap"]
 
 
 class DiscoverSnmpTimeout(_Section):

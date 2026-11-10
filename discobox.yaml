@@ -136,6 +136,9 @@ refresh_ip:                 # /refresh-ip: primary IPv4 of a Netbox device from 
                             #   [net.example.com]; a dotted name is also asked as-is,
                             # a bare one only with these (as-is when the list is empty).
                             # Not in DNS: the IP of the Netdisco device with that name
+  exclude_roles: [lwapp-ap] # device role slugs that never get a primary IP from here, also
+                            # with dry_run=false: named by device= → error, matched by a
+                            # filter → left out and counted as excluded
 
 aps:                        # access points reported by a WLC (updated during the WLC's sync)
   prune_interfaces: true    # APs keep only GigabitEthernet0 + Dot11Radio<n>: others (import

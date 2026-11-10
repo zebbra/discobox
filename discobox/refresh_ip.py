@@ -6,7 +6,7 @@ primary IP, which nothing else can reach: every sync starts from it.
 The address is reused where it already sits on one of the device's
 interfaces; otherwise it goes onto a dummy interface ("main", created when
 missing) and the next sync moves it to the real port. An address held by
-another device is never taken over.
+another device is only taken over on request (move), one device at a time.
 """
 from __future__ import annotations
 
@@ -102,11 +102,15 @@ def _prefix_len(nb: NetboxClient, ip: str) -> int:
 
 def refresh_primary_ip(
     nb: NetboxClient, device, resolver: Resolver, dry_run: bool = True,
-    source_cf: Optional[str] = None, source_value: str = "netdisco",
+    source_cf: Optional[str] = None, source_value: str = "netdisco", move: bool = False,
 ) -> dict:
     """
     One device. action: set (had none) | replace (differed) | unchanged |
-    error. With dry_run nothing is written; otherwise `applied` is set.
+    move | error. With dry_run nothing is written; otherwise `applied` is set.
+
+    move: an address on another device's interface is taken over (a cluster
+    or stack with the IP on the wrong member) instead of being an error; that
+    device loses its primary IP if this was it.
     """
     old = _host(getattr(getattr(device, "primary_ip4", None), "address", None)) or None
     item: dict = {"id": device.id, "device": device.name, "old": old, "new": None}
@@ -127,12 +131,21 @@ def refresh_primary_ip(
 
     ip_obj = next((o for o in nb.nb.ipam.ip_addresses.filter(address=ip) if _host(o.address) == ip), None)
     iface = None
-    if ip_obj is not None and getattr(ip_obj, "assigned_object", None):
-        owner = ip_obj.assigned_object
-        owner_dev = getattr(owner, "device", None)
-        if ip_obj.assigned_object_type != "dcim.interface" or getattr(owner_dev, "id", None) != device.id:
+    from_dev = None
+    owner = getattr(ip_obj, "assigned_object", None) if ip_obj is not None else None
+    owner_dev = getattr(owner, "device", None)
+    if owner and (ip_obj.assigned_object_type != "dcim.interface" or getattr(owner_dev, "id", None) != device.id):
+        if not move or ip_obj.assigned_object_type != "dcim.interface" or owner_dev is None:
             holder = getattr(owner_dev, "name", None) or getattr(getattr(owner, "virtual_machine", None), "name", None)
             return fail(f"{ip} is assigned to {holder or ip_obj.assigned_object_type} ({getattr(owner, 'name', owner)})")
+        # the nested device carries no primary_ip4: fetch it
+        from_dev = nb.nb.dcim.devices.get(owner_dev.id)
+        item.update(
+            from_device=owner_dev.name, from_device_id=owner_dev.id,
+            from_interface=owner.name, from_interface_id=owner.id,
+            from_primary=getattr(getattr(from_dev, "primary_ip4", None), "id", None) == ip_obj.id,
+        )
+    if owner and from_dev is None:
         item["interface"] = owner.name
     else:
         dummies = {d.lower() for d in DUMMY_INTERFACES}
@@ -141,7 +154,7 @@ def refresh_primary_ip(
         item["interface"] = iface.name if iface else DUMMY_INTERFACE
         if iface is None:
             item["interface_created"] = True
-    item["action"] = "replace" if old else "set"
+    item["action"] = "move" if from_dev is not None else "replace" if old else "set"
     if ip_obj is not None:
         item["address"] = str(ip_obj.address)
     else:
@@ -162,22 +175,48 @@ def refresh_primary_ip(
                 assigned_object_type="dcim.interface", assigned_object_id=iface.id,
             )
         elif iface is not None:
+            if item.get("from_primary"):
+                # Netbox refuses to reassign an address that is a device's primary
+                from_dev.update({"primary_ip4": None})
             ip_obj.update({"assigned_object_type": "dcim.interface", "assigned_object_id": iface.id})
         device.update({"primary_ip4": ip_obj.id})
     except Exception as exc:
         log.error("refresh-ip %s: %s", device.name, exc)
         return fail(str(exc))
     item["applied"] = True
-    log.info("refresh-ip %s: primary IPv4 %s → %s (%s, on %s)", device.name, old, item["address"], source, item["interface"])
+    log.info("refresh-ip %s: primary IPv4 %s → %s (%s, on %s)%s", device.name, old, item["address"], source,
+             item["interface"], f", moved from {item['from_device']} ({item['from_interface']})" if from_dev is not None else "")
     return item
+
+
+def _role_slug(device) -> str:
+    role = getattr(device, "role", None) or getattr(device, "device_role", None)   # NetBox 4.x / 3.x
+    return str(getattr(role, "slug", "") or "").lower()
 
 
 def refresh_primary_ips(
     nb: NetboxClient, devices: list, resolver: Resolver, dry_run: bool = True,
     source_cf: Optional[str] = None, source_value: str = "netdisco",
+    exclude_roles: Optional[list[str]] = None, named: Optional[set[int]] = None, move: bool = False,
 ) -> dict:
-    items = [refresh_primary_ip(nb, d, resolver, dry_run, source_cf, source_value) for d in devices]
+    """
+    Devices of an excluded role (slug) are never resolved or written: one
+    asked for by name/id (named) is reported as an error, one a filter
+    pulled in is only counted.
+    """
+    blocked = {r.lower() for r in exclude_roles or []}
+    items, excluded = [], 0
+    for d in devices:
+        if _role_slug(d) in blocked:
+            excluded += 1
+            if d.id in (named or ()):
+                old = _host(getattr(getattr(d, "primary_ip4", None), "address", None)) or None
+                items.append({"id": d.id, "device": d.name, "old": old, "new": None,
+                              "action": "error", "error": f"role {_role_slug(d)} is excluded"})
+            continue
+        items.append(refresh_primary_ip(nb, d, resolver, dry_run, source_cf, source_value, move=move))
     summary = {"devices": len(items)}
-    for action in ("set", "replace", "unchanged", "error"):
+    for action in ("set", "replace", "move", "unchanged", "error"):
         summary[action] = sum(1 for i in items if i["action"] == action)
+    summary["excluded"] = excluded
     return {"dry_run": dry_run, "summary": summary, "devices": items}

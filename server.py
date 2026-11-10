@@ -244,6 +244,7 @@ _LIBRARY_PATH:    Optional[str] = _S.library.path
 _LIBRARY_OVERLAY: Optional[str] = _S.library.overlay
 _LIBRARY_ROLES:   list          = list(_S.library.roles)
 _REFRESH_IP_DOMAINS: list       = list(_S.refresh_ip.domains)
+_REFRESH_IP_EXCLUDE_ROLES: list = list(_S.refresh_ip.exclude_roles)
 _LIBRARY_MAPPING: dict          = _S.library.device_types
 # discobox_types_bare refresh from Netbox: this often (0 = only after type creations / applies)
 _LIBRARY_METRICS_INTERVAL: int  = _S.jobs.types_bare.interval
@@ -1756,7 +1757,7 @@ def discover(
             "timeout_us": effective_timeout, "timeout_source": timeout_source}
 
 
-_REFRESH_IP_PARAMS = {"device", "dry_run"}
+_REFRESH_IP_PARAMS = {"device", "dry_run", "move"}
 
 
 @app.api_route(
@@ -1769,6 +1770,7 @@ def refresh_ip(
     request: Request,
     device: Annotated[Optional[list[str]], Query(description="Netbox device name(s) or id(s)")] = None,
     dry_run: Annotated[bool, Query(description="Report what would change without writing (false needs POST)")] = True,
+    move: Annotated[bool, Query(description="Take the address over from another device's interface (exactly one device=, no filter)")] = False,
 ) -> dict:
     """
     Resolve each device's name (DNS, with refresh_ip.domains; else the
@@ -1779,6 +1781,15 @@ def refresh_ip(
     Devices: `device=` (repeatable), and/or any other query parameter as a
     Netbox device filter, like /sync/all: `?has_primary_ip=false&role=switch`.
     One of the two is required.
+
+    Devices of a role in refresh_ip.exclude_roles (default: lwapp-ap) are
+    never touched: named by device= they come back as `error`, matched by a
+    filter they are left out and counted in summary.excluded.
+
+    An address on another device's interface is an `error`, unless
+    `move=true` (one device=, no filter): then it is a `move`, reported with
+    from_device/from_interface/from_primary, and written by taking it off
+    that interface (clearing that device's primary IP if this was it).
 
     The address stays where it already sits on the device; otherwise it is
     put on the dummy interface "main" and the next sync moves it to its port.
@@ -1792,13 +1803,17 @@ def refresh_ip(
             nb_filter.setdefault(k, []).append(v)
     if not device and not nb_filter:
         raise HTTPException(400, "Nothing selected: pass device= and/or a Netbox device filter (e.g. has_primary_ip=false)")
+    if move and (nb_filter or len(device or []) != 1):
+        raise HTTPException(400, "move=true takes exactly one device= and no filter")
     nb = _get_netbox_client()
     selected: dict[int, Any] = {}
+    named: set[int] = set()
     for ref in device or []:
         dev = nb.nb.dcim.devices.get(int(ref)) if ref.isdigit() else _nb_device_for_host(nb, ref, None)
         if dev is None:
             raise HTTPException(404, f"{ref!r} is no (unique) Netbox device")
         selected[dev.id] = dev
+        named.add(dev.id)
     if nb_filter:
         try:
             for dev in nb.nb.dcim.devices.filter(**{k: v[0] if len(v) == 1 else v for k, v in nb_filter.items()}):
@@ -1809,6 +1824,7 @@ def refresh_ip(
         return refresh_primary_ips(
             nb, list(selected.values()), Resolver(_REFRESH_IP_DOMAINS, _get_netdisco_client()),
             dry_run=dry_run, source_cf=_IFACE_SOURCE_CF, source_value=_IFACE_SOURCE_VALUE,
+            exclude_roles=_REFRESH_IP_EXCLUDE_ROLES, named=named, move=move,
         )
     except Exception as exc:
         logger.error("refresh-ip failed: %s", exc)

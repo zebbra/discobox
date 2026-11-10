@@ -29,7 +29,7 @@ The main `discobox.yaml` sections:
 | `sync` | Feature defaults per sync (`no_mac`, `no_ip`, `no_modules`, `no_sfp`, `no_poe`, `housekeeping`, `lldp_clear_stale`; per request overridable), cooldown, VIP handling (`vip_mode`, `vip_mode_by_vendor`), concurrency (`max_concurrent`, `max_queue`), `retry`, `circuit_breaker`, `pause_on_error`, orphan removal, Fortinet HA resolution (`ha_resolve`) |
 | `custom_fields`, `cabling` | Custom field names discobox writes and reads; null disables one |
 | `types`, `library` | DeviceType resolution (aliases, `create_missing`) and devicetype-library enrichment |
-| `refresh_ip` | DNS suffixes (`domains`) for `/refresh-ip` |
+| `refresh_ip` | DNS suffixes (`domains`) and role blacklist (`exclude_roles`, default `lwapp-ap`) for `/refresh-ip` |
 | `aps` | WLC access point pass |
 | `reconcile`, `auto_create` | Device selection for the gaps job, the `liveness` gate, discover-missing limits, auto-created devices |
 | `interface_defaults` | Rules (`match` device paths by regex, `set` interface custom fields) that fill empty interface custom fields, e.g. `interface_severity: warning` where `custom_fields.service_team` matches `netops\|campus`; see [Features](features.md) |
