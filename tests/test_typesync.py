@@ -243,7 +243,7 @@ def test_sync_types_dry_run_writes_nothing(library: Path) -> None:
     assert [c["name"] for c in item["add"]["interfaces"]] == ["Dot11Radio0", "Dot11Radio1", "GigabitEthernet0"]
     assert item["not_imported"] == ["module-bays"]
     assert result["summary"] == {"types": 1, "matched": 1, "unmatched": 0, "fields": 4, "templates": 4, "errors": 0,
-                                 "source_changes": 0}
+                                 "source_changes": 0, "renames": 0}
     assert dt.updates == [] and nb.nb.dcim.interface_templates.created == []
 
 
@@ -298,3 +298,72 @@ def test_bare_detection_and_source_plan() -> None:
     assert plan_source(_dt(C, source=None), False, *args) == "netdisco"   # backfill
     assert plan_source(_dt("", source=None), False, *args) is None        # not ours
     assert plan_source(_dt(C), True, *args) is None                       # CF missing: never written
+
+
+FAC_YAML = """\
+---
+manufacturer: Fortinet
+model: FortiAuthenticator 3000F
+slug: fortinet-fac-3000f
+part_number: FAC-3000F
+u_height: 2
+"""
+
+
+def _fake_fac(tmp_path: Path, alias_cf="snmp_models", others=(), **dt_kw):
+    from typesync import Library
+    d = tmp_path / "lib" / "device-types" / "Fortinet"
+    d.mkdir(parents=True)
+    (d / "FAC-3000F.yaml").write_text(FAC_YAML)
+    kw = {"comments": "Created by discobox", "custom_fields": {"source": "netdisco", "snmp_models": None}, **dt_kw}
+    dt = _Rec(id=7, model="fac3kf", slug="fac3kf", part_number="fac3kf", manufacturer=_Rec(id=3, name="Fortinet"),
+              manufacturer_id=3, weight=None, weight_unit=None, airflow=None, description="",
+              u_height=2.0, device_count=1, **kw)
+    nb = _FakeNB(dt, [])
+    nb.nb.dcim.device_types.records += list(others)
+    nb.type_alias_field = lambda object_type: alias_cf
+    nb.device_type_aliases = []
+    return nb, dt, Library([tmp_path / "lib"])
+
+
+def test_apply_renames_minted_type_and_keeps_raw_name_as_alias(tmp_path: Path) -> None:
+    from typesync import sync_types
+    nb, dt, lib = _fake_fac(tmp_path)
+    dry = sync_types(nb, lib, {}, [], ["fac3kf"], source_cf="source")
+    new = {"model": "FortiAuthenticator 3000F", "part_number": "FAC-3000F", "slug": "fortinet-fac-3000f"}
+    assert dry["types"][0]["rename"] == new and dry["types"][0]["aliases"] == ["fac3kf"]
+    assert dry["summary"]["renames"] == 1 and dt.updates == []
+    sync_types(nb, lib, {}, [], ["fac3kf"], apply=True, source_cf="source")
+    assert dt.updates[0] == {**new, "custom_fields": {"snmp_models": "fac3kf"}}
+    assert dt.updates[1] == {"custom_fields": {"source": "devicetype-library"}}
+
+
+def test_rename_after_an_earlier_apply_appends_to_existing_aliases(tmp_path: Path) -> None:
+    from typesync import sync_types
+    nb, dt, lib = _fake_fac(tmp_path, custom_fields={"source": "devicetype-library", "snmp_models": ".99, FAC3KF"})
+    sync_types(nb, lib, {}, [], ["fac3kf"], apply=True, source_cf="source")
+    assert dt.model == "FortiAuthenticator 3000F"
+    assert dt.updates[0]["custom_fields"] == {"snmp_models": ".99, FAC3KF"}
+
+
+@pytest.mark.parametrize("kw, why", [
+    ({"custom_fields": {"source": "manual"}}, None),
+    ({"comments": "", "custom_fields": {"source": "devicetype-library"}}, None),
+    ({"alias_cf": None}, "no alias custom field"),
+    ({"others": [_Rec(id=8, model="FortiAuthenticator 3000F", manufacturer_id=3)]}, "already exists (DeviceType id 8)"),
+    ({"others": [_Rec(id=9, part_number="FAC-3000F", manufacturer_id=4)]}, "already exists (DeviceType id 9)"),
+])
+def test_rename_left_alone_or_skipped(tmp_path: Path, kw: dict, why) -> None:
+    from typesync import sync_types
+    nb, dt, lib = _fake_fac(tmp_path, **kw)
+    item = sync_types(nb, lib, {}, [], ["fac3kf"], apply=True, source_cf="source")["types"][0]
+    assert "rename" not in item and dt.model == "fac3kf"
+    assert (why in item["rename_skipped"]) if why else ("rename_skipped" not in item)
+
+
+def test_rename_skipped_while_a_config_alias_targets_the_old_name(tmp_path: Path) -> None:
+    from typesync import sync_types
+    nb, dt, lib = _fake_fac(tmp_path)
+    nb.device_type_aliases = [(None, lambda s: True, "fac3kf")]
+    item = sync_types(nb, lib, {}, [], ["fac3kf"], source_cf="source")["types"][0]
+    assert "types.device_aliases" in item["rename_skipped"]

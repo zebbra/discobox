@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 typesync: enrich existing Netbox DeviceTypes from the netbox-community
-devicetype-library (fill-blank only, never overwrites or renames).
+devicetype-library (fill-blank only, never overwrites; only types discobox
+minted itself are renamed to the library's name).
 
 Used through discobox's HTTP API (GET/POST /types/library, see server.py).
 Dry-run unless apply.
@@ -11,6 +12,11 @@ What it adds, only where Netbox has nothing yet:
     (datasheet link); u_height only when no device of the type is racked
   - component templates: interfaces, console ports, console server ports,
     power ports (missing names only; existing templates are never touched)
+
+A type discobox created bare (see plan_rename) also takes the library's
+model, part_number and slug; its raw names move to the alias custom field
+(types.alias_cf) so the next sync still finds it. Types from any other source
+keep their name.
 
 Never imported: module/device bays (discobox owns those and its housekeeping
 deletes template bays as stale), front/rear ports, power outlets, inventory
@@ -35,6 +41,7 @@ from typing import Iterable, Optional
 import yaml
 
 from discobox import NetboxClient
+from discobox.util import _split_aliases
 
 log = logging.getLogger("discobox.typesync")
 
@@ -294,6 +301,61 @@ def plan_source(dt, matched: bool, source_cf: Optional[str], bare_value: str, li
     return None
 
 
+RENAME_FIELDS = ("model", "part_number", "slug")
+
+
+def plan_rename(
+    nb: NetboxClient, dt, t: dict, entry: dict,
+    source_cf: Optional[str], bare_value: str, library_value: str,
+) -> dict:
+    """
+    Rename of a discobox-minted type to its library entry, as report fields:
+    {} (nothing to do, or not ours), {"rename": {field: new}, "aliases": [raw
+    names for the alias CF]} or {"rename_skipped": why}.
+
+    Ours: source bare_value, or the creation comment with no source or one an
+    earlier apply set (library_value). The raw names must stay resolvable for
+    get_or_create_device_type, else the next sync mints the bare type again.
+    """
+    source = _source_of(dt, source_cf)
+    if source not in (None, "", bare_value, library_value):
+        return {}
+    if source != bare_value and CREATED_BY_DISCOBOX not in (getattr(dt, "comments", "") or ""):
+        return {}
+    rename = {f: entry[f] for f in RENAME_FIELDS if entry.get(f) and entry[f] != t.get(f)}
+    if not rename:
+        return {}
+    new_refs = {_norm(entry.get(f)) for f in ("model", "part_number")}
+    aliases = [
+        raw for raw in dict.fromkeys(t.get(f) for f in ("model", "part_number") if f in rename)
+        if raw and _norm(raw) not in new_refs
+    ]
+    if any(re.search(r"[,\n]", raw) for raw in aliases):
+        return {"rename_skipped": "raw name can't be stored as an alias (comma)"}
+    if aliases and not nb.type_alias_field("dcim.devicetype"):
+        return {"rename_skipped": "no alias custom field (types.alias_cf) on DeviceType to keep the raw name"}
+    old_refs = {t.get(f) for f in rename}
+    for _, _, target in getattr(nb, "device_type_aliases", None) or ():
+        if target in old_refs:
+            return {"rename_skipped": f"types.device_aliases points at {target!r}: update the alias first"}
+    mfr_id = getattr(getattr(dt, "manufacturer", None), "id", None)
+    for field, value in rename.items():
+        # model and slug are unique per manufacturer; a part_number anywhere
+        # else is what get_or_create_device_type would pick up instead
+        scope = {} if field == "part_number" else {"manufacturer_id": mfr_id}
+        other = next((o for o in nb.nb.dcim.device_types.filter(**scope, **{field: value}) if o.id != dt.id), None)
+        if other:
+            return {"rename_skipped": f"{field} {value!r} already exists (DeviceType id {other.id})"}
+    return {"rename": rename, "aliases": aliases}
+
+
+def _merged_aliases(dt, cf: str, aliases: list[str]) -> str:
+    """The type's alias CF value with aliases appended (case-insensitive, existing order kept)."""
+    have = _split_aliases((getattr(dt, "custom_fields", None) or {}).get(cf))
+    seen = {a.lower() for a in have}
+    return ", ".join(have + [a for a in aliases if a.lower() not in seen])
+
+
 def resolve_roles(nb: NetboxClient, roles: list[str]) -> list[int]:
     """Device role slugs, names or ids → ids. ValueError naming the unknown ones (and the valid slugs)."""
     known = list(nb.nb.dcim.device_roles.all())
@@ -378,6 +440,7 @@ def build_report(
                 for key, (ep, _) in COMPONENTS.items()
             }
             item["set"] = plan_type_fields(t, entry, racked)
+            item.update(plan_rename(nb, dt, t, entry, source_cf, bare_value, library_value))
             item["add"] = plan_components(existing, entry)
             item["not_imported"] = [k for k in SKIPPED_COMPONENTS if entry.get(k)]
             item["images_in_library"] = bool(entry.get("front_image") or entry.get("rear_image"))
@@ -386,11 +449,11 @@ def build_report(
 
 
 def apply_report(nb: NetboxClient, items: list[dict], dts: list, source_cf: Optional[str] = None) -> int:
-    """Write each item's set/add, then its set_source; returns the number of failed types."""
+    """Write each item's set/add, its rename, then its set_source; returns the number of failed types."""
     by_id = {dt.id: dt for dt in dts}
     errors = 0
     for item in items:
-        if not item.get("set") and not item.get("add") and not item.get("set_source"):
+        if not any(item.get(k) for k in ("set", "add", "rename", "set_source")):
             continue
         dt = by_id[item["id"]]
         try:
@@ -399,6 +462,15 @@ def apply_report(nb: NetboxClient, items: list[dict], dts: list, source_cf: Opti
             for key, comps in (item.get("add") or {}).items():
                 ep = getattr(nb.nb.dcim, COMPONENTS[key][0])
                 ep.create([{**c, "device_type": dt.id} for c in comps])
+            if item.get("rename"):
+                patch: dict = dict(item["rename"])
+                if item.get("aliases"):
+                    # same PATCH as the rename: never renamed without its alias
+                    cf = nb.type_alias_field("dcim.devicetype")
+                    patch["custom_fields"] = {cf: _merged_aliases(dt, cf, item["aliases"])}
+                dt.update(patch)
+                log.info("%s / %s: renamed to %s", item["manufacturer"], item["model"],
+                         item["rename"].get("model") or item["rename"])
             # last: a type only counts as library-filled once the fill went through
             if item.get("set_source") and source_cf:
                 dt.update({"custom_fields": {source_cf: item["set_source"]}})
@@ -419,6 +491,7 @@ def summarize(items: list[dict]) -> dict:
         "templates": sum(len(v) for i in items for v in (i.get("add") or {}).values()),
         "errors": sum(1 for i in items if i.get("error")),
         "source_changes": sum(1 for i in items if i.get("set_source")),
+        "renames": sum(1 for i in items if i.get("rename")),
     }
 
 

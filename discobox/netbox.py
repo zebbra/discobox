@@ -601,6 +601,10 @@ class NetboxClient:
                 )
         return self._alias_cf_enabled[object_type]
 
+    def type_alias_field(self, object_type: str) -> Optional[str]:
+        """Name of the alias custom field when it is usable on object_type, else None."""
+        return self.type_alias_cf if self._alias_cf_active(object_type) else None
+
     def _find_type_by_ref(self, endpoint, ref: str) -> Optional[pynetbox.core.response.Record]:
         """Exact part_number, then model, then slug match across all manufacturers."""
         for field in ("part_number", "model", "slug"):
