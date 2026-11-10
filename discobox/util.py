@@ -312,11 +312,13 @@ def vendor_from_chassis(chassis: dict) -> Optional[str]:
       "fortinet.6007.6007.0"  →  "Fortinet"
 
     Cisco ENTITY-MIB OID names all start with "cev" (e.g. cevChassisN9KC93600CDGX)
-    and never contain a leading vendor prefix.
+    and never contain a leading vendor prefix. One Netdisco has no name for
+    yet comes half-translated, "ciscoModules.3.1.3.2599": the part before the
+    dot is a MIB node then, not a vendor, like "enterprises.2440".
     """
     type_str = chassis.get("type") or ""
     # Cisco types: let caller use the device's existing Netbox manufacturer
-    if type_str.lower().startswith("cev"):
+    if type_str.lower().startswith(("cev", "cisco", "enterprises.")):
         return None
     # Other vendors encode their name before the first dot
     if "." in type_str:

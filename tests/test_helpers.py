@@ -184,6 +184,9 @@ def test_vendor_from_chassis() -> None:
     # Cisco ENTITY-MIB OID names — defer to caller's existing manufacturer
     assert vendor_from_chassis({"type": "cevChassisN9KC93600CDGX"}) is None
     assert vendor_from_chassis({"type": "cevChassisCAT9300"}) is None
+    # untranslated leaf: a MIB node before the dot, never a manufacturer "Ciscomodules"
+    assert vendor_from_chassis({"type": "ciscoModules.3.1.3.2599"}) is None
+    assert vendor_from_chassis({"type": "enterprises.2440.1.2"}) is None
     # No type / unparseable
     assert vendor_from_chassis({"type": ""}) is None
     assert vendor_from_chassis({}) is None
