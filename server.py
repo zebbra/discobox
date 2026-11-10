@@ -16,6 +16,7 @@ Endpoints (see /docs):
   GET      /jobs             Jobs: gaps, discover-missing, fix-tags, types-bare
   POST     /jobs/<name>/run  Run a job now
   GET      /gaps             The last gaps result (Netbox ↔ Netdisco)
+  GET/POST /refresh-ip        Primary IPv4 of Netbox devices from DNS / Netdisco (dry-run unless POST dry_run=false)
   GET/POST /types/library    Enrich DeviceTypes from the devicetype-library (dry-run unless POST apply=true)
   GET      /config, /stats, /metrics, /health
 """
@@ -65,6 +66,7 @@ from discobox import (
     sync_device,
     validate_ip,
 )
+from discobox.refresh_ip import Resolver, refresh_primary_ips
 from jobs import Job, JobRegistry, JobResult
 from metrics import (
     _custom_registry,
@@ -241,6 +243,7 @@ _TYPES_MODULE_ALIASES: dict          = _S.types.module_aliases
 _LIBRARY_PATH:    Optional[str] = _S.library.path
 _LIBRARY_OVERLAY: Optional[str] = _S.library.overlay
 _LIBRARY_ROLES:   list          = list(_S.library.roles)
+_REFRESH_IP_DOMAINS: list       = list(_S.refresh_ip.domains)
 _LIBRARY_MAPPING: dict          = _S.library.device_types
 # discobox_types_bare refresh from Netbox: this often (0 = only after type creations / applies)
 _LIBRARY_METRICS_INTERVAL: int  = _S.jobs.types_bare.interval
@@ -1753,6 +1756,65 @@ def discover(
             "timeout_us": effective_timeout, "timeout_source": timeout_source}
 
 
+_REFRESH_IP_PARAMS = {"device", "dry_run"}
+
+
+@app.api_route(
+    "/refresh-ip",
+    methods=["GET", "POST"],
+    dependencies=[Depends(require_auth)],
+    summary="Set the primary IPv4 of Netbox devices from DNS, else Netdisco (dry-run unless POST dry_run=false)",
+)
+def refresh_ip(
+    request: Request,
+    device: Annotated[Optional[list[str]], Query(description="Netbox device name(s) or id(s)")] = None,
+    dry_run: Annotated[bool, Query(description="Report what would change without writing (false needs POST)")] = True,
+) -> dict:
+    """
+    Resolve each device's name (DNS, with refresh_ip.domains; else the
+    Netdisco device by that name) and make the address its primary IPv4:
+    `set` where it had none, `replace` where it differs, `unchanged`, or
+    `error` with the reason (not resolvable, address held by another device).
+
+    Devices: `device=` (repeatable), and/or any other query parameter as a
+    Netbox device filter, like /sync/all: `?has_primary_ip=false&role=switch`.
+    One of the two is required.
+
+    The address stays where it already sits on the device; otherwise it is
+    put on the dummy interface "main" and the next sync moves it to its port.
+    """
+    # Plain def: FastAPI runs it in its threadpool, DNS and Netbox calls don't block the event loop.
+    if not dry_run and request.method != "POST":
+        raise HTTPException(405, "dry_run=false needs POST")
+    nb_filter: dict[str, Any] = {}
+    for k, v in request.query_params.multi_items():
+        if k not in _REFRESH_IP_PARAMS:
+            nb_filter.setdefault(k, []).append(v)
+    if not device and not nb_filter:
+        raise HTTPException(400, "Nothing selected: pass device= and/or a Netbox device filter (e.g. has_primary_ip=false)")
+    nb = _get_netbox_client()
+    selected: dict[int, Any] = {}
+    for ref in device or []:
+        dev = nb.nb.dcim.devices.get(int(ref)) if ref.isdigit() else _nb_device_for_host(nb, ref, None)
+        if dev is None:
+            raise HTTPException(404, f"{ref!r} is no (unique) Netbox device")
+        selected[dev.id] = dev
+    if nb_filter:
+        try:
+            for dev in nb.nb.dcim.devices.filter(**{k: v[0] if len(v) == 1 else v for k, v in nb_filter.items()}):
+                selected[dev.id] = dev
+        except Exception as exc:
+            raise HTTPException(400, f"Netbox device filter failed: {exc}")
+    try:
+        return refresh_primary_ips(
+            nb, list(selected.values()), Resolver(_REFRESH_IP_DOMAINS, _get_netdisco_client()),
+            dry_run=dry_run, source_cf=_IFACE_SOURCE_CF, source_value=_IFACE_SOURCE_VALUE,
+        )
+    except Exception as exc:
+        logger.error("refresh-ip failed: %s", exc)
+        raise HTTPException(502, f"refresh-ip failed: {exc}")
+
+
 @app.get(
     "/gaps",
     dependencies=[Depends(require_auth)],
@@ -1798,7 +1860,7 @@ def gaps_view(
     "/types/library",
     methods=["GET", "POST"],
     dependencies=[Depends(require_auth)],
-    summary="Enrich DeviceTypes from the devicetype-library (fill-blank; dry-run unless POST apply=true)",
+    summary="Enrich DeviceTypes from the devicetype-library (fill-blank, renames discobox-created types; dry-run unless POST apply=true)",
 )
 def types_library(
     request: Request,

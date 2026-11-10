@@ -131,6 +131,12 @@ library:                    # DeviceType enrichment from the devicetype-library 
   source_value: devicetype-library  # custom_fields.source value an apply sets on a library-filled
                             # type (only over an empty or netdisco source, never manual/other)
 
+refresh_ip:                 # /refresh-ip: primary IPv4 of a Netbox device from its name
+  domains: []               # DNS suffixes tried for the device name, in order, e.g.
+                            #   [net.example.com]; a dotted name is also asked as-is,
+                            # a bare one only with these (as-is when the list is empty).
+                            # Not in DNS: the IP of the Netdisco device with that name
+
 aps:                        # access points reported by a WLC (updated during the WLC's sync)
   prune_interfaces: true    # APs keep only GigabitEthernet0 + Dot11Radio<n>: others (import
                             # placeholders like main/Vlan2, wrong-template ports) are deleted on

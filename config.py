@@ -147,6 +147,10 @@ class Library(_Section):
     source_value: str = "devicetype-library"
 
 
+class RefreshIp(_Section):
+    domains: StrList = []
+
+
 class DiscoverSnmpTimeout(_Section):
     divisor: Optional[int] = None
     floor: Optional[Duration] = None
@@ -231,6 +235,7 @@ class Settings(_Section):
     aps: Aps = Aps()
     types: Types = Types()
     library: Library = Library()
+    refresh_ip: RefreshIp = RefreshIp()
     netdisco: Netdisco = Netdisco()
     reconcile: Reconcile = Reconcile()
     auto_create: AutoCreate = AutoCreate()
