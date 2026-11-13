@@ -152,6 +152,11 @@ class RefreshIp(_Section):
     exclude_roles: StrList = ["lwapp-ap"]
 
 
+class Rebuild(_Section):
+    max_devices: int = Field(default=20, ge=1)            # per /rebuild/all run
+    max_delete_percent: Optional[int] = Field(default=50, ge=0, le=100)   # /rebuild/all brake; None = off
+
+
 class DiscoverSnmpTimeout(_Section):
     divisor: Optional[int] = None
     floor: Optional[Duration] = None
@@ -237,6 +242,7 @@ class Settings(_Section):
     types: Types = Types()
     library: Library = Library()
     refresh_ip: RefreshIp = RefreshIp()
+    rebuild: Rebuild = Rebuild()
     netdisco: Netdisco = Netdisco()
     reconcile: Reconcile = Reconcile()
     auto_create: AutoCreate = AutoCreate()

@@ -10,6 +10,7 @@ Endpoints (see /docs):
   POST     /sync             Trigger a device sync (the Netdisco hook)
   POST     /sync/all         Queue a sync for every device known to Netdisco
   POST     /rebuild          Rebuild one device's inventory to exactly match Netdisco (deletes stale entries)
+  POST     /rebuild/all      Bulk rebuild by Netbox filter (GET: progress and results, DELETE: cancel)
   POST     /sync/pause       Hold queued syncs from starting
   POST     /sync/resume      Release the pause gate
   POST     /discover         Enqueue a Netdisco discover for one device (Netbox SNMP profile/timeout)
@@ -29,7 +30,7 @@ import threading
 import time
 from collections import deque
 from contextlib import asynccontextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, Optional
@@ -245,6 +246,8 @@ _LIBRARY_OVERLAY: Optional[str] = _S.library.overlay
 _LIBRARY_ROLES:   list          = list(_S.library.roles)
 _REFRESH_IP_DOMAINS: list       = list(_S.refresh_ip.domains)
 _REFRESH_IP_EXCLUDE_ROLES: list = list(_S.refresh_ip.exclude_roles)
+_REBUILD_MAX_DEVICES: int        = _S.rebuild.max_devices
+_REBUILD_MAX_DELETE_PERCENT: Optional[int] = _S.rebuild.max_delete_percent
 _LIBRARY_MAPPING: dict          = _S.library.device_types
 # discobox_types_bare refresh from Netbox: this often (0 = only after type creations / applies)
 _LIBRARY_METRICS_INTERVAL: int  = _S.jobs.types_bare.interval
@@ -1233,6 +1236,74 @@ async def sync(
     return SyncResponse(status="queued", host=resolved_host)
 
 
+def _rebuild_device(host: str, dry_run: bool, max_delete_percent: Optional[int] = None) -> dict:
+    """sync_device as a rebuild, in one of the sync slots. The caller holds the host claim."""
+    nd = _get_netdisco_client()
+    nb = _get_netbox_client()
+    _sync_semaphore.acquire()
+    try:
+        return sync_device(
+            nd=nd, nb=nb, ip=host,
+            sync_mac=_DEFAULT_MAC, sync_ip=_DEFAULT_IP, sync_modules=_DEFAULT_MODULES,
+            sync_sfp=_DEFAULT_SFP, sync_poe=_DEFAULT_POE,
+            # dry-run: the sync part runs exactly like a normal sync (same settings,
+            # no forced housekeeping, no forced AP pass); only the rebuild's own
+            # deletions are previewed. Source-less orphans follow the config either way.
+            housekeeping=_DEFAULT_HOUSEKEEPING if dry_run else True,
+            remove_orphaned_interfaces=_REMOVE_ORPHANED, ap_full=not dry_run,
+            lldp_clear_stale=_DEFAULT_LLDP_CLEAR_STALE,
+            vip_mode=_VIP_MODE, vip_mode_by_vendor=_VIP_MODE_BY_VENDOR,
+            cf_neighbor_text=_CF_NEIGHBOR_TEXT, cf_neighbor_port=_CF_NEIGHBOR_PORT,
+            cf_neighbor_device=_CF_NEIGHBOR_DEVICE, cf_neighbor_iface=_CF_NEIGHBOR_IFACE,
+            cable_scope=_CABLE_SCOPE, cable_source_cf=_CABLE_SOURCE_CF, cable_source_value=_CABLE_SOURCE_VALUE,
+            iface_source_cf=_IFACE_SOURCE_CF, iface_source_value=_IFACE_SOURCE_VALUE,
+            cf_os_version=_CF_OS_VERSION, cf_os_name=_CF_OS_NAME, cf_os_release=_CF_OS_RELEASE,
+            cf_stack_members=_CF_STACK_MEMBERS, stack_members_only_increase=_STACK_MEMBERS_ONLY_INCREASE,
+            cf_touch=_CF_TOUCH, touch_cooldown_days=0, cf_inventory_rebuild=_CF_INVENTORY_REBUILD,
+            ha_metrics_url=_HA_METRICS_URL, ha_metrics_metric=_HA_METRICS_METRIC,
+            ha_metrics_hostname_label=_HA_METRICS_HOSTNAME_LABEL,
+            ha_metrics_target_label=_HA_METRICS_TARGET_LABEL,
+            ha_metrics_timeout=_HA_METRICS_TIMEOUT, ha_metrics_tls_verify=_LIVENESS_TLS_VERIFY,
+            ha_metrics_instance_label=_HA_METRICS_INSTANCE_LABEL, ha_mgmt_iface_name=_HA_MGMT_IFACE_NAME,
+            cf_controller=_CF_CONTROLLER,
+            ap_prune_interfaces=_AP_PRUNE_INTERFACES,
+            ap_type_confirmed_untag=_AP_TYPE_CONFIRMED_UNTAG,
+            orphan_delete_max_percent=_ORPHAN_DELETE_MAX_PERCENT,
+            interface_defaults=_INTERFACE_DEFAULTS,
+            prune=True, dry_run=dry_run,
+            prune_max_delete_percent=max_delete_percent,
+        )
+    finally:
+        _sync_semaphore.release()
+
+
+def _rebuild_outcome(result: dict, host: str, dry_run: bool) -> RebuildResponse:
+    """Metrics and log line for a finished rebuild, and its response."""
+    reason = result.get("reason")
+    prune_result = result.get("prune", {})
+    status = "skipped" if reason else ("ok" if result.get("ok") else "error")
+    if status == "ok" and prune_result.get("blocked"):
+        status, reason = "blocked", "delete brake: {kind} {stale}/{total} ({percent}%)".format(**prune_result["blocked"])
+    rebuilds_total.labels(status="success" if status == "ok" else status, dry_run=str(dry_run).lower()).inc()
+    if "errors" in result and result.get("hostname"):
+        sync_errors_total.inc(result["errors"])
+        device_sync_errors.labels(instance=result["hostname"]).set(result["errors"])
+    if "orphans" in result and result.get("hostname") and not dry_run and status != "blocked":
+        orphans_total.labels(action="removed").inc(result["orphans"]["removed"])
+        # the prune pass deletes the braked own ones (source-less ones stay; the next sync re-reports them)
+        device_orphans_braked.labels(instance=result["hostname"]).set(0)
+    logger.info(
+        "rebuild %s for %s%s: %s", status, host, " [dry-run]" if dry_run else "",
+        prune_result,
+    )
+    return RebuildResponse(
+        status=status, host=host, dry_run=dry_run,
+        hostname=result.get("hostname"), prune=prune_result,
+        new_stack_members=(prune_result.get("stack_members") or {}).get("now"),
+        reason=reason,
+    )
+
+
 @app.api_route(
     "/rebuild",
     methods=["GET", "POST"],
@@ -1286,50 +1357,9 @@ async def rebuild(
                 status="skipped", host=resolved_host, dry_run=dry_run, reason="already in progress",
             )
 
-    nd = _get_netdisco_client()
-    nb = _get_netbox_client()
-
-    def _do_rebuild() -> dict:
-        _sync_semaphore.acquire()
-        try:
-            return sync_device(
-                nd=nd, nb=nb, ip=resolved_host,
-                sync_mac=_DEFAULT_MAC, sync_ip=_DEFAULT_IP, sync_modules=_DEFAULT_MODULES,
-                sync_sfp=_DEFAULT_SFP, sync_poe=_DEFAULT_POE,
-                # dry-run: the sync part runs exactly like a normal sync (same settings,
-                # no forced housekeeping, no forced AP pass); only the rebuild's own
-                # deletions are previewed. Source-less orphans follow the config either way.
-                housekeeping=_DEFAULT_HOUSEKEEPING if dry_run else True,
-                remove_orphaned_interfaces=_REMOVE_ORPHANED, ap_full=not dry_run,
-                lldp_clear_stale=_DEFAULT_LLDP_CLEAR_STALE,
-                vip_mode=_VIP_MODE, vip_mode_by_vendor=_VIP_MODE_BY_VENDOR,
-                cf_neighbor_text=_CF_NEIGHBOR_TEXT, cf_neighbor_port=_CF_NEIGHBOR_PORT,
-                cf_neighbor_device=_CF_NEIGHBOR_DEVICE, cf_neighbor_iface=_CF_NEIGHBOR_IFACE,
-                cable_scope=_CABLE_SCOPE, cable_source_cf=_CABLE_SOURCE_CF, cable_source_value=_CABLE_SOURCE_VALUE,
-                iface_source_cf=_IFACE_SOURCE_CF, iface_source_value=_IFACE_SOURCE_VALUE,
-                cf_os_version=_CF_OS_VERSION, cf_os_name=_CF_OS_NAME, cf_os_release=_CF_OS_RELEASE,
-                cf_stack_members=_CF_STACK_MEMBERS, stack_members_only_increase=_STACK_MEMBERS_ONLY_INCREASE,
-                cf_touch=_CF_TOUCH, touch_cooldown_days=0, cf_inventory_rebuild=_CF_INVENTORY_REBUILD,
-                ha_metrics_url=_HA_METRICS_URL, ha_metrics_metric=_HA_METRICS_METRIC,
-                ha_metrics_hostname_label=_HA_METRICS_HOSTNAME_LABEL,
-                ha_metrics_target_label=_HA_METRICS_TARGET_LABEL,
-                ha_metrics_timeout=_HA_METRICS_TIMEOUT, ha_metrics_tls_verify=_LIVENESS_TLS_VERIFY,
-                ha_metrics_instance_label=_HA_METRICS_INSTANCE_LABEL, ha_mgmt_iface_name=_HA_MGMT_IFACE_NAME,
-                cf_controller=_CF_CONTROLLER,
-                ap_prune_interfaces=_AP_PRUNE_INTERFACES,
-                ap_type_confirmed_untag=_AP_TYPE_CONFIRMED_UNTAG,
-                orphan_delete_max_percent=_ORPHAN_DELETE_MAX_PERCENT,
-                interface_defaults=_INTERFACE_DEFAULTS,
-                prune=True, dry_run=dry_run,
-            )
-        finally:
-            _sync_semaphore.release()
-
     try:
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, _do_rebuild)
-    except HTTPException:
-        raise
+        result = await loop.run_in_executor(None, _rebuild_device, resolved_host, dry_run)
     except Exception as exc:
         # one line in the log and a readable answer instead of an ASGI traceback
         logger.error("rebuild failed for %s%s: %s", resolved_host, " [dry-run]" if dry_run else "", exc)
@@ -1337,28 +1367,218 @@ async def rebuild(
         raise HTTPException(status_code=502, detail=f"rebuild failed: {exc}")
     finally:
         _release_host(resolved_host)
+    return _rebuild_outcome(result, resolved_host, dry_run)
 
-    reason = result.get("reason")
-    status = "skipped" if reason else ("ok" if result.get("ok") else "error")
-    rebuilds_total.labels(status="success" if status == "ok" else status, dry_run=str(dry_run).lower()).inc()
-    if "errors" in result and result.get("hostname"):
-        sync_errors_total.inc(result["errors"])
-        device_sync_errors.labels(instance=result["hostname"]).set(result["errors"])
-    if "orphans" in result and result.get("hostname") and not dry_run:
-        orphans_total.labels(action="removed").inc(result["orphans"]["removed"])
-        # the prune pass deletes the braked own ones (source-less ones stay; the next sync re-reports them)
-        device_orphans_braked.labels(instance=result["hostname"]).set(0)
-    prune_result = result.get("prune", {})
-    logger.info(
-        "rebuild %s for %s%s: %s", status, resolved_host, " [dry-run]" if dry_run else "",
-        prune_result,
-    )
-    return RebuildResponse(
-        status=status, host=resolved_host, dry_run=dry_run,
-        hostname=result.get("hostname"), prune=prune_result,
-        new_stack_members=(prune_result.get("stack_members") or {}).get("now"),
-        reason=reason,
-    )
+
+# ── Bulk rebuild ───────────────────────────────────────────────────────────────
+# One run at a time, one device after the other, so a run never takes more than
+# one sync slot. In memory only: a restart ends the run and forgets it.
+
+_REBUILD_ALL_PARAMS = {"dry_run", "limit"}
+_REBUILD_CLAIM_WAIT_S = 600    # how long a rebuild waits for a sync of the same host to finish
+_REBUILD_FINAL = ("ok", "blocked", "skipped", "error", "cancelled")
+_rebuild_run: dict = {}
+_rebuild_run_lock = threading.Lock()
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _rebuild_run_snapshot() -> dict:
+    """The current or last bulk rebuild for GET /rebuild/all."""
+    with _rebuild_run_lock:
+        if not _rebuild_run:
+            return {"status": "none", "max_devices": _REBUILD_MAX_DEVICES}
+        devices = [dict(d) for d in _rebuild_run["devices"]]
+        run = {k: v for k, v in _rebuild_run.items() if k not in ("devices", "cancel")}
+    counts = {st: sum(1 for d in devices if d["status"] == st) for st in _REBUILD_FINAL}
+    done = sum(counts.values())
+    durations = [d["duration_s"] for d in devices if d.get("duration_s") is not None]
+    return {
+        **run, "max_devices": _REBUILD_MAX_DEVICES,
+        "total": len(devices), "done": done, "remaining": len(devices) - done,
+        "running": sum(1 for d in devices if d["status"] == "running"),
+        **counts,
+        "avg_duration_s": round(sum(durations) / len(durations), 1) if durations else None,
+        "devices": devices,
+    }
+
+
+def _rebuild_all_worker(run: dict, sleep=time.sleep) -> None:
+    """Rebuild run["devices"] one by one; a cancel drops the ones not started."""
+    dry_run = run["dry_run"]
+
+    def set_(entry: dict, **fields) -> None:
+        with _rebuild_run_lock:
+            entry.update(fields)
+
+    def cancelled() -> bool:
+        with _rebuild_run_lock:
+            return run["cancel"]
+
+    for entry in run["devices"]:
+        host = entry["host"]
+        waited = 0
+        claimed = False
+        # wait out a pause and a sync of the same host; a cancel ends the wait
+        while not cancelled():
+            if not _is_paused():
+                with _in_flight_lock:
+                    claimed = _claim_host(host)
+                if claimed or waited >= _REBUILD_CLAIM_WAIT_S:
+                    break
+                waited += 5
+            sleep(5)
+        if cancelled() and not claimed:
+            set_(entry, status="cancelled")
+            continue
+        if not claimed:
+            set_(entry, status="skipped", reason="already in progress")
+            rebuilds_total.labels(status="skipped", dry_run=str(dry_run).lower()).inc()
+            continue
+        set_(entry, status="running")
+        start = time.time()
+        try:
+            out = _rebuild_outcome(_rebuild_device(host, dry_run, _REBUILD_MAX_DELETE_PERCENT), host, dry_run)
+            fields = {"status": out.status, "reason": out.reason, "prune": out.prune,
+                      "new_stack_members": out.new_stack_members}
+            if out.hostname:
+                fields["hostname"] = out.hostname
+        except Exception as exc:
+            logger.error("rebuild failed for %s%s: %s", host, " [dry-run]" if dry_run else "", exc)
+            rebuilds_total.labels(status="error", dry_run=str(dry_run).lower()).inc()
+            fields = {"status": "error", "reason": str(exc)}
+        finally:
+            _release_host(host)
+        set_(entry, duration_s=round(time.time() - start, 1), **fields)
+
+    with _rebuild_run_lock:
+        was_cancelled = any(d["status"] == "cancelled" for d in run["devices"])
+        run.update(status="cancelled" if was_cancelled else "done", finished=_utc_now())
+    logger.info("rebuild/all %s%s: %d device(s)", run["status"], " [dry-run]" if dry_run else "", len(run["devices"]))
+
+
+def _start_rebuild_worker(run: dict) -> None:
+    threading.Thread(target=_rebuild_all_worker, args=(run,), name="rebuild-all", daemon=True).start()
+
+
+@app.post(
+    "/rebuild/all",
+    status_code=202,
+    dependencies=[Depends(require_auth)],
+    summary="Rebuild the devices a Netbox filter selects, one after the other",
+)
+async def rebuild_all(
+    request: Request,
+    dry_run: Annotated[bool, Query(description="Report what would be deleted without deleting anything")] = True,
+    limit: Annotated[Optional[int], Query(ge=1, description="Fewer devices than rebuild.max_devices")] = None,
+) -> dict:
+    """
+    Start a bulk rebuild: /rebuild for every device the Netbox device filter
+    in the query selects (`?id=1&id=2`, `?site=zrh&role=switch`, …), limited
+    to devices Netdisco knows. Returns at once; GET /rebuild/all shows the
+    progress and each device's result, DELETE /rebuild/all cancels the
+    devices not started yet.
+
+    At most rebuild.max_devices (20) per run: the first ones in Netbox's
+    order are queued, the rest is counted as over_limit. One run at a time
+    (409 while one is running), one device at a time.
+
+    Defaults to dry_run=true, with the same meaning as on /rebuild. A device
+    of which more than rebuild.max_delete_percent of the interfaces, modules,
+    inventory items or SFPs would be deleted is reported as blocked and
+    keeps them; rebuild it alone with /rebuild after a look at it.
+    """
+    nb_filter: dict[str, Any] = {}
+    for k, v in request.query_params.multi_items():
+        if k in _REBUILD_ALL_PARAMS:
+            continue
+        if k in nb_filter:
+            if not isinstance(nb_filter[k], list):
+                nb_filter[k] = [nb_filter[k]]
+            nb_filter[k].append(v)
+        else:
+            nb_filter[k] = v
+    if not nb_filter:
+        raise HTTPException(status_code=400, detail="no devices selected: pass a Netbox device filter (id=…, site=…)")
+    if _is_paused():
+        raise HTTPException(status_code=409, detail="sync is paused")
+    with _rebuild_run_lock:
+        if _rebuild_run.get("status") == "running":
+            raise HTTPException(status_code=409, detail="a bulk rebuild is already running")
+
+    loop = asyncio.get_running_loop()
+    try:
+        nd_devices = await loop.run_in_executor(None, _get_netdisco_client().get_all_devices)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"could not fetch Netdisco device list: {exc}")
+    nd_ips = {d["ip"] for d in nd_devices if d.get("ip")}
+
+    def _netbox_devices() -> list[dict]:
+        return [
+            {"host": str(d.primary_ip4).split("/")[0], "hostname": d.name, "device_id": d.id}
+            for d in _get_netbox_client().nb.dcim.devices.filter(**{"has_primary_ip": True, **nb_filter})
+            if d.primary_ip4
+        ]
+    try:
+        selected = await loop.run_in_executor(None, _netbox_devices)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Netbox device filter failed: {exc}")
+
+    cap = min(limit, _REBUILD_MAX_DEVICES) if limit else _REBUILD_MAX_DEVICES
+    counts = {"selected": len(selected), "queued": 0, "over_limit": 0, "not_in_netdisco": 0, "invalid": 0}
+    devices: list[dict] = []
+    for d in selected:
+        try:
+            d["host"] = validate_ip(d["host"])
+        except ValueError:
+            counts["invalid"] += 1
+            continue
+        if d["host"] not in nd_ips:
+            counts["not_in_netdisco"] += 1
+        elif len(devices) >= cap:
+            counts["over_limit"] += 1
+        else:
+            devices.append({**d, "status": "queued", "reason": None, "duration_s": None,
+                            "prune": {}, "new_stack_members": None})
+    counts["queued"] = len(devices)
+    result = {"dry_run": dry_run, **counts, "max_devices": _REBUILD_MAX_DEVICES, "netbox_filter": nb_filter}
+    if not devices:
+        return {"status": "none", **result}
+
+    run = {"status": "running", "dry_run": dry_run, "started": _utc_now(), "finished": None,
+           "cancel": False, "devices": devices}
+    with _rebuild_run_lock:
+        if _rebuild_run.get("status") == "running":
+            raise HTTPException(status_code=409, detail="a bulk rebuild is already running")
+        _rebuild_run.clear()
+        _rebuild_run.update(run)
+        run = _rebuild_run
+    _start_rebuild_worker(run)
+    logger.info("rebuild/all%s: %s (filter=%r)", " [dry-run]" if dry_run else "", counts, nb_filter)
+    return {"status": "running", **result}
+
+
+@app.get("/rebuild/all", dependencies=[Depends(require_auth)], summary="Progress and results of the bulk rebuild")
+async def rebuild_all_status() -> dict:
+    """
+    The running or last bulk rebuild (status none: none since the start of
+    the process): totals, avg_duration_s of the finished devices, and per
+    device its status (queued, running, ok, blocked, skipped, error,
+    cancelled) with the same prune numbers as /rebuild.
+    """
+    return _rebuild_run_snapshot()
+
+
+@app.delete("/rebuild/all", dependencies=[Depends(require_auth)], summary="Cancel the bulk rebuild")
+async def rebuild_all_cancel() -> dict:
+    """Drop the devices not started yet. The one being rebuilt finishes."""
+    with _rebuild_run_lock:
+        if _rebuild_run.get("status") == "running":
+            _rebuild_run["cancel"] = True
+            logger.warning("rebuild/all: cancel requested")
+    return _rebuild_run_snapshot()
 
 
 def _enqueue_all(hosts: list, submit, limit: Optional[int] = None, force: bool = False) -> dict[str, int]:

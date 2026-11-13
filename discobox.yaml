@@ -140,6 +140,14 @@ refresh_ip:                 # /refresh-ip: primary IPv4 of a Netbox device from 
                             # with dry_run=false: named by device= → error, matched by a
                             # filter → left out and counted as excluded
 
+rebuild:                    # /rebuild/all: bulk rebuild, one device after the other
+  max_devices: 20           # devices per run (about an hour); the rest of a larger selection
+                            # is counted as over_limit, not queued
+  max_delete_percent: 50    # brake: a device of which more than this share of its interfaces,
+                            # modules, inventory items or SFPs (and more than 5 of them) would
+                            # be deleted is reported as blocked and keeps them. null = off.
+                            # /rebuild (one device) has no brake
+
 aps:                        # access points reported by a WLC (updated during the WLC's sync)
   prune_interfaces: true    # APs keep only GigabitEthernet0 + Dot11Radio<n>: others (import
                             # placeholders like main/Vlan2, wrong-template ports) are deleted on

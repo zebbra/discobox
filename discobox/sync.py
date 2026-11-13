@@ -184,6 +184,29 @@ def _should_update_stack_members(current_value: object, new_value: int, only_inc
     return True
 
 
+PRUNE_BRAKE_MIN = 5   # up to this many deletions of one kind never trip the brake
+
+
+def prune_brake(stale: dict, current: dict, max_percent: int) -> Optional[dict]:
+    """
+    Bulk rebuild brake: the first kind (interfaces, modules, inventory, sfps)
+    of which a rebuild would delete more than max_percent — stale against
+    stale + what this Netdisco snapshot still reports — and more than
+    PRUNE_BRAKE_MIN items. None: nothing trips it.
+
+    A snapshot with the ports intact but no module or SFP inventory would
+    otherwise delete every module and SFP of the device.
+    """
+    for kind, have in current.items():
+        n = stale.get(kind, 0)
+        if n <= PRUNE_BRAKE_MIN:
+            continue
+        percent = round(100 * n / (n + have))
+        if percent > max_percent:
+            return {"kind": kind.removesuffix("_deleted"), "stale": n, "total": n + have, "percent": percent}
+    return None
+
+
 def _recently_touched(touch_value: object, cooldown_days: int, today: Optional[date] = None) -> bool:
     """
     Whether a device's touch field shows a real config change within cooldown_days.
@@ -313,6 +336,7 @@ def _sync_device(
                                                       # (config interface_defaults; see apply_interface_defaults)
     prune: bool = False,
     dry_run: bool = True,
+    prune_max_delete_percent: Optional[int] = None,  # bulk rebuild brake (see prune_brake); None = off
     _held_locks: Optional[list] = None,
 ) -> dict:
     """
@@ -331,6 +355,8 @@ def _sync_device(
     increase-only ratchet. Unlike the rest of sync_device this is destructive —
     it's meant for an explicit manual rebuild, never the regular background sync.
     dry_run (default True) reports what prune would delete without deleting it.
+    With prune_max_delete_percent a rebuild that would delete more than that
+    share of one kind keeps its deletions back: prune["blocked"] says which.
     """
     log = _DeviceLogAdapter(logger, {"ip": ip})
 
@@ -2015,27 +2041,55 @@ def _sync_device(
         devices_to_prune = {nb_device.id: nb_device}
         for dev in slot_to_device.values():
             devices_to_prune[dev.id] = dev
-        for dev in devices_to_prune.values():
-            prune_counts["interfaces_deleted"] += nb.remove_stale_interfaces(
-                dev, nd_port_names, iface_source_cf, iface_source_value, dry_run=dry_run,
-            )
-            # Modules/fans/PSUs/SFPs are only pruned when this run actually synced
-            # them — current_*_by_device would otherwise be empty (nothing "current"
-            # was recorded this run) and every existing item would look stale.
-            if sync_modules:
-                mod_deleted, mod_skipped = nb.remove_stale_modules(
-                    dev, current_module_names_by_device.get(dev.id, set()),
-                    iface_source_cf, iface_source_value, dry_run=dry_run,
+
+        def _prune_pass(dry: bool) -> dict:
+            c = {"interfaces_deleted": 0, "modules_deleted": 0, "modules_skipped_foreign": 0,
+                 "inventory_deleted": 0, "sfps_deleted": 0}
+            for dev in devices_to_prune.values():
+                c["interfaces_deleted"] += nb.remove_stale_interfaces(
+                    dev, nd_port_names, iface_source_cf, iface_source_value, dry_run=dry,
                 )
-                prune_counts["modules_deleted"] += mod_deleted
-                prune_counts["modules_skipped_foreign"] += mod_skipped
-                prune_counts["inventory_deleted"] += nb.remove_stale_bare_inventory_items(
-                    dev, current_bare_inventory_names_by_device.get(dev.id, set()), dry_run=dry_run,
+                # Modules/fans/PSUs/SFPs are only pruned when this run actually synced
+                # them — current_*_by_device would otherwise be empty (nothing "current"
+                # was recorded this run) and every existing item would look stale.
+                if sync_modules:
+                    mod_deleted, mod_skipped = nb.remove_stale_modules(
+                        dev, current_module_names_by_device.get(dev.id, set()),
+                        iface_source_cf, iface_source_value, dry_run=dry,
+                    )
+                    c["modules_deleted"] += mod_deleted
+                    c["modules_skipped_foreign"] += mod_skipped
+                    c["inventory_deleted"] += nb.remove_stale_bare_inventory_items(
+                        dev, current_bare_inventory_names_by_device.get(dev.id, set()), dry_run=dry,
+                    )
+                if sync_sfp:
+                    c["sfps_deleted"] += nb.remove_stale_sfps(
+                        dev, current_sfp_iface_ids, dry_run=dry,
+                    )
+            return c
+
+        blocked = None
+        if prune_max_delete_percent is not None:
+            # count first, delete only when the brake lets it through
+            preview = _prune_pass(True)
+            ids = devices_to_prune.keys()
+            blocked = prune_brake(preview, {
+                "interfaces_deleted": len(nd_port_names),
+                "modules_deleted": sum(len(current_module_names_by_device.get(i, ())) for i in ids),
+                "inventory_deleted": sum(len(current_bare_inventory_names_by_device.get(i, ())) for i in ids),
+                "sfps_deleted": len(current_sfp_iface_ids),
+            }, prune_max_delete_percent)
+            if blocked or dry_run:
+                prune_counts.update(preview)
+            if blocked:
+                prune_counts["blocked"] = blocked
+                log.warning(
+                    "Prune blocked: %s would lose %d of %d (%d%% > %d%%): nothing deleted, "
+                    "check the device and use /rebuild for it",
+                    blocked["kind"], blocked["stale"], blocked["total"], blocked["percent"], prune_max_delete_percent,
                 )
-            if sync_sfp:
-                prune_counts["sfps_deleted"] += nb.remove_stale_sfps(
-                    dev, current_sfp_iface_ids, dry_run=dry_run,
-                )
+        if not blocked and not (dry_run and prune_max_delete_percent is not None):
+            prune_counts.update(_prune_pass(dry_run))
         log.info(
             "Prune%s: interfaces=%d modules=%d (skipped_foreign=%d) inventory=%d sfps=%d",
             " [dry-run]" if dry_run else "",
@@ -2043,7 +2097,7 @@ def _sync_device(
             prune_counts["modules_skipped_foreign"], prune_counts["inventory_deleted"],
             prune_counts["sfps_deleted"],
         )
-        if not dry_run and any(
+        if not dry_run and not blocked and any(
             prune_counts[k] for k in ("interfaces_deleted", "modules_deleted", "inventory_deleted", "sfps_deleted")
         ):
             device_changed = True
@@ -2052,7 +2106,7 @@ def _sync_device(
     if cf_touch and device_changed:
         stamps[cf_touch] = date.today().isoformat()
     # Rebuild stamp: only when the CF exists on Device (Netbox lists every defined CF)
-    if (prune and not dry_run and cf_inventory_rebuild
+    if (prune and not dry_run and not prune_counts.get("blocked") and cf_inventory_rebuild
             and cf_inventory_rebuild in (getattr(nb_device, "custom_fields", {}) or {})):
         stamps[cf_inventory_rebuild] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     if stamps:

@@ -30,6 +30,7 @@ The main `discobox.yaml` sections:
 | `custom_fields`, `cabling` | Custom field names discobox writes and reads; null disables one |
 | `types`, `library` | DeviceType resolution (aliases, `create_missing`) and devicetype-library enrichment |
 | `refresh_ip` | DNS suffixes (`domains`) and role blacklist (`exclude_roles`, default `lwapp-ap`) for `/refresh-ip` |
+| `rebuild` | Limits of the bulk rebuild `/rebuild/all`: devices per run (`max_devices`, 20) and the delete brake (`max_delete_percent`, 50; `null` = off) |
 | `aps` | WLC access point pass |
 | `reconcile`, `auto_create` | Device selection for the gaps job, the `liveness` gate, discover-missing limits, auto-created devices |
 | `interface_defaults` | Rules (`match` device paths by regex, `set` interface custom fields) that fill empty interface custom fields, e.g. `interface_severity: warning` where `custom_fields.service_team` matches `netops\|campus`; see [Features](features.md) |

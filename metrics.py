@@ -70,8 +70,9 @@ aps_total = Counter(
 )
 rebuilds_total = Counter(
     "discobox_rebuilds_total",
-    "/rebuild calls by outcome (error = the rebuild aborted, e.g. Netbox/Netdisco failed)",
-    ["status", "dry_run"],   # success | error | skipped
+    "Rebuilds (/rebuild, /rebuild/all) by outcome (error = aborted, e.g. Netbox/Netdisco failed; "
+    "blocked = the bulk delete brake kept the deletions back)",
+    ["status", "dry_run"],   # success | error | skipped | blocked
     **_reg,
 )
 sync_errors_total = Counter(
