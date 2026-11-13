@@ -37,6 +37,8 @@ sync:
   pause_on_error: false
   touch_cooldown_days: 1    # skip a device's sync while its touch field (below) shows a
                             # real change within this many days; 0 disables the skip
+  skip_tags: [pin-inventory]  # a Netbox device with one of these tags (slugs) is pinned: no
+                            # sync and no rebuild touches it, also with force. [] = off
   ha_resolve:               # resolve a vendor-reported HA hostname (e.g. a FortiGate's own
                             # `hostname`, unrelated to its NetBox name) to the correct NetBox
                             # device via a metric whose labels already carry that mapping —

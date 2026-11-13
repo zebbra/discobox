@@ -207,6 +207,17 @@ def prune_brake(stale: dict, current: dict, max_percent: int) -> Optional[dict]:
     return None
 
 
+def _pinned_by(nb_device: object, skip_tags: Optional[list[str]]) -> Optional[str]:
+    """The first of skip_tags (slugs) the Netbox device carries, else None."""
+    if not skip_tags:
+        return None
+    for tag in getattr(nb_device, "tags", None) or []:
+        slug = tag.get("slug") if isinstance(tag, dict) else getattr(tag, "slug", None)
+        if slug in skip_tags:
+            return slug
+    return None
+
+
 def _recently_touched(touch_value: object, cooldown_days: int, today: Optional[date] = None) -> bool:
     """
     Whether a device's touch field shows a real config change within cooldown_days.
@@ -334,6 +345,7 @@ def _sync_device(
     ap_full: bool = False,  # WLC: update every AP even when the AP list's fingerprint is unchanged
     interface_defaults: Optional[list[dict]] = None,  # fill empty interface CFs per device CF
                                                       # (config interface_defaults; see apply_interface_defaults)
+    skip_tags: Optional[list[str]] = None,  # device tag slugs that pin a device: never synced or rebuilt
     prune: bool = False,
     dry_run: bool = True,
     prune_max_delete_percent: Optional[int] = None,  # bulk rebuild brake (see prune_brake); None = off
@@ -434,6 +446,12 @@ def _sync_device(
                 _held_locks.append(lock)
             else:
                 log.warning("  %s still busy after %ds: syncing anyway", nb_device.name, DEVICE_LOCK_WAIT_S)
+
+    pinned = _pinned_by(nb_device, skip_tags)
+    if pinned:
+        log.info("  %s has the tag %r: pinned, skipping sync", nb_device.name, pinned)
+        return {"ok": True, "reason": "pinned", "hostname": nd_hostname,
+                "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
 
     if cf_touch:
         touch_value = dict(getattr(nb_device, "custom_fields", {}) or {}).get(cf_touch)

@@ -93,6 +93,7 @@ class Sync(_Section):
     remove_orphaned_interfaces: Optional[bool] = None   # unset: follows housekeeping
     orphan_delete_max_percent: int = 25
     touch_cooldown_days: int = 1
+    skip_tags: StrList = ["pin-inventory"]   # device tag slugs: never synced or rebuilt
     max_concurrent: int = 3
     max_queue: int = 10000
     retry: Retry = Retry()

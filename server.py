@@ -229,6 +229,7 @@ _ORPHAN_DELETE_MAX_PERCENT: int     = _S.sync.orphan_delete_max_percent
 _INTERFACE_DEFAULTS: list[dict]     = [r.model_dump() for r in _S.interface_defaults]
 _AP_TYPE_CONFIRMED_UNTAG: list      = list(_S.aps.type_confirmed_untag)
 _TOUCH_COOLDOWN_DAYS: int           = _S.sync.touch_cooldown_days
+_SYNC_SKIP_TAGS: list               = list(_S.sync.skip_tags)
 
 _TYPES_CREATE_MISSING: bool          = _S.types.create_missing
 
@@ -1031,9 +1032,10 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             remove_orphaned_interfaces=_REMOVE_ORPHANED,
             orphan_delete_max_percent=_ORPHAN_DELETE_MAX_PERCENT,
             interface_defaults=_INTERFACE_DEFAULTS,
+            skip_tags=_SYNC_SKIP_TAGS,
         )
         status = "success" if result.get("ok") else "error"
-        if result.get("reason") in ("discovery_incomplete", "recently_touched"):
+        if result.get("reason") in ("discovery_incomplete", "recently_touched", "pinned"):
             syncs_skipped_total.labels(reason=result["reason"]).inc()
         if result.get("reason") == "discovery_incomplete":
             # Transient: Netdisco still shows ifIndex placeholders as port names.
@@ -1044,6 +1046,9 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             # Netbox-side touch field already shows a change within the cooldown
             # window: not an error, and no local cooldown mark needed since the
             # touch field itself is the throttle signal for the next attempt.
+            status = "skipped"
+        if result.get("reason") == "pinned":
+            # A tag from sync.skip_tags on the Netbox device: left alone on purpose.
             status = "skipped"
         if result.get("reason") == "not_in_netdisco":
             # Netdisco 404s the IP (a /sync for a Netbox device Netdisco doesn't
@@ -1270,6 +1275,7 @@ def _rebuild_device(host: str, dry_run: bool, max_delete_percent: Optional[int] 
             ap_type_confirmed_untag=_AP_TYPE_CONFIRMED_UNTAG,
             orphan_delete_max_percent=_ORPHAN_DELETE_MAX_PERCENT,
             interface_defaults=_INTERFACE_DEFAULTS,
+            skip_tags=_SYNC_SKIP_TAGS,
             prune=True, dry_run=dry_run,
             prune_max_delete_percent=max_delete_percent,
         )

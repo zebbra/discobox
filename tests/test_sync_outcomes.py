@@ -105,6 +105,24 @@ def test_hook_level_skips_count_with_reason(monkeypatch) -> None:
     assert counts["cooldown"] == 1 and counts["in_progress"] == 1
 
 
+def test_pin_tag_is_found_by_slug() -> None:
+    from types import SimpleNamespace
+
+    from discobox.sync import _pinned_by
+    dev = SimpleNamespace(tags=[SimpleNamespace(slug="core"), {"slug": "pin-inventory"}])
+    assert _pinned_by(dev, ["pin-inventory"]) == "pin-inventory"
+    assert _pinned_by(dev, ["other"]) is None
+    assert _pinned_by(dev, []) is None
+    assert _pinned_by(SimpleNamespace(tags=None), ["pin-inventory"]) is None
+
+
+def test_pinned_device_counts_as_skipped(monkeypatch, tmp_path) -> None:
+    reasons = []
+    monkeypatch.setattr(server.syncs_skipped_total, "labels", lambda reason: reasons.append(reason) or _Noop())
+    _run(monkeypatch, tmp_path, {"ok": True, "reason": "pinned", "hostname": "sw1"})
+    assert reasons == ["pinned"]
+
+
 class _Noop:
     def inc(self, *a) -> None: ...
     def set(self, *a) -> None: ...

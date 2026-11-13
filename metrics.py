@@ -105,7 +105,7 @@ syncs_skipped_total = Counter(
     "discobox_syncs_skipped_total",
     "Syncs not done, by reason: cooldown | in_progress | queue_full (hook dropped before queuing; "
     "queue_full means the device waits for its next hook or discover-missing), discovery_incomplete | "
-    "recently_touched (sync started, then skipped; also in discobox_syncs_total{status=\"skipped\"})",
+    "recently_touched | pinned (sync started, then skipped; also in discobox_syncs_total{status=\"skipped\"})",
     ["reason"],
     **_reg,
 )
