@@ -288,6 +288,7 @@ _RECONCILE_MAX_ENQUEUE:   Optional[int] = _S.reconcile.max_enqueue
 _RECONCILE_ROLES:         list[str]     = list(_S.reconcile.roles)
 _RECONCILE_STATUSES:      list[str]     = list(_S.reconcile.statuses)
 _RECONCILE_REQUIRE_AUTH_TAG: bool       = _S.reconcile.require_auth_tag
+_RECONCILE_EXCLUDE:       list[dict]    = [r.model_dump() for r in _S.reconcile.exclude]
 # Reconcile enqueues more discovery work on top of whatever's already syncing —
 # the last thing a large hook-triggered backlog needs is reconcile piling on
 # more load while it's still draining. Deferred (not skipped): re-checked every
@@ -495,6 +496,7 @@ def _run_gaps() -> dict:
         liveness=_fetch_liveness_safe(),
         liveness_key=_LIVENESS_KEY,
         not_in_netbox_stale_hours=_NOT_IN_NETBOX_STALE_HOURS,
+        exclude=_RECONCILE_EXCLUDE,
     )
     gaps_netbox_devices.set(counts["netbox_total"])
     gaps_netdisco_devices.set(counts["netdisco_total"])
@@ -536,6 +538,8 @@ def _job_gaps() -> JobResult:
     if c["offline"]:
         parts.append(f"{c['offline']} offline")
     parts.append(f"{c['tag_mismatches']} tag mismatches")
+    if c.get("excluded"):
+        parts.append(f"{c['excluded']} excluded")
     return JobResult(summary=", ".join(parts), data=c)
 
 

@@ -10,7 +10,7 @@ import requests
 
 from .netbox import NetboxClient
 from .netdisco import NetdiscoClient
-from .util import discover_snmptimeout_us, read_cf, vendor_from_chassis
+from .util import discover_snmptimeout_us, first_matching_rule, read_cf, vendor_from_chassis
 
 
 def _slugify(text: str) -> str:
@@ -358,6 +358,7 @@ def find_gaps(
     liveness: Optional[dict] = None,   # from fetch_liveness(); None = no liveness status
     liveness_key: str = "ip",          # device attribute matched against liveness keys: ip | name
     not_in_netbox_stale_hours: Optional[float] = 24,   # see _stale_cutoff; None/0 = off
+    exclude: Optional[list] = None,    # [{"name", "match"}]: Netbox devices left out entirely
 ) -> dict:
     """
     Compare Netbox with Netdisco (read-only on both): Netbox devices (roles,
@@ -374,6 +375,9 @@ def find_gaps(
     not_in_netbox_stale_hours older than Netdisco's newest one are gone (or
     unreachable): listed with "stale": true, not counted, never auto-created.
 
+    Netbox devices matching an exclude rule are counted as excluded and land
+    in no list, so neither discover-missing nor fix-tags pushes them.
+
     Raises when Netdisco's device list can't be fetched.
     """
     log = logging.getLogger("discobox.reconcile")
@@ -383,7 +387,8 @@ def find_gaps(
 
     role_filter = {"role": roles} if roles else {}
     status_filter = statuses or ["active"]
-    counts = {"netbox_total": 0, "netdisco_total": len(nd_by_ip), "already_known": 0, "skipped": 0}
+    counts = {"netbox_total": 0, "netdisco_total": len(nd_by_ip), "already_known": 0, "skipped": 0,
+              "excluded": 0}
     not_in_netdisco: list[dict] = []
     tag_mismatches: list[dict] = []
     for device in nb.nb.dcim.devices.filter(status=status_filter, has_primary_ip=True, **role_filter):
@@ -393,6 +398,11 @@ def find_gaps(
             counts["skipped"] += 1
             continue
         ip = str(primary).split("/")[0]
+        rule = first_matching_rule(device, exclude)
+        if rule:
+            counts["excluded"] += 1
+            log.debug("Gaps: %s (%s) excluded by rule [%s]", device.name, ip, rule)
+            continue
         cf = getattr(device, "custom_fields", {}) or {}
         nb_tag = read_cf(cf, "auth_profile")
         snmp_timeout = read_cf(cf, "snmp_timeout")
@@ -440,8 +450,9 @@ def find_gaps(
         "not_in_netbox": len(not_in_netbox) - stale, "not_in_netbox_stale": stale,
         "tag_mismatches": len(tag_mismatches),
     })
-    log.info("Gaps: not_in_netdisco=%d (+%d offline)  not_in_netbox=%d (+%d stale)  tag_mismatches=%d",
-             counts["not_in_netdisco"], offline, counts["not_in_netbox"], stale, len(tag_mismatches))
+    log.info("Gaps: not_in_netdisco=%d (+%d offline)  not_in_netbox=%d (+%d stale)  tag_mismatches=%d  excluded=%d",
+             counts["not_in_netdisco"], offline, counts["not_in_netbox"], stale, len(tag_mismatches),
+             counts["excluded"])
     counts["not_in_netdisco_list"] = not_in_netdisco
     counts["not_in_netbox_list"] = not_in_netbox
     counts["tag_mismatches_list"] = tag_mismatches

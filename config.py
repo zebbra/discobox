@@ -177,6 +177,27 @@ class Liveness(_Section):
     tls_verify: bool = True
 
 
+def _match_patterns(value: Any) -> Any:
+    if not isinstance(value, dict) or not value:
+        raise ValueError("match needs at least one path: pattern")
+    out = {}
+    for path, pattern in value.items():
+        pattern = "" if pattern is None else str(pattern)
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ValueError(f"match {path}: invalid pattern {pattern!r}: {exc}") from None
+        out[str(path)] = pattern
+    return out
+
+
+class ExcludeRule(_Section):
+    name: str = ""
+    match: Annotated[dict[str, str], BeforeValidator(_match_patterns)]
+                                      # dotted device path → regex (fullmatch, case-insensitive),
+                                      # all must match: name, device_type.model, site.slug, tags
+
+
 class Reconcile(_Section):
     max_queued: Optional[int] = None
     max_failed: Optional[int] = None
@@ -187,6 +208,7 @@ class Reconcile(_Section):
     defer_if_queued: bool = True
     defer_seconds: int = 3600
     not_in_netbox_stale_hours: Optional[float] = 24
+    exclude: list[ExcludeRule] = []   # Netbox devices never pushed to Netdisco (gaps, discover-missing, fix-tags)
     liveness: Liveness = Liveness()
 
 
@@ -209,20 +231,6 @@ class Jobs(_Section):
     gaps: GapsSchedule = GapsSchedule(interval=3600)
     discover_missing: JobSchedule = Field(default=JobSchedule(interval=86400), alias="discover-missing")
     types_bare: JobSchedule = Field(default=JobSchedule(interval=3600), alias="types-bare")
-
-
-def _match_patterns(value: Any) -> Any:
-    if not isinstance(value, dict) or not value:
-        raise ValueError("match needs at least one path: pattern")
-    out = {}
-    for path, pattern in value.items():
-        pattern = "" if pattern is None else str(pattern)
-        try:
-            re.compile(pattern)
-        except re.error as exc:
-            raise ValueError(f"match {path}: invalid pattern {pattern!r}: {exc}") from None
-        out[str(path)] = pattern
-    return out
 
 
 class InterfaceDefault(_Section):

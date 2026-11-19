@@ -409,3 +409,15 @@ def test_discover_missing_rotates_least_recently_tried_first() -> None:
     assert runs == [["10.0.1.1", "10.0.1.2"], ["10.0.1.3", "10.0.1.4"], ["10.0.1.5", "10.0.1.1"]]
     assert attempts["10.0.1.1"] == {"last": 300.0, "count": 2}
     assert attempts["10.0.1.5"] == {"last": 300.0, "count": 1}
+
+
+def test_find_gaps_leaves_out_excluded_devices() -> None:
+    lab = FakeDevice("lab-sw-1", "10.0.0.1")
+    meraki = FakeDevice("sw-2", "10.0.0.2")
+    meraki.device_type = {"model": "MS120-8", "manufacturer": {"slug": "meraki"}}
+    keep = FakeDevice("sw-3", "10.0.0.3")
+    rules = [{"name": "lab", "match": {"name": "LAB-.*"}},
+             {"name": "", "match": {"device_type.manufacturer.slug": "meraki", "device_type.model": "MS.*"}}]
+    gaps = find_gaps(FakeND(), FakeNB([lab, meraki, keep]), exclude=rules)
+    assert [e["name"] for e in gaps["not_in_netdisco_list"]] == ["sw-3"]
+    assert gaps["excluded"] == 2 and gaps["not_in_netdisco"] == 1

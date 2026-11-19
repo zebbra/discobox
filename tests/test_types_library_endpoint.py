@@ -112,7 +112,7 @@ def test_gaps_view_runs_the_gaps_job_read_only(monkeypatch) -> None:
     _gaps_env(monkeypatch, fake_find_gaps)
     monkeypatch.setattr(server, "_is_paused", lambda: True)          # read-only: runs while paused
     r = server.gaps_view(lists=False, refresh=False, wait=True)     # GET /gaps?wait=true
-    assert set(seen) == {"roles", "statuses", "liveness", "liveness_key", "not_in_netbox_stale_hours"}
+    assert set(seen) == {"roles", "statuses", "liveness", "liveness_key", "not_in_netbox_stale_hours", "exclude"}
     assert {k: r[k] for k in GAP_COUNTS} == GAP_COUNTS
     assert r["last_run"]["status"] == "ok" and r["running"] is False and r["refresh_started"] is False
     # lists come from the saved gap files

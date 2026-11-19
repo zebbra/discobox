@@ -192,6 +192,15 @@ reconcile:                  # gaps selection and discover-missing limits
                              # newest by more than this are gone or unreachable: listed as stale
                              # (/not-in-netbox, collapsed on /), not counted in
                              # discobox_gaps_not_in_netbox, never auto-created. 0 = off
+  # exclude:                 # Netbox devices never pushed to Netdisco: left out of the gaps lists,
+  #                          # so neither discover-missing nor fix-tags touches them (counted as excluded).
+  #                          # Dotted device path: regex (fullmatch, case-insensitive), all must match
+  #   - name: lab gear
+  #     match:
+  #       name: "lab-.*"
+  #   - name: meraki
+  #     match:
+  #       device_type.manufacturer.slug: meraki
   liveness:                 # skip enqueueing devices a metrics store reports as down
     url: null               # Prometheus-compatible query API incl. tenant prefix, e.g.
                             # http://vmselect:8481/select/0/prometheus — null disables

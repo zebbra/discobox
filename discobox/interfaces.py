@@ -1,6 +1,5 @@
 """Interfaces: Netdisco port → Netbox interface, matching, PoE, orphan removal."""
 
-import functools
 import logging
 import re
 from typing import Optional
@@ -10,6 +9,9 @@ from .util import (
     NO_POE_IFACE_TYPES,
     PORT_BLACKLIST_PREFIXES,
     _delete_with_retry,
+    _get_path,
+    _match_strings,
+    _pattern,
     _slot_from_iface,
     clean_mac,
     map_iftype,
@@ -339,28 +341,6 @@ NON_PHYSICAL_IFACE_TYPES = frozenset({"virtual", "bridge", "lag"})
 def _is_physical_iface(iface) -> bool:
     t = getattr(getattr(iface, "type", None), "value", None) or ""
     return t not in NON_PHYSICAL_IFACE_TYPES and not t.startswith("ieee802.11") and t != "other-wireless"
-
-
-def _get_path(obj, dotted: str):
-    """A pynetbox Record or nested dict by dot-notation: status.value, role.slug, custom_fields.team."""
-    for part in dotted.split("."):
-        if obj is None:
-            return None
-        obj = obj.get(part) if isinstance(obj, dict) else getattr(obj, part, None)
-    return obj
-
-
-def _match_strings(raw) -> list[str]:
-    """The value(s) a pattern is matched against; list fields (tags, multi-select) by element, slug first."""
-    if isinstance(raw, (list, tuple)):
-        return [str((item.get("slug") if isinstance(item, dict) else getattr(item, "slug", None)) or item)
-                for item in raw]
-    return ["" if raw is None else str(raw)]
-
-
-@functools.lru_cache(maxsize=256)
-def _pattern(pattern: str) -> re.Pattern:
-    return re.compile(pattern, re.IGNORECASE)
 
 
 def interface_defaults_for(device, rules: list[dict], log=None) -> list[dict]:

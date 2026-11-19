@@ -1,5 +1,6 @@
 """Small helpers and shared constants: parsing, names, MACs, Netbox write retries, device locks."""
 
+import functools
 import ipaddress
 import random
 import re
@@ -549,3 +550,39 @@ def _merged_custom_fields(device: pynetbox.core.response.Record, updates: dict) 
     merged = dict(getattr(device, "custom_fields", {}) or {})
     merged.update(updates)
     return merged
+
+
+def _get_path(obj, dotted: str):
+    """A pynetbox Record or nested dict by dot-notation: status.value, role.slug, custom_fields.team."""
+    for part in dotted.split("."):
+        if obj is None:
+            return None
+        obj = obj.get(part) if isinstance(obj, dict) else getattr(obj, part, None)
+    return obj
+
+
+def _match_strings(raw) -> list[str]:
+    """The value(s) a pattern is matched against; list fields (tags, multi-select) by element, slug first."""
+    if isinstance(raw, (list, tuple)):
+        return [str((item.get("slug") if isinstance(item, dict) else getattr(item, "slug", None)) or item)
+                for item in raw]
+    return ["" if raw is None else str(raw)]
+
+
+@functools.lru_cache(maxsize=256)
+def _pattern(pattern: str) -> re.Pattern:
+    return re.compile(pattern, re.IGNORECASE)
+
+
+def device_matches(device, match: dict) -> bool:
+    """Every dotted path's value fullmatches its pattern (case-insensitive); list fields by any element."""
+    return all(any(_pattern(p).fullmatch(v) for v in _match_strings(_get_path(device, path)))
+               for path, p in match.items())
+
+
+def first_matching_rule(device, rules: list[dict]) -> Optional[str]:
+    """The label (name, else #n) of the first rule whose match fits the device, else None."""
+    for i, rule in enumerate(rules or []):
+        if device_matches(device, rule["match"]):
+            return rule.get("name") or f"#{i + 1}"
+    return None
