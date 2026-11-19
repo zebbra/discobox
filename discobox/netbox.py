@@ -22,6 +22,7 @@ from .util import (
     _split_aliases,
     is_oid_model,
     parse_os_release,
+    part_number_for,
     slugify,
 )
 
@@ -740,7 +741,9 @@ class NetboxClient:
             existing = next((r for r in results if getattr(r, "slug", None) == slug), None)
         if existing:
             if not getattr(existing, "part_number", None):
-                existing.update({"part_number": part_number or model})
+                pn = part_number_for(part_number or model)
+                if pn:
+                    existing.update({"part_number": pn})
             return existing
         if not create:
             logger.debug("  DeviceType %s / %s not in Netbox: lookup only, not created", manufacturer.name, model)
@@ -755,7 +758,7 @@ class NetboxClient:
             manufacturer=manufacturer.id,
             model=model,
             slug=slugify(model),
-            part_number=part_number or model,
+            part_number=part_number_for(part_number or model) or "",
             comments=CREATED_BY_COMMENT,
             **self._type_source_kwargs("dcim.devicetype"),
         )
@@ -787,22 +790,24 @@ class NetboxClient:
                 model, vendor or getattr(manufacturer, "name", None),
             )
             return None
-        results = list(self.nb.dcim.module_types.filter(part_number=model))
-        existing = next((r for r in results if getattr(r, "part_number", None) == model), None)
-        if existing:
-            return existing
+        pn = part_number_for(model)
+        if pn:
+            results = list(self.nb.dcim.module_types.filter(part_number=pn))
+            existing = next((r for r in results if getattr(r, "part_number", None) == pn), None)
+            if existing:
+                return existing
         slug = slugify(model)
         results = list(self.nb.dcim.module_types.filter(manufacturer_id=manufacturer.id, model=model))
         existing = next((r for r in results if getattr(r, "model", None) == model), None)
-        if not existing:
-            results = list(self.nb.dcim.module_types.filter(manufacturer_id=manufacturer.id, part_number=model))
-            existing = next((r for r in results if getattr(r, "part_number", None) == model), None)
+        if not existing and pn:
+            results = list(self.nb.dcim.module_types.filter(manufacturer_id=manufacturer.id, part_number=pn))
+            existing = next((r for r in results if getattr(r, "part_number", None) == pn), None)
         if not existing:
             results = list(self.nb.dcim.module_types.filter(manufacturer_id=manufacturer.id, slug=slug))
             existing = next((r for r in results if getattr(r, "slug", None) == slug), None)
         if existing:
-            if not getattr(existing, "part_number", None):
-                existing.update({"part_number": model})
+            if not getattr(existing, "part_number", None) and pn:
+                existing.update({"part_number": pn})
             return existing
         if not self.create_missing_types:
             logger.warning(
@@ -814,7 +819,7 @@ class NetboxClient:
             manufacturer=manufacturer.id,
             model=model,
             slug=slugify(model),
-            part_number=model,
+            part_number=pn or "",
             comments=CREATED_BY_COMMENT,
             **self._type_source_kwargs("dcim.moduletype"),
         )

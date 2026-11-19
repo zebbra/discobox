@@ -149,6 +149,23 @@ def is_oid_model(value: Optional[str]) -> bool:
     return bool(value) and bool(_OID_MODEL_RE.match(value.strip()))
 
 
+PART_NUMBER_MAX = 50   # Netbox DeviceType/ModuleType part_number max_length
+_TRAILING_PID_RE = re.compile(r".+\s-\s([A-Za-z0-9][\w./+-]*)$")
+
+
+def part_number_for(model: Optional[str]) -> Optional[str]:
+    """
+    The part_number for a type from a raw model. Netbox allows 50 characters:
+    a longer model like Cisco's "Fabric Extender Module: 48x10GE, ... -
+    N2K-C2348TQ-10G-E" gives the PID after its last " - ", else no part_number.
+    """
+    model = (model or "").strip()
+    if len(model) <= PART_NUMBER_MAX:
+        return model or None
+    m = _TRAILING_PID_RE.match(model)
+    return m.group(1) if m and len(m.group(1)) <= PART_NUMBER_MAX else None
+
+
 def _norm_vendor(value: Optional[str]) -> str:
     """Vendor name → comparison key: "Efficient IP", "efficientip" and "EfficientIP" are equal."""
     return re.sub(r"[^a-z0-9]", "", (value or "").lower())

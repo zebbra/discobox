@@ -250,3 +250,28 @@ def test_resolve_alias_with_vendor():
     nb = _client([N9K], device_type_aliases=SCOPED)
     assert nb.resolve_device_type_alias(".1570", vendor="cisco") is N9K
     assert nb.resolve_device_type_alias(".1570") is None
+
+
+FEX_MODULE = "Fabric Extender Module: 48x10GE, 24x10GE/6x40G QSFP - N2K-C2348TQ-10G-E"
+
+
+def test_part_number_for_long_models():
+    from discobox.util import part_number_for
+    assert part_number_for("C9300-48P") == "C9300-48P"
+    assert part_number_for(FEX_MODULE) == "N2K-C2348TQ-10G-E"
+    assert part_number_for("x" * 51) is None
+    assert part_number_for("") is None
+
+
+def test_long_module_model_created_with_its_pid_as_part_number():
+    nb = _client([])
+    mt = nb.get_or_create_module_type(SimpleNamespace(id=3, name="Cisco"), FEX_MODULE)
+    assert mt.model == FEX_MODULE and mt.part_number == "N2K-C2348TQ-10G-E"
+
+
+def test_long_module_model_found_by_its_pid():
+    fex = FakeType(id=41, model="N2K-C2348TQ-10G-E", part_number="N2K-C2348TQ-10G-E", slug="n2k-c2348tq-10g-e",
+                   manufacturer=SimpleNamespace(id=3, name="Cisco"), custom_fields={})
+    nb = _client([], [fex])
+    assert nb.get_or_create_module_type(SimpleNamespace(id=3, name="Cisco"), FEX_MODULE) is fex
+    assert nb.nb.dcim.module_types.created == []
