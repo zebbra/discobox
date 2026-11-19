@@ -1,52 +1,29 @@
 {
-  "__inputs": [
-    {
-      "name": "DS_PROMETHEUS",
-      "label": "Prometheus",
-      "description": "",
-      "type": "datasource",
-      "pluginId": "prometheus",
-      "pluginName": "Prometheus"
-    }
+  "uid": "discobox",
+  "title": "Discobox",
+  "description": "discobox: Netdisco \u2192 Netbox sync, jobs and gaps",
+  "tags": [
+    "discobox",
+    "netdisco",
+    "netbox"
   ],
-  "__elements": {},
-  "__requires": [
-    {
-      "type": "grafana",
-      "id": "grafana",
-      "name": "Grafana",
-      "version": "10.0.0"
-    },
-    {
-      "type": "datasource",
-      "id": "prometheus",
-      "name": "Prometheus",
-      "version": "1.0.0"
-    },
-    {
-      "type": "panel",
-      "id": "stat",
-      "name": "Stat",
-      "version": ""
-    },
-    {
-      "type": "panel",
-      "id": "timeseries",
-      "name": "Time series",
-      "version": ""
-    },
-    {
-      "type": "panel",
-      "id": "table",
-      "name": "Table",
-      "version": ""
-    }
-  ],
+  "editable": false,
+  "graphTooltip": 1,
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timezone": "browser",
   "annotations": {
     "list": [
       {
         "builtIn": 1,
-        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
         "enable": true,
         "hide": true,
         "iconColor": "rgba(0, 211, 255, 1)",
@@ -55,1185 +32,1259 @@
       }
     ]
   },
-  "description": "Discobox — Netdisco sync pipeline monitoring",
-  "editable": true,
-  "fiscalYearStartMonth": 0,
-  "graphTooltip": 1,
-  "id": null,
+  "templating": {
+    "list": []
+  },
   "links": [],
   "panels": [
-
     {
       "id": 1,
-      "title": "Sync Paused",
-      "type": "stat",
-      "gridPos": {"h": 4, "w": 3, "x": 0, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
+      "type": "row",
+      "title": "Overview",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
       },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Sync paused",
+      "description": "POST /sync/pause, or the auto-pause after repeated failures.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_sync_paused)",
+          "legendFormat": "__auto",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code"
+        }
+      ],
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "thresholds"},
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
           "mappings": [
             {
               "type": "value",
               "options": {
-                "0": {"color": "green", "index": 0, "text": "Running"},
-                "1": {"color": "red",   "index": 1, "text": "PAUSED"}
+                "0": {
+                  "text": "no"
+                },
+                "1": {
+                  "text": "PAUSED"
+                }
               }
             }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]
-          }
+          ]
         },
         "overrides": []
       },
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "discobox_sync_paused",
-          "instant": true,
-          "legendFormat": "__auto",
-          "refId": "A"
-        }
-      ]
-    },
-
-    {
-      "id": 2,
-      "title": "Running",
-      "type": "stat",
-      "gridPos": {"h": 4, "w": 3, "x": 3, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {"fixedColor": "blue", "mode": "fixed"},
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [{"color": "blue", "value": null}]
-          }
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "discobox_sync_running",
-          "instant": true,
-          "legendFormat": "__auto",
-          "refId": "A"
-        }
-      ]
+        "wideLayout": true,
+        "showPercentChange": false
+      }
     },
-
     {
       "id": 3,
-      "title": "Queued",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 3, "x": 6, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
+      "title": "Running",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "thresholds"},
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "green",  "value": null},
-              {"color": "yellow", "value": 5},
-              {"color": "red",    "value": 20}
-            ]
-          }
-        },
-        "overrides": []
+      "gridPos": {
+        "h": 4,
+        "w": 2,
+        "x": 3,
+        "y": 1
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "discobox_sync_queued",
-          "instant": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_sync_running)",
           "legendFormat": "__auto",
-          "refId": "A"
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "wideLayout": true,
+        "showPercentChange": false
+      }
     },
-
     {
       "id": 4,
-      "title": "Devices Failing",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 3, "x": 9, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
+      "title": "Queued",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "thresholds"},
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "green",  "value": null},
-              {"color": "yellow", "value": 1},
-              {"color": "red",    "value": 5}
-            ]
-          }
-        },
-        "overrides": []
+      "gridPos": {
+        "h": 4,
+        "w": 2,
+        "x": 5,
+        "y": 1
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "sum(discobox_device_last_sync_failed) or vector(0)",
-          "instant": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_sync_queued)",
           "legendFormat": "__auto",
-          "refId": "A"
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 50
+              },
+              {
+                "color": "red",
+                "value": 200
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "wideLayout": true,
+        "showPercentChange": false
+      }
     },
-
     {
       "id": 5,
-      "title": "Hooks / min",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
+      "title": "Hooks / h",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {"fixedColor": "blue", "mode": "fixed"},
-          "decimals": 2,
-          "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [{"color": "blue", "value": null}]
-          }
-        },
-        "overrides": []
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 7,
+        "y": 1
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "rate(discobox_hooks_received_total[5m]) * 60",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum(increase(discobox_hooks_received_total[1h]))",
           "legendFormat": "__auto",
-          "refId": "A"
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "wideLayout": true,
+        "showPercentChange": false
+      }
     },
-
     {
       "id": 6,
-      "title": "Sync Success Rate",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
+      "title": "Sync success (24h)",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "thresholds"},
-          "decimals": 1,
-          "max": 100,
-          "min": 0,
-          "unit": "percent",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "red",    "value": null},
-              {"color": "yellow", "value": 50},
-              {"color": "green",  "value": 80}
-            ]
-          }
-        },
-        "overrides": []
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 10,
+        "y": 1
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "sum(discobox_syncs_total{status=\"success\"}) / sum(discobox_syncs_total{status=~\"success|error\"}) * 100",
-          "instant": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum(increase(discobox_syncs_total{status=\"success\"}[24h])) / sum(increase(discobox_syncs_total{status=~\"success|error\"}[24h]))",
           "legendFormat": "__auto",
-          "refId": "A"
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.8
+              },
+              {
+                "color": "green",
+                "value": 0.95
+              }
+            ]
+          },
+          "mappings": [],
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "wideLayout": true,
+        "showPercentChange": false
+      }
     },
-
     {
       "id": 7,
-      "title": "Last discover-missing",
       "type": "stat",
-      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 0},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "value_and_name"
+      "title": "Devices failing",
+      "description": "Devices whose last sync failed (discobox_device_last_sync_failed).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "thresholds"},
-          "decimals": 0,
-          "unit": "s",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "green",  "value": null},
-              {"color": "yellow", "value": 3600},
-              {"color": "red",    "value": 7200}
-            ]
-          }
-        },
-        "overrides": []
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 13,
+        "y": 1
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "time() - discobox_job_last_success_timestamp_seconds{job=\"discover-missing\"}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "count(discobox_device_last_sync_failed == 1) or vector(0)",
+          "legendFormat": "__auto",
+          "refId": "A",
+          "range": false,
           "instant": true,
-          "legendFormat": "ago",
-          "refId": "A"
+          "editorMode": "code"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "wideLayout": true,
+        "showPercentChange": false
+      }
     },
-
     {
       "id": 8,
-      "title": "Syncs / min",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "legend": {"calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true},
-        "tooltip": {"mode": "multi", "sort": "desc"}
+      "type": "stat",
+      "title": "Devices with errors",
+      "description": "Last sync completed, but parts of it failed (APs, IPs, modules, notes, \u2026).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
       },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "spanNulls": false,
-            "showPoints": "never"
-          },
-          "decimals": 2,
-          "unit": "short"
-        },
-        "overrides": [
-          {
-            "matcher": {"id": "byName", "options": "success"},
-            "properties": [
-              {"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}},
-              {"id": "custom.fillOpacity", "value": 20}
-            ]
-          },
-          {
-            "matcher": {"id": "byName", "options": "error"},
-            "properties": [
-              {"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}},
-              {"id": "custom.fillOpacity", "value": 20}
-            ]
-          },
-          {
-            "matcher": {"id": "byName", "options": "hooks received"},
-            "properties": [
-              {"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}},
-              {"id": "custom.lineStyle", "value": {"dash": [6, 3], "fill": "dash"}}
-            ]
-          },
-          {
-            "matcher": {"id": "byName", "options": "skipped"},
-            "properties": [
-              {"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}
-            ]
-          }
-        ]
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 16,
+        "y": 1
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "rate(discobox_syncs_total[$__rate_interval]) * 60",
-          "legendFormat": "{{status}}",
-          "refId": "A"
-        },
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "rate(discobox_hooks_received_total[$__rate_interval]) * 60",
-          "legendFormat": "hooks received",
-          "refId": "B"
-        },
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "sum by (reason) (rate(discobox_syncs_skipped_total[$__rate_interval])) * 60",
-          "legendFormat": "skipped: {{reason}}",
-          "refId": "C"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "count(discobox_device_last_sync_errors > 0) or vector(0)",
+          "legendFormat": "__auto",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "wideLayout": true,
+        "showPercentChange": false
+      }
     },
-
     {
       "id": 9,
-      "title": "Concurrency",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true},
-        "tooltip": {"mode": "multi", "sort": "desc"}
+      "type": "stat",
+      "title": "Orphan brake",
+      "description": "Devices whose orphan interface cleanup was held back by the delete brake.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
       },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 15,
-            "spanNulls": false,
-            "showPoints": "never"
-          },
-          "unit": "short"
-        },
-        "overrides": [
-          {
-            "matcher": {"id": "byName", "options": "Queued (waiting + running)"},
-            "properties": [
-              {"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}},
-              {"id": "custom.fillOpacity", "value": 5}
-            ]
-          },
-          {
-            "matcher": {"id": "byName", "options": "Running"},
-            "properties": [
-              {"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}},
-              {"id": "custom.fillOpacity", "value": 25}
-            ]
-          }
-        ]
+      "gridPos": {
+        "h": 4,
+        "w": 2,
+        "x": 19,
+        "y": 1
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "discobox_sync_queued",
-          "legendFormat": "Queued (waiting + running)",
-          "refId": "A"
-        },
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "discobox_sync_running",
-          "legendFormat": "Running",
-          "refId": "B"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "count(discobox_device_orphans_braked > 0) or vector(0)",
+          "legendFormat": "__auto",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "wideLayout": true,
+        "showPercentChange": false
+      }
     },
-
     {
       "id": 10,
-      "title": "Sync Duration Percentiles",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 15, "x": 0, "y": 12},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true},
-        "tooltip": {"mode": "multi", "sort": "desc"}
+      "type": "stat",
+      "title": "Breaker trips (24h)",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
       },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 5,
-            "spanNulls": false,
-            "showPoints": "never"
-          },
-          "unit": "s"
-        },
-        "overrides": [
-          {
-            "matcher": {"id": "byName", "options": "avg"},
-            "properties": [
-              {"id": "custom.lineStyle", "value": {"dash": [6, 3], "fill": "dash"}}
-            ]
-          }
-        ]
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 21,
+        "y": 1
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(discobox_sync_duration_seconds_bucket[$__rate_interval])))",
-          "legendFormat": "p50",
-          "refId": "A"
-        },
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "histogram_quantile(0.9, sum by (le) (rate(discobox_sync_duration_seconds_bucket[$__rate_interval])))",
-          "legendFormat": "p90",
-          "refId": "B"
-        },
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(discobox_sync_duration_seconds_bucket[$__rate_interval])))",
-          "legendFormat": "p99",
-          "refId": "C"
-        },
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "rate(discobox_sync_duration_seconds_sum[$__rate_interval]) / rate(discobox_sync_duration_seconds_count[$__rate_interval])",
-          "legendFormat": "avg",
-          "refId": "D"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum(increase(discobox_circuit_breaker_trips_total[24h])) or vector(0)",
+          "legendFormat": "__auto",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [],
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "wideLayout": true,
+        "showPercentChange": false
+      }
     },
-
     {
       "id": 11,
-      "title": "p50 (10 m)",
-      "type": "stat",
-      "gridPos": {"h": 2, "w": 9, "x": 15, "y": 12},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
+      "type": "row",
+      "title": "Sync",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {"fixedColor": "green", "mode": "fixed"},
-          "decimals": 1,
-          "unit": "s",
-          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(discobox_sync_duration_seconds_bucket[10m])))",
-          "instant": true,
-          "legendFormat": "__auto",
-          "refId": "A"
-        }
-      ]
+      "collapsed": false,
+      "panels": []
     },
-
     {
       "id": 12,
-      "title": "p90 (10 m)",
-      "type": "stat",
-      "gridPos": {"h": 2, "w": 9, "x": 15, "y": 14},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
+      "type": "timeseries",
+      "title": "Syncs / h by status",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {"fixedColor": "yellow", "mode": "fixed"},
-          "decimals": 1,
-          "unit": "s",
-          "thresholds": {"mode": "absolute", "steps": [{"color": "yellow", "value": null}]}
-        },
-        "overrides": []
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "histogram_quantile(0.9, sum by (le) (rate(discobox_sync_duration_seconds_bucket[10m])))",
-          "instant": true,
-          "legendFormat": "__auto",
-          "refId": "A"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum by (status) (increase(discobox_syncs_total[1h]))",
+          "legendFormat": "{{status}}",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum(increase(discobox_hooks_received_total[1h]))",
+          "legendFormat": "hooks received",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "success"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "error"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "skipped"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "not_in_netbox"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "not_in_netdisco"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "hooks received"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#808080"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     },
-
     {
       "id": 13,
-      "title": "p99 (10 m)",
-      "type": "stat",
-      "gridPos": {"h": 2, "w": 9, "x": 15, "y": 16},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
+      "type": "timeseries",
+      "title": "Skipped / h by reason",
+      "description": "cooldown / in_progress / queue_full are dropped before queuing; discovery_incomplete, recently_touched and pinned skip a started sync. queue_full deserves an alert.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {"fixedColor": "orange", "mode": "fixed"},
-          "decimals": 1,
-          "unit": "s",
-          "thresholds": {"mode": "absolute", "steps": [{"color": "orange", "value": null}]}
-        },
-        "overrides": []
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(discobox_sync_duration_seconds_bucket[10m])))",
-          "instant": true,
-          "legendFormat": "__auto",
-          "refId": "A"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum by (reason) (increase(discobox_syncs_skipped_total[1h]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     },
-
     {
       "id": 14,
-      "title": "avg (10 m)",
-      "type": "stat",
-      "gridPos": {"h": 2, "w": 9, "x": 15, "y": 18},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
+      "type": "timeseries",
+      "title": "Queue",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {"fixedColor": "blue", "mode": "fixed"},
-          "decimals": 1,
-          "unit": "s",
-          "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}
-        },
-        "overrides": []
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 14
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "rate(discobox_sync_duration_seconds_sum[10m]) / rate(discobox_sync_duration_seconds_count[10m])",
-          "instant": true,
-          "legendFormat": "__auto",
-          "refId": "A"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_sync_queued)",
+          "legendFormat": "queued",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_sync_running)",
+          "legendFormat": "running",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     },
-
     {
       "id": 15,
-      "title": "Gaps / discover-missing",
-      "type": "row",
-      "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 20},
-      "panels": []
+      "type": "timeseries",
+      "title": "Sync duration",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 14
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(discobox_sync_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p50",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "histogram_quantile(0.9, sum by (le) (rate(discobox_sync_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p90",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(discobox_sync_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p99",
+          "refId": "C",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     },
-
     {
       "id": 16,
-      "title": "Netbox Devices",
-      "type": "stat",
-      "gridPos": {"h": 4, "w": 3, "x": 0, "y": 21},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
+      "type": "timeseries",
+      "title": "Errors, timeouts, retries / h",
+      "description": "Errors inside syncs that still complete count in discobox_sync_errors_total, not as an error sync.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {"fixedColor": "blue", "mode": "fixed"},
-          "decimals": 0,
-          "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}
-        },
-        "overrides": []
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 14
       },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "discobox_gaps_netbox_devices",
-          "instant": true,
-          "legendFormat": "__auto",
-          "refId": "A"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum(increase(discobox_sync_errors_total[1h]))",
+          "legendFormat": "errors inside syncs",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum(increase(discobox_sync_timeouts_total[1h]))",
+          "legendFormat": "timeouts",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum(increase(discobox_sync_retries_total[1h]))",
+          "legendFormat": "retries",
+          "refId": "C",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum(increase(discobox_circuit_breaker_trips_total[1h]))",
+          "legendFormat": "breaker trips",
+          "refId": "D",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     },
-
     {
       "id": 17,
-      "title": "Netdisco Devices",
-      "type": "stat",
-      "gridPos": {"h": 4, "w": 3, "x": 3, "y": 21},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
+      "type": "row",
+      "title": "Jobs",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 22
       },
-      "fieldConfig": {
-        "defaults": {
-          "color": {"fixedColor": "blue", "mode": "fixed"},
-          "decimals": 0,
-          "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "discobox_gaps_netdisco_devices",
-          "instant": true,
-          "legendFormat": "__auto",
-          "refId": "A"
-        }
-      ]
+      "collapsed": false,
+      "panels": []
     },
-
     {
       "id": 18,
-      "title": "discover-missing enqueued / run",
-      "type": "stat",
-      "gridPos": {"h": 4, "w": 4, "x": 6, "y": 21},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {"fixedColor": "blue", "mode": "fixed"},
-          "decimals": 1,
-          "unit": "short",
-          "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "increase(discobox_discover_missing_enqueued_total[1h]) / increase(discobox_job_runs_total{job=\"discover-missing\",status=\"ok\"}[1h])",
-          "legendFormat": "__auto",
-          "refId": "A"
-        }
-      ]
-    },
-
-    {
-      "id": 19,
-      "title": "discover-missing runs",
-      "type": "stat",
-      "gridPos": {"h": 4, "w": 4, "x": 10, "y": 21},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {"fixedColor": "blue", "mode": "fixed"},
-          "decimals": 0,
-          "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "sum(discobox_job_runs_total{job=\"discover-missing\"})",
-          "instant": true,
-          "legendFormat": "__auto",
-          "refId": "A"
-        }
-      ]
-    },
-
-    {
-      "id": 20,
-      "title": "discover-missing aborted",
-      "type": "stat",
-      "gridPos": {"h": 4, "w": 4, "x": 14, "y": 21},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "thresholds"},
-          "decimals": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "green", "value": null},
-              {"color": "red",   "value": 1}
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "discobox_job_runs_total{job=\"discover-missing\",status=\"aborted\"}",
-          "instant": true,
-          "legendFormat": "__auto",
-          "refId": "A"
-        }
-      ]
-    },
-
-    {
-      "id": 21,
-      "title": "Hooks Not in Netbox",
-      "type": "stat",
-      "gridPos": {"h": 4, "w": 3, "x": 18, "y": 21},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {"mode": "thresholds"},
-          "decimals": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "green",  "value": null},
-              {"color": "yellow", "value": 1},
-              {"color": "red",    "value": 10}
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "discobox_unknown_devices_total",
-          "instant": true,
-          "legendFormat": "__auto",
-          "refId": "A"
-        }
-      ]
-    },
-
-    {
-      "id": 22,
-      "title": "HA VIP Redirections",
-      "type": "stat",
-      "gridPos": {"h": 4, "w": 3, "x": 21, "y": 21},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center",
-        "orientation": "horizontal",
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "textMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {"fixedColor": "blue", "mode": "fixed"},
-          "decimals": 0,
-          "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "discobox_ha_vip_total",
-          "instant": true,
-          "legendFormat": "__auto",
-          "refId": "A"
-        }
-      ]
-    },
-
-    {
-      "id": 23,
-      "title": "Data processed",
-      "type": "row",
-      "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 25},
-      "panels": []
-    },
-
-    {
-      "id": 24,
-      "title": "Interfaces / min",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 26},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "legend": {"calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true},
-        "tooltip": {"mode": "multi", "sort": "desc"}
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "spanNulls": false,
-            "showPoints": "never"
-          },
-          "decimals": 2,
-          "unit": "short"
-        },
-        "overrides": [
-          {
-            "matcher": {"id": "byName", "options": "created"},
-            "properties": [{"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "updated"},
-            "properties": [{"id": "color", "value": {"fixedColor": "yellow", "mode": "fixed"}}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "unchanged"},
-            "properties": [{"id": "color", "value": {"fixedColor": "gray", "mode": "fixed"}}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "error"},
-            "properties": [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}}]
-          }
-        ]
-      },
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "rate(discobox_interfaces_total[$__rate_interval]) * 60",
-          "legendFormat": "{{action}}",
-          "refId": "A"
-        }
-      ]
-    },
-
-    {
-      "id": 25,
-      "title": "IPs / min",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 26},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "legend": {"calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true},
-        "tooltip": {"mode": "multi", "sort": "desc"}
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "spanNulls": false,
-            "showPoints": "never"
-          },
-          "decimals": 2,
-          "unit": "short"
-        },
-        "overrides": [
-          {
-            "matcher": {"id": "byName", "options": "created"},
-            "properties": [{"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "fixed"},
-            "properties": [{"id": "color", "value": {"fixedColor": "teal", "mode": "fixed"}}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "moved"},
-            "properties": [{"id": "color", "value": {"fixedColor": "purple", "mode": "fixed"}}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "unchanged"},
-            "properties": [{"id": "color", "value": {"fixedColor": "gray", "mode": "fixed"}}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "skipped"},
-            "properties": [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "error"},
-            "properties": [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}}]
-          }
-        ]
-      },
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "rate(discobox_ips_total[$__rate_interval]) * 60",
-          "legendFormat": "{{action}}",
-          "refId": "A"
-        }
-      ]
-    },
-
-    {
-      "id": 26,
-      "title": "Modules / min",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 34},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "legend": {"calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true},
-        "tooltip": {"mode": "multi", "sort": "desc"}
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "spanNulls": false,
-            "showPoints": "never"
-          },
-          "decimals": 2,
-          "unit": "short"
-        },
-        "overrides": [
-          {
-            "matcher": {"id": "byName", "options": "created"},
-            "properties": [{"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "updated"},
-            "properties": [{"id": "color", "value": {"fixedColor": "yellow", "mode": "fixed"}}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "unchanged"},
-            "properties": [{"id": "color", "value": {"fixedColor": "gray", "mode": "fixed"}}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "error"},
-            "properties": [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}}]
-          }
-        ]
-      },
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "rate(discobox_modules_total[$__rate_interval]) * 60",
-          "legendFormat": "{{action}}",
-          "refId": "A"
-        }
-      ]
-    },
-
-    {
-      "id": 27,
-      "title": "SFPs / min",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 34},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "legend": {"calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true},
-        "tooltip": {"mode": "multi", "sort": "desc"}
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "spanNulls": false,
-            "showPoints": "never"
-          },
-          "decimals": 2,
-          "unit": "short"
-        },
-        "overrides": [
-          {
-            "matcher": {"id": "byName", "options": "created"},
-            "properties": [{"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "updated"},
-            "properties": [{"id": "color", "value": {"fixedColor": "yellow", "mode": "fixed"}}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "unchanged"},
-            "properties": [{"id": "color", "value": {"fixedColor": "gray", "mode": "fixed"}}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "error"},
-            "properties": [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}}]
-          }
-        ]
-      },
-      "targets": [
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "rate(discobox_sfps_total[$__rate_interval]) * 60",
-          "legendFormat": "{{action}}",
-          "refId": "A"
-        }
-      ]
-    },
-
-    {
-      "id": 28,
-      "title": "Per-device",
-      "type": "row",
-      "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 42},
-      "panels": []
-    },
-
-    {
-      "id": 29,
-      "title": "Device sync status",
       "type": "table",
-      "gridPos": {"h": 14, "w": 24, "x": 0, "y": 43},
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "options": {
-        "cellHeight": "sm",
-        "footer": {"countRows": false, "fields": "", "reducer": ["sum"], "show": false},
-        "showHeader": true,
-        "sortBy": [{"desc": true, "displayName": "Failed"}]
+      "title": "Jobs",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
       },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {"type": "auto"},
-            "filterable": true,
-            "inspect": false
+      "description": "gaps \u2192 discover-missing / fix-tags act on the last gaps result; types-bare reads bare types from Netbox. Also on the discobox status page and GET /jobs.",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 23
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
           },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]
-          }
+          "expr": "max by (exported_job) (time() - discobox_job_last_success_timestamp_seconds)",
+          "legendFormat": "__auto",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code",
+          "format": "table"
         },
-        "overrides": [
-          {
-            "matcher": {"id": "byName", "options": "Device"},
-            "properties": [
-              {"id": "custom.width", "value": 320},
-              {"id": "links", "value": []}
-            ]
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
           },
-          {
-            "matcher": {"id": "byName", "options": "Failed"},
-            "properties": [
-              {"id": "custom.width", "value": 110},
-              {"id": "custom.cellOptions", "value": {"type": "color-background", "mode": "basic"}},
-              {"id": "color", "value": {"mode": "thresholds"}},
-              {"id": "thresholds", "value": {
-                "mode": "absolute",
-                "steps": [
-                  {"color": "green", "value": null},
-                  {"color": "red",   "value": 1}
-                ]
-              }},
-              {"id": "mappings", "value": [
-                {
-                  "type": "value",
-                  "options": {
-                    "0": {"color": "green", "index": 0, "text": "OK"},
-                    "1": {"color": "red",   "index": 1, "text": "FAILED"}
-                  }
-                }
-              ]}
-            ]
+          "expr": "max by (exported_job) (time() - discobox_job_last_run_timestamp_seconds)",
+          "legendFormat": "__auto",
+          "refId": "B",
+          "range": false,
+          "instant": true,
+          "editorMode": "code",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
           },
-          {
-            "matcher": {"id": "byName", "options": "Duration"},
-            "properties": [
-              {"id": "unit", "value": "s"},
-              {"id": "decimals", "value": 1},
-              {"id": "custom.width", "value": 110}
-            ]
+          "expr": "max by (exported_job) (discobox_job_duration_seconds)",
+          "legendFormat": "__auto",
+          "refId": "C",
+          "range": false,
+          "instant": true,
+          "editorMode": "code",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
           },
-          {
-            "matcher": {"id": "byName", "options": "Last sync age"},
-            "properties": [
-              {"id": "unit", "value": "s"},
-              {"id": "decimals", "value": 0},
-              {"id": "custom.width", "value": 130},
-              {"id": "color", "value": {"mode": "thresholds"}},
-              {"id": "thresholds", "value": {
-                "mode": "absolute",
-                "steps": [
-                  {"color": "green",  "value": null},
-                  {"color": "yellow", "value": 3600},
-                  {"color": "red",    "value": 86400}
-                ]
-              }}
-            ]
-          },
-          {
-            "matcher": {"id": "byName", "options": "Time"},
-            "properties": [{"id": "custom.hidden", "value": true}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "job"},
-            "properties": [{"id": "custom.hidden", "value": true}]
-          },
-          {
-            "matcher": {"id": "byName", "options": "__name__"},
-            "properties": [{"id": "custom.hidden", "value": true}]
-          }
-        ]
-      },
+          "expr": "max by (exported_job) (discobox_job_next_run_timestamp_seconds > 0) - time()",
+          "legendFormat": "__auto",
+          "refId": "D",
+          "range": false,
+          "instant": true,
+          "editorMode": "code",
+          "format": "table"
+        }
+      ],
       "transformations": [
         {
           "id": "merge",
@@ -1242,53 +1293,2762 @@
         {
           "id": "organize",
           "options": {
+            "excludeByName": {
+              "Time": true
+            },
             "renameByName": {
-              "instance":  "Device",
-              "Value #A":  "Failed",
-              "Value #B":  "Duration",
-              "Value #C":  "Last sync age"
+              "exported_job": "job",
+              "Value #A": "last success",
+              "Value #B": "last run",
+              "Value #C": "duration",
+              "Value #D": "next run in"
+            },
+            "indexByName": {
+              "exported_job": 0,
+              "Value #A": 1,
+              "Value #B": 2,
+              "Value #C": 3,
+              "Value #D": 4
             }
           }
         }
       ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last success"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 7200
+                    },
+                    {
+                      "color": "red",
+                      "value": 90000
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "job",
+            "desc": false
+          }
+        ]
+      }
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Job runs / h by status",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 23
+      },
       "targets": [
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "discobox_device_last_sync_failed",
-          "format": "table",
-          "instant": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum by (exported_job, status) (increase(discobox_job_runs_total[1h])) > 0",
+          "legendFormat": "{{exported_job}} {{status}}",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".* (error|aborted)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Gaps (Netbox \u2194 Netdisco)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "Netbox devices",
+      "description": "reconcile.roles / statuses with a primary IP, without reconcile.exclude matches.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 0,
+        "y": 31
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_gaps_netbox_devices)",
           "legendFormat": "__auto",
-          "refId": "A"
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "Netdisco devices",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 3,
+        "y": 31
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_gaps_netdisco_devices)",
+          "legendFormat": "__auto",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "Not in Netdisco",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 6,
+        "y": 31
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_gaps_not_in_netdisco)",
+          "legendFormat": "__auto",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "id": 24,
+      "type": "stat",
+      "title": "Offline",
+      "description": "Not in Netdisco, and liveness reports them down: not enqueued.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 9,
+        "y": 31
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_gaps_offline)",
+          "legendFormat": "__auto",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "id": 25,
+      "type": "stat",
+      "title": "Not in Netbox",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 12,
+        "y": 31
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_gaps_not_in_netbox)",
+          "legendFormat": "__auto",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "id": 26,
+      "type": "stat",
+      "title": "Not in Netbox (stale)",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 15,
+        "y": 31
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_gaps_not_in_netbox_stale)",
+          "legendFormat": "__auto",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "id": 27,
+      "type": "stat",
+      "title": "Tag mismatches",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 18,
+        "y": 31
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_gaps_tag_mismatches)",
+          "legendFormat": "__auto",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "id": 28,
+      "type": "stat",
+      "title": "Liveness query",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 21,
+        "y": 31
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_liveness_query_up)",
+          "legendFormat": "__auto",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN"
+                },
+                "1": {
+                  "text": "up"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Gaps",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 35
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_gaps_not_in_netdisco)",
+          "legendFormat": "not in Netdisco",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "discobox_device_last_sync_duration_seconds",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "__auto",
-          "refId": "B"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_gaps_offline)",
+          "legendFormat": "offline",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
         },
         {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "time() - discobox_device_last_sync_timestamp_seconds",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "__auto",
-          "refId": "C"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_gaps_not_in_netbox)",
+          "legendFormat": "not in Netbox",
+          "refId": "C",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_gaps_not_in_netbox_stale)",
+          "legendFormat": "not in Netbox (stale)",
+          "refId": "D",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_gaps_tag_mismatches)",
+          "legendFormat": "tag mismatches",
+          "refId": "E",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Enqueued for discovery / day",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 35
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum(increase(discobox_discover_missing_enqueued_total[1d]))",
+          "legendFormat": "discover-missing",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum(increase(discobox_fix_tags_enqueued_total[1d]))",
+          "legendFormat": "fix-tags",
+          "refId": "B",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum(increase(discobox_unknown_devices_total[1d]))",
+          "legendFormat": "hooks for devices not in Netbox",
+          "refId": "C",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 31,
+      "type": "row",
+      "title": "Objects written",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Interfaces / h",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum by (action) (increase(discobox_interfaces_total{action!=\"unchanged\"}[1h]))",
+          "legendFormat": "{{action}}",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "created"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "updated"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fixed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "moved"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "unchanged"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#808080"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "skipped"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "not_found"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "error"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "IP addresses / h",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 44
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum by (action) (increase(discobox_ips_total{action!=\"unchanged\"}[1h]))",
+          "legendFormat": "{{action}}",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "created"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "updated"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fixed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "moved"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "unchanged"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#808080"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "skipped"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "not_found"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "error"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "Modules / h",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 52
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum by (action) (increase(discobox_modules_total{action!=\"unchanged\"}[1h]))",
+          "legendFormat": "{{action}}",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "created"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "updated"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fixed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "moved"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "unchanged"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#808080"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "skipped"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "not_found"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "error"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 35,
+      "type": "timeseries",
+      "title": "SFPs / h",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 52
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum by (action) (increase(discobox_sfps_total{action!=\"unchanged\"}[1h]))",
+          "legendFormat": "{{action}}",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "created"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "updated"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fixed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "moved"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "unchanged"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#808080"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "skipped"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "not_found"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "error"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 36,
+      "type": "timeseries",
+      "title": "Wireless APs / h",
+      "description": "not_found: the WLC reports an AP Netbox doesn't have (alerted after 24h).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 60
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum by (action) (increase(discobox_aps_total{action!=\"unchanged\"}[1h]))",
+          "legendFormat": "{{action}}",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "created"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "updated"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fixed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "moved"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "unchanged"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#808080"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "skipped"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "not_found"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "error"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 37,
+      "type": "timeseries",
+      "title": "Orphan interfaces / h",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 60
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum by (action) (increase(discobox_orphans_total[1h]))",
+          "legendFormat": "{{action}}",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "removed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "braked"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 38,
+      "type": "timeseries",
+      "title": "Interface defaults filled / h",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 60
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "sum by (field) (increase(discobox_interface_defaults_total[1h]))",
+          "legendFormat": "{{field}}",
+          "refId": "A",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 40,
+      "type": "row",
+      "title": "Types",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 68
+      },
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 39,
+          "type": "table",
+          "title": "Bare DeviceTypes / ModuleTypes (source=netdisco)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "description": "Created by discobox without templates. library=available: POST /types/library fills it; none: fix by hand or upstream to the devicetype-library.",
+          "gridPos": {
+            "h": 10,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "platform"
+              },
+              "expr": "max by (kind, manufacturer, model, part_number, library) (discobox_types_bare)",
+              "legendFormat": "__auto",
+              "refId": "A",
+              "range": false,
+              "instant": true,
+              "editorMode": "code",
+              "format": "table"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true
+                },
+                "renameByName": {
+                  "Value": "in use"
+                },
+                "indexByName": {
+                  "kind": 0,
+                  "manufacturer": 1,
+                  "model": 2,
+                  "part_number": 3,
+                  "library": 4,
+                  "Value": 5
+                }
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "filterable": true
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "library"
+                },
+                "properties": [
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-text"
+                    }
+                  },
+                  {
+                    "id": "mappings",
+                    "value": [
+                      {
+                        "type": "value",
+                        "options": {
+                          "available": {
+                            "color": "green",
+                            "index": 0
+                          },
+                          "none": {
+                            "color": "orange",
+                            "index": 1
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm",
+            "sortBy": [
+              {
+                "displayName": "in use",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 46,
+      "type": "row",
+      "title": "API calls, rebuilds",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 69
+      },
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 41,
+          "type": "timeseries",
+          "title": "Netbox requests / min",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 69
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "platform"
+              },
+              "expr": "sum by (method) (rate(discobox_netbox_requests_total[$__rate_interval])) * 60",
+              "legendFormat": "{{method}}",
+              "refId": "A",
+              "range": true,
+              "instant": false,
+              "editorMode": "code"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 30,
+                "showPoints": "never",
+                "spanNulls": true,
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                },
+                "axisSoftMin": 0
+              },
+              "color": {
+                "mode": "palette-classic"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "right",
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 42,
+          "type": "timeseries",
+          "title": "Netdisco requests / min",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 69
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "platform"
+              },
+              "expr": "sum by (method) (rate(discobox_netdisco_requests_total[$__rate_interval])) * 60",
+              "legendFormat": "{{method}}",
+              "refId": "A",
+              "range": true,
+              "instant": false,
+              "editorMode": "code"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 30,
+                "showPoints": "never",
+                "spanNulls": true,
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                },
+                "axisSoftMin": 0
+              },
+              "color": {
+                "mode": "palette-classic"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "right",
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 43,
+          "type": "timeseries",
+          "title": "Rebuilds / h",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 69
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "platform"
+              },
+              "expr": "sum by (status, dry_run) (increase(discobox_rebuilds_total[1h])) > 0",
+              "legendFormat": "{{status}} dry_run={{dry_run}}",
+              "refId": "A",
+              "range": true,
+              "instant": false,
+              "editorMode": "code"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "bars",
+                "lineWidth": 1,
+                "fillOpacity": 30,
+                "showPoints": "never",
+                "spanNulls": true,
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                },
+                "axisSoftMin": 0
+              },
+              "color": {
+                "mode": "palette-classic"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "right",
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 44,
+          "type": "timeseries",
+          "title": "HA VIP redirections / h",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "platform"
+              },
+              "expr": "sum(increase(discobox_ha_vip_total[1h]))",
+              "legendFormat": "VIP \u2192 member",
+              "refId": "A",
+              "range": true,
+              "instant": false,
+              "editorMode": "code"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never",
+                "spanNulls": true,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "axisSoftMin": 0
+              },
+              "color": {
+                "mode": "palette-classic"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "right",
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 45,
+          "type": "timeseries",
+          "title": "Deprecated endpoint calls / h",
+          "description": "Callers still using an old endpoint; should stay empty.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "platform"
+              },
+              "expr": "sum by (path) (increase(discobox_deprecated_requests_total[1h])) > 0",
+              "legendFormat": "{{path}}",
+              "refId": "A",
+              "range": true,
+              "instant": false,
+              "editorMode": "code"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "bars",
+                "lineWidth": 1,
+                "fillOpacity": 30,
+                "showPoints": "never",
+                "spanNulls": true,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "axisSoftMin": 0
+              },
+              "color": {
+                "mode": "palette-classic"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "right",
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 48,
+      "type": "row",
+      "title": "Per device",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 70
+      },
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 47,
+          "type": "table",
+          "title": "Devices: last sync",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "description": "Per device (name from the hook, else IP). Sort by a column to find failing or slow devices.",
+          "gridPos": {
+            "h": 16,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "platform"
+              },
+              "expr": "max by (device) (discobox_device_last_sync_failed)",
+              "legendFormat": "__auto",
+              "refId": "A",
+              "range": false,
+              "instant": true,
+              "editorMode": "code",
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "platform"
+              },
+              "expr": "max by (device) (discobox_device_last_sync_errors)",
+              "legendFormat": "__auto",
+              "refId": "B",
+              "range": false,
+              "instant": true,
+              "editorMode": "code",
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "platform"
+              },
+              "expr": "max by (device) (discobox_device_orphans_braked)",
+              "legendFormat": "__auto",
+              "refId": "C",
+              "range": false,
+              "instant": true,
+              "editorMode": "code",
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "platform"
+              },
+              "expr": "max by (device) (discobox_device_last_sync_duration_seconds)",
+              "legendFormat": "__auto",
+              "refId": "D",
+              "range": false,
+              "instant": true,
+              "editorMode": "code",
+              "format": "table"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "platform"
+              },
+              "expr": "max by (device) (time() - discobox_device_last_sync_timestamp_seconds)",
+              "legendFormat": "__auto",
+              "refId": "E",
+              "range": false,
+              "instant": true,
+              "editorMode": "code",
+              "format": "table"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "merge",
+              "options": {}
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true
+                },
+                "renameByName": {
+                  "Value #A": "failed",
+                  "Value #B": "errors",
+                  "Value #C": "orphans braked",
+                  "Value #D": "duration",
+                  "Value #E": "last sync"
+                },
+                "indexByName": {
+                  "device": 0,
+                  "Value #A": 1,
+                  "Value #B": 2,
+                  "Value #C": 3,
+                  "Value #D": 4,
+                  "Value #E": 5
+                }
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "filterable": true
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "failed"
+                },
+                "properties": [
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-background"
+                    }
+                  },
+                  {
+                    "id": "mappings",
+                    "value": [
+                      {
+                        "type": "value",
+                        "options": {
+                          "0": {
+                            "text": "ok",
+                            "color": "green",
+                            "index": 0
+                          },
+                          "1": {
+                            "text": "FAILED",
+                            "color": "red",
+                            "index": 1
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "errors"
+                },
+                "properties": [
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-text"
+                    }
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "green",
+                          "value": null
+                        },
+                        {
+                          "color": "orange",
+                          "value": 1
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "duration"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "last sync"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-text"
+                    }
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "green",
+                          "value": null
+                        },
+                        {
+                          "color": "yellow",
+                          "value": 86400
+                        },
+                        {
+                          "color": "red",
+                          "value": 604800
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm",
+            "sortBy": [
+              {
+                "displayName": "failed",
+                "desc": true
+              }
+            ]
+          }
         }
       ]
     }
-
-  ],
-  "refresh": "30s",
-  "schemaVersion": 39,
-  "tags": ["discobox"],
-  "templating": {"list": []},
-  "time": {"from": "now-3h", "to": "now"},
-  "timepicker": {},
-  "timezone": "browser",
-  "title": "Discobox",
-  "uid": "discobox-v2",
-  "version": 1,
-  "weekStart": ""
+  ]
 }
