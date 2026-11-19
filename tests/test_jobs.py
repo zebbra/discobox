@@ -72,7 +72,7 @@ def test_error_is_recorded_not_raised(tmp_path) -> None:
     rec = jobs.run("r")
     assert rec["status"] == "error" and rec["error"] == "ConnectionError: netdisco down"
     assert jobs.last_success("r") is None
-    assert reg.get_sample_value("discobox_job_runs_total", {"job": "r", "status": "error"}) == 1
+    assert reg.get_sample_value("discobox_job_runs_total", {"name": "r", "status": "error"}) == 1
 
 
 def test_state_survives_restart_and_overdue_runs_soon(tmp_path) -> None:
@@ -87,7 +87,7 @@ def test_state_survives_restart_and_overdue_runs_soon(tmp_path) -> None:
     jobs2.register(Job("r", lambda: JobResult(), interval=3600, startup_delay=30))
     assert jobs2.last_success("r") == finished
     assert jobs2.next_run("r") == clock.now + 30
-    assert reg2.get_sample_value("discobox_job_last_success_timestamp_seconds", {"job": "r"}) == finished
+    assert reg2.get_sample_value("discobox_job_last_success_timestamp_seconds", {"name": "r"}) == finished
     # restart 10 min after the run: due one interval after it, not after the restart
     clock.now = finished + 600
     jobs3, _ = _registry(tmp_path, clock)

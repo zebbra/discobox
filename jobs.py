@@ -55,18 +55,18 @@ class JobRegistry:
         self._state_lock = threading.Lock()
         reg = {"registry": registry} if registry is not None else {}
         self.m_last_run = Gauge(
-            "discobox_job_last_run_timestamp_seconds", "Unix time the job's last run finished", ["job"], **reg)
+            "discobox_job_last_run_timestamp_seconds", "Unix time the job's last run finished", ["name"], **reg)
         self.m_last_success = Gauge(
             "discobox_job_last_success_timestamp_seconds", "Unix time of the job's last run with status ok",
-            ["job"], **reg)
+            ["name"], **reg)
         self.m_duration = Gauge(
-            "discobox_job_duration_seconds", "Duration of the job's last run", ["job"], **reg)
+            "discobox_job_duration_seconds", "Duration of the job's last run", ["name"], **reg)
         self.m_next_run = Gauge(
             "discobox_job_next_run_timestamp_seconds", "Unix time of the job's next scheduled run (0: on demand only)",
-            ["job"], **reg)
+            ["name"], **reg)
         self.m_runs = Counter(
             "discobox_job_runs_total", "Job runs by status: ok | deferred | skipped | aborted | error",
-            ["job", "status"], **reg)
+            ["name", "status"], **reg)
         self._load()
 
     # ── registry ──

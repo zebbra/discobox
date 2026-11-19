@@ -84,7 +84,7 @@ sync_errors_total = Counter(
 device_sync_errors = Gauge(
     "discobox_device_last_sync_errors",
     "Errors inside the last completed sync of each device (all parts; 0 = clean)",
-    ["instance"],
+    ["device"],
     **_reg,
 )
 orphans_total = Counter(
@@ -98,7 +98,7 @@ device_orphans_braked = Gauge(
     "discobox_device_orphans_braked",
     "Orphaned interfaces the mass-deletion brake kept in the last sync of each device (0 = none; "
     "> 0: Netdisco discovery incomplete, or Netbox stale — check the device or run a rebuild)",
-    ["instance"],
+    ["device"],
     **_reg,
 )
 syncs_skipped_total = Counter(
@@ -117,13 +117,13 @@ ha_vip_total = Counter(
 device_sync_duration = Gauge(
     "discobox_device_last_sync_duration_seconds",
     "Duration of the last completed sync for each device",
-    ["instance"],
+    ["device"],
     **_reg,
 )
 device_sync_timestamp = Gauge(
     "discobox_device_last_sync_timestamp_seconds",
     "Unix timestamp of the last completed sync for each device",
-    ["instance"],
+    ["device"],
     **_reg,
 )
 sync_paused = Gauge(
@@ -134,7 +134,7 @@ sync_paused = Gauge(
 device_sync_failed = Gauge(
     "discobox_device_last_sync_failed",
     "1 if the last sync attempt for this device failed, 0 if it succeeded",
-    ["instance"],
+    ["device"],
     **_reg,
 )
 gaps_netbox_devices = Gauge(
@@ -196,6 +196,11 @@ gaps_not_in_netbox_stale = Gauge(
 gaps_tag_mismatches = Gauge(
     "discobox_gaps_tag_mismatches",
     "Netdisco devices with a missing or Netbox-mismatched auth tag (last gaps run)",
+    **_reg,
+)
+gaps_excluded = Gauge(
+    "discobox_gaps_excluded",
+    "Netbox devices left out by reconcile.exclude (last gaps run)",
     **_reg,
 )
 interface_defaults_total = Counter(

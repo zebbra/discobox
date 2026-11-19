@@ -81,6 +81,7 @@ from metrics import (
     device_sync_timestamp,
     discover_missing_enqueued_total,
     fix_tags_enqueued_total,
+    gaps_excluded,
     gaps_netbox_devices,
     gaps_netdisco_devices,
     gaps_not_in_netbox,
@@ -505,6 +506,7 @@ def _run_gaps() -> dict:
     gaps_not_in_netbox.set(counts["not_in_netbox"])
     gaps_not_in_netbox_stale.set(counts["not_in_netbox_stale"])
     gaps_tag_mismatches.set(counts["tag_mismatches"])
+    gaps_excluded.set(counts.get("excluded", 0))
     summary = {k: v for k, v in counts.items() if not k.endswith("_list")}
     with _reconcile_gaps_lock:
         _save_gap(_NOT_IN_NETDISCO_FILE, counts["not_in_netdisco_list"])
@@ -1107,7 +1109,7 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
         # device_sync_failed is always updated so failure is immediately visible.
         instance = result.get("hostname") or host
         if status in ("success", "error"):
-            device_sync_failed.labels(instance=instance).set(0 if status == "success" else 1)
+            device_sync_failed.labels(device=instance).set(0 if status == "success" else 1)
         if status == "error" and _PAUSE_ON_ERROR and not _is_paused():
             _set_paused(True)
             sync_paused.set(1)
@@ -1116,8 +1118,8 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             _forget_unknown_device(host, result.get("hostname") or "")
         if status == "success":
             _mark_synced(host)
-            device_sync_duration.labels(instance=instance).set(elapsed)
-            device_sync_timestamp.labels(instance=instance).set(start)
+            device_sync_duration.labels(device=instance).set(elapsed)
+            device_sync_timestamp.labels(device=instance).set(start)
         # Record per-action counts from result dict
         for action, count in result.get("interfaces", {}).items():
             interfaces_total.labels(action=action).inc(count)
@@ -1133,11 +1135,11 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             interface_defaults_total.labels(field=field).inc(count)
         if "errors" in result:
             sync_errors_total.inc(result["errors"])
-            device_sync_errors.labels(instance=instance).set(result["errors"])
+            device_sync_errors.labels(device=instance).set(result["errors"])
         if "orphans" in result:
             for action, count in result["orphans"].items():
                 orphans_total.labels(action=action).inc(count)
-            device_orphans_braked.labels(instance=instance).set(result["orphans"]["braked"])
+            device_orphans_braked.labels(device=instance).set(result["orphans"]["braked"])
         if result.get("ha_vip"):
             ha_vip_total.inc()
         logger.info("Sync %s for %s in %.1fs", status, instance, elapsed)
@@ -1297,11 +1299,11 @@ def _rebuild_outcome(result: dict, host: str, dry_run: bool) -> RebuildResponse:
     rebuilds_total.labels(status="success" if status == "ok" else status, dry_run=str(dry_run).lower()).inc()
     if "errors" in result and result.get("hostname"):
         sync_errors_total.inc(result["errors"])
-        device_sync_errors.labels(instance=result["hostname"]).set(result["errors"])
+        device_sync_errors.labels(device=result["hostname"]).set(result["errors"])
     if "orphans" in result and result.get("hostname") and not dry_run and status != "blocked":
         orphans_total.labels(action="removed").inc(result["orphans"]["removed"])
         # the prune pass deletes the braked own ones (source-less ones stay; the next sync re-reports them)
-        device_orphans_braked.labels(instance=result["hostname"]).set(0)
+        device_orphans_braked.labels(device=result["hostname"]).set(0)
     logger.info(
         "rebuild %s for %s%s: %s", status, host, " [dry-run]" if dry_run else "",
         prune_result,

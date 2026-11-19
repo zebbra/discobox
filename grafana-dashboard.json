@@ -1237,7 +1237,7 @@
             "type": "prometheus",
             "uid": "platform"
           },
-          "expr": "max by (exported_job) (time() - discobox_job_last_success_timestamp_seconds)",
+          "expr": "max by (name) (time() - discobox_job_last_success_timestamp_seconds)",
           "legendFormat": "__auto",
           "refId": "A",
           "range": false,
@@ -1250,7 +1250,7 @@
             "type": "prometheus",
             "uid": "platform"
           },
-          "expr": "max by (exported_job) (time() - discobox_job_last_run_timestamp_seconds)",
+          "expr": "max by (name) (time() - discobox_job_last_run_timestamp_seconds)",
           "legendFormat": "__auto",
           "refId": "B",
           "range": false,
@@ -1263,7 +1263,7 @@
             "type": "prometheus",
             "uid": "platform"
           },
-          "expr": "max by (exported_job) (discobox_job_duration_seconds)",
+          "expr": "max by (name) (discobox_job_duration_seconds)",
           "legendFormat": "__auto",
           "refId": "C",
           "range": false,
@@ -1276,7 +1276,7 @@
             "type": "prometheus",
             "uid": "platform"
           },
-          "expr": "max by (exported_job) (discobox_job_next_run_timestamp_seconds > 0) - time()",
+          "expr": "max by (name) (discobox_job_next_run_timestamp_seconds > 0) - time()",
           "legendFormat": "__auto",
           "refId": "D",
           "range": false,
@@ -1297,14 +1297,14 @@
               "Time": true
             },
             "renameByName": {
-              "exported_job": "job",
+              "name": "job",
               "Value #A": "last success",
               "Value #B": "last run",
               "Value #C": "duration",
               "Value #D": "next run in"
             },
             "indexByName": {
-              "exported_job": 0,
+              "name": 0,
               "Value #A": 1,
               "Value #B": 2,
               "Value #C": 3,
@@ -1390,8 +1390,8 @@
             "type": "prometheus",
             "uid": "platform"
           },
-          "expr": "sum by (exported_job, status) (increase(discobox_job_runs_total[1h])) > 0",
-          "legendFormat": "{{exported_job}} {{status}}",
+          "expr": "sum by (name, status) (increase(discobox_job_runs_total[1h])) > 0",
+          "legendFormat": "{{name}} {{status}}",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -1467,14 +1467,14 @@
       "id": 21,
       "type": "stat",
       "title": "Netbox devices",
-      "description": "reconcile.roles / statuses with a primary IP, without reconcile.exclude matches.",
+      "description": "reconcile.roles / statuses with a primary IP.",
       "datasource": {
         "type": "prometheus",
         "uid": "platform"
       },
       "gridPos": {
         "h": 4,
-        "w": 3,
+        "w": 2,
         "x": 0,
         "y": 31
       },
@@ -1539,8 +1539,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 3,
-        "x": 3,
+        "w": 2,
+        "x": 2,
         "y": 31
       },
       "targets": [
@@ -1595,6 +1595,71 @@
     },
     {
       "id": 23,
+      "type": "stat",
+      "title": "Excluded",
+      "description": "Netbox devices matching reconcile.exclude: never pushed to Netdisco.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 2,
+        "x": 4,
+        "y": 31
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_gaps_excluded)",
+          "legendFormat": "__auto",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "id": 24,
       "type": "stat",
       "title": "Not in Netdisco",
       "description": "",
@@ -1667,7 +1732,7 @@
       }
     },
     {
-      "id": 24,
+      "id": 25,
       "type": "stat",
       "title": "Offline",
       "description": "Not in Netdisco, and liveness reports them down: not enqueued.",
@@ -1732,7 +1797,7 @@
       }
     },
     {
-      "id": 25,
+      "id": 26,
       "type": "stat",
       "title": "Not in Netbox",
       "description": "",
@@ -1805,7 +1870,7 @@
       }
     },
     {
-      "id": 26,
+      "id": 27,
       "type": "stat",
       "title": "Not in Netbox (stale)",
       "description": "",
@@ -1870,7 +1935,7 @@
       }
     },
     {
-      "id": 27,
+      "id": 28,
       "type": "stat",
       "title": "Tag mismatches",
       "description": "",
@@ -1943,7 +2008,7 @@
       }
     },
     {
-      "id": 28,
+      "id": 29,
       "type": "stat",
       "title": "Liveness query",
       "description": "",
@@ -2024,7 +2089,7 @@
       }
     },
     {
-      "id": 29,
+      "id": 30,
       "type": "timeseries",
       "title": "Gaps",
       "description": "",
@@ -2137,7 +2202,7 @@
       }
     },
     {
-      "id": 30,
+      "id": 31,
       "type": "timeseries",
       "title": "Enqueued for discovery / day",
       "description": "",
@@ -2226,7 +2291,7 @@
       }
     },
     {
-      "id": 31,
+      "id": 32,
       "type": "row",
       "title": "Objects written",
       "gridPos": {
@@ -2239,7 +2304,7 @@
       "panels": []
     },
     {
-      "id": 32,
+      "id": 33,
       "type": "timeseries",
       "title": "Interfaces / h",
       "description": "",
@@ -2425,7 +2490,7 @@
       }
     },
     {
-      "id": 33,
+      "id": 34,
       "type": "timeseries",
       "title": "IP addresses / h",
       "description": "",
@@ -2611,7 +2676,7 @@
       }
     },
     {
-      "id": 34,
+      "id": 35,
       "type": "timeseries",
       "title": "Modules / h",
       "description": "",
@@ -2797,7 +2862,7 @@
       }
     },
     {
-      "id": 35,
+      "id": 36,
       "type": "timeseries",
       "title": "SFPs / h",
       "description": "",
@@ -2983,7 +3048,7 @@
       }
     },
     {
-      "id": 36,
+      "id": 37,
       "type": "timeseries",
       "title": "Wireless APs / h",
       "description": "not_found: the WLC reports an AP Netbox doesn't have (alerted after 24h).",
@@ -3169,7 +3234,7 @@
       }
     },
     {
-      "id": 37,
+      "id": 38,
       "type": "timeseries",
       "title": "Orphan interfaces / h",
       "description": "",
@@ -3265,7 +3330,7 @@
       }
     },
     {
-      "id": 38,
+      "id": 39,
       "type": "timeseries",
       "title": "Interface defaults filled / h",
       "description": "",
@@ -3330,7 +3395,7 @@
       }
     },
     {
-      "id": 40,
+      "id": 41,
       "type": "row",
       "title": "Types",
       "gridPos": {
@@ -3342,7 +3407,7 @@
       "collapsed": true,
       "panels": [
         {
-          "id": 39,
+          "id": 40,
           "type": "table",
           "title": "Bare DeviceTypes / ModuleTypes (source=netdisco)",
           "datasource": {
@@ -3448,7 +3513,7 @@
       ]
     },
     {
-      "id": 46,
+      "id": 47,
       "type": "row",
       "title": "API calls, rebuilds",
       "gridPos": {
@@ -3460,7 +3525,7 @@
       "collapsed": true,
       "panels": [
         {
-          "id": 41,
+          "id": 42,
           "type": "timeseries",
           "title": "Netbox requests / min",
           "description": "",
@@ -3525,7 +3590,7 @@
           }
         },
         {
-          "id": 42,
+          "id": 43,
           "type": "timeseries",
           "title": "Netdisco requests / min",
           "description": "",
@@ -3590,7 +3655,7 @@
           }
         },
         {
-          "id": 43,
+          "id": 44,
           "type": "timeseries",
           "title": "Rebuilds / h",
           "description": "",
@@ -3655,7 +3720,7 @@
           }
         },
         {
-          "id": 44,
+          "id": 45,
           "type": "timeseries",
           "title": "HA VIP redirections / h",
           "description": "",
@@ -3720,7 +3785,7 @@
           }
         },
         {
-          "id": 45,
+          "id": 46,
           "type": "timeseries",
           "title": "Deprecated endpoint calls / h",
           "description": "Callers still using an old endpoint; should stay empty.",
@@ -3787,7 +3852,7 @@
       ]
     },
     {
-      "id": 48,
+      "id": 49,
       "type": "row",
       "title": "Per device",
       "gridPos": {
@@ -3799,7 +3864,7 @@
       "collapsed": true,
       "panels": [
         {
-          "id": 47,
+          "id": 48,
           "type": "table",
           "title": "Devices: last sync",
           "datasource": {

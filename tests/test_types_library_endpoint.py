@@ -312,5 +312,5 @@ def test_ap_and_partial_errors_reach_the_metrics(monkeypatch) -> None:
     server._run_sync("192.0.2.250", True, True, True, True, True, False)
     assert get("discobox_aps_total", {"action": "error"}) - before[0] == 2
     assert get("discobox_sync_errors_total") - before[1] == 2
-    assert get("discobox_device_last_sync_errors", {"instance": "wlc-test-1"}) == 2
-    assert get("discobox_device_last_sync_failed", {"instance": "wlc-test-1"}) == 0   # still a success
+    assert get("discobox_device_last_sync_errors", {"device": "wlc-test-1"}) == 2
+    assert get("discobox_device_last_sync_failed", {"device": "wlc-test-1"}) == 0   # still a success
