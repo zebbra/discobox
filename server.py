@@ -84,6 +84,7 @@ from metrics import (
     gaps_excluded,
     gaps_netbox_devices,
     gaps_netdisco_devices,
+    gaps_no_auth_tag,
     gaps_not_in_netbox,
     gaps_not_in_netbox_stale,
     gaps_not_in_netdisco,
@@ -498,6 +499,7 @@ def _run_gaps() -> dict:
         liveness_key=_LIVENESS_KEY,
         not_in_netbox_stale_hours=_NOT_IN_NETBOX_STALE_HOURS,
         exclude=_RECONCILE_EXCLUDE,
+        require_auth_tag=_RECONCILE_REQUIRE_AUTH_TAG,
     )
     gaps_netbox_devices.set(counts["netbox_total"])
     gaps_netdisco_devices.set(counts["netdisco_total"])
@@ -507,6 +509,7 @@ def _run_gaps() -> dict:
     gaps_not_in_netbox_stale.set(counts["not_in_netbox_stale"])
     gaps_tag_mismatches.set(counts["tag_mismatches"])
     gaps_excluded.set(counts.get("excluded", 0))
+    gaps_no_auth_tag.set(counts.get("no_auth_tag", 0))
     summary = {k: v for k, v in counts.items() if not k.endswith("_list")}
     with _reconcile_gaps_lock:
         _save_gap(_NOT_IN_NETDISCO_FILE, counts["not_in_netdisco_list"])

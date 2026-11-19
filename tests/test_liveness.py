@@ -421,3 +421,13 @@ def test_find_gaps_leaves_out_excluded_devices() -> None:
     gaps = find_gaps(FakeND(), FakeNB([lab, meraki, keep]), exclude=rules)
     assert [e["name"] for e in gaps["not_in_netdisco_list"]] == ["sw-3"]
     assert gaps["excluded"] == 2 and gaps["not_in_netdisco"] == 1
+
+
+def test_find_gaps_without_auth_tag_only_counts_with_require_auth_tag() -> None:
+    tagged = FakeDevice("sw-1", "10.0.0.1")
+    tagged.custom_fields = {"snmp_auth_profile": "v3"}
+    untagged = FakeDevice("sw-2", "10.0.0.2")
+    gaps = find_gaps(FakeND(), FakeNB([tagged, untagged]), require_auth_tag=True)
+    assert [e["name"] for e in gaps["not_in_netdisco_list"]] == ["sw-1"] and gaps["no_auth_tag"] == 1
+    gaps = find_gaps(FakeND(), FakeNB([tagged, untagged]))
+    assert len(gaps["not_in_netdisco_list"]) == 2 and gaps["no_auth_tag"] == 0

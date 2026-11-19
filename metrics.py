@@ -203,6 +203,11 @@ gaps_excluded = Gauge(
     "Netbox devices left out by reconcile.exclude (last gaps run)",
     **_reg,
 )
+gaps_no_auth_tag = Gauge(
+    "discobox_gaps_no_auth_tag",
+    "Netbox devices not in Netdisco without an auth tag, left out with reconcile.require_auth_tag (last gaps run)",
+    **_reg,
+)
 interface_defaults_total = Counter(
     "discobox_interface_defaults_total",
     "Interface custom fields filled from interface_defaults (empty ones only), by field",

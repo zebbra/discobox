@@ -1742,7 +1742,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 3,
+        "w": 2,
         "x": 9,
         "y": 31
       },
@@ -1799,6 +1799,71 @@
     {
       "id": 26,
       "type": "stat",
+      "title": "No auth tag",
+      "description": "Not in Netdisco and no snmp_auth_profile: left out with reconcile.require_auth_tag.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "platform"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 2,
+        "x": 11,
+        "y": 31
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
+          "expr": "max(discobox_gaps_no_auth_tag)",
+          "legendFormat": "__auto",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "id": 27,
+      "type": "stat",
       "title": "Not in Netbox",
       "description": "",
       "datasource": {
@@ -1808,7 +1873,7 @@
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 12,
+        "x": 13,
         "y": 31
       },
       "targets": [
@@ -1870,7 +1935,7 @@
       }
     },
     {
-      "id": 27,
+      "id": 28,
       "type": "stat",
       "title": "Not in Netbox (stale)",
       "description": "",
@@ -1881,7 +1946,7 @@
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 15,
+        "x": 16,
         "y": 31
       },
       "targets": [
@@ -1935,7 +2000,7 @@
       }
     },
     {
-      "id": 28,
+      "id": 29,
       "type": "stat",
       "title": "Tag mismatches",
       "description": "",
@@ -1946,7 +2011,7 @@
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 18,
+        "x": 19,
         "y": 31
       },
       "targets": [
@@ -2008,7 +2073,7 @@
       }
     },
     {
-      "id": 29,
+      "id": 30,
       "type": "stat",
       "title": "Liveness query",
       "description": "",
@@ -2018,8 +2083,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 3,
-        "x": 21,
+        "w": 2,
+        "x": 22,
         "y": 31
       },
       "targets": [
@@ -2089,7 +2154,7 @@
       }
     },
     {
-      "id": 30,
+      "id": 31,
       "type": "timeseries",
       "title": "Gaps",
       "description": "",
@@ -2133,9 +2198,21 @@
             "type": "prometheus",
             "uid": "platform"
           },
+          "expr": "max(discobox_gaps_no_auth_tag)",
+          "legendFormat": "no auth tag",
+          "refId": "C",
+          "range": true,
+          "instant": false,
+          "editorMode": "code"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "platform"
+          },
           "expr": "max(discobox_gaps_not_in_netbox)",
           "legendFormat": "not in Netbox",
-          "refId": "C",
+          "refId": "D",
           "range": true,
           "instant": false,
           "editorMode": "code"
@@ -2147,7 +2224,7 @@
           },
           "expr": "max(discobox_gaps_not_in_netbox_stale)",
           "legendFormat": "not in Netbox (stale)",
-          "refId": "D",
+          "refId": "E",
           "range": true,
           "instant": false,
           "editorMode": "code"
@@ -2159,7 +2236,7 @@
           },
           "expr": "max(discobox_gaps_tag_mismatches)",
           "legendFormat": "tag mismatches",
-          "refId": "E",
+          "refId": "F",
           "range": true,
           "instant": false,
           "editorMode": "code"
@@ -2202,7 +2279,7 @@
       }
     },
     {
-      "id": 31,
+      "id": 32,
       "type": "timeseries",
       "title": "Enqueued for discovery / day",
       "description": "",
@@ -2291,7 +2368,7 @@
       }
     },
     {
-      "id": 32,
+      "id": 33,
       "type": "row",
       "title": "Objects written",
       "gridPos": {
@@ -2304,7 +2381,7 @@
       "panels": []
     },
     {
-      "id": 33,
+      "id": 34,
       "type": "timeseries",
       "title": "Interfaces / h",
       "description": "",
@@ -2490,7 +2567,7 @@
       }
     },
     {
-      "id": 34,
+      "id": 35,
       "type": "timeseries",
       "title": "IP addresses / h",
       "description": "",
@@ -2676,7 +2753,7 @@
       }
     },
     {
-      "id": 35,
+      "id": 36,
       "type": "timeseries",
       "title": "Modules / h",
       "description": "",
@@ -2862,7 +2939,7 @@
       }
     },
     {
-      "id": 36,
+      "id": 37,
       "type": "timeseries",
       "title": "SFPs / h",
       "description": "",
@@ -3048,7 +3125,7 @@
       }
     },
     {
-      "id": 37,
+      "id": 38,
       "type": "timeseries",
       "title": "Wireless APs / h",
       "description": "not_found: the WLC reports an AP Netbox doesn't have (alerted after 24h).",
@@ -3234,7 +3311,7 @@
       }
     },
     {
-      "id": 38,
+      "id": 39,
       "type": "timeseries",
       "title": "Orphan interfaces / h",
       "description": "",
@@ -3330,7 +3407,7 @@
       }
     },
     {
-      "id": 39,
+      "id": 40,
       "type": "timeseries",
       "title": "Interface defaults filled / h",
       "description": "",
@@ -3395,7 +3472,7 @@
       }
     },
     {
-      "id": 41,
+      "id": 42,
       "type": "row",
       "title": "Types",
       "gridPos": {
@@ -3407,7 +3484,7 @@
       "collapsed": true,
       "panels": [
         {
-          "id": 40,
+          "id": 41,
           "type": "table",
           "title": "Bare DeviceTypes / ModuleTypes (source=netdisco)",
           "datasource": {
@@ -3513,7 +3590,7 @@
       ]
     },
     {
-      "id": 47,
+      "id": 48,
       "type": "row",
       "title": "API calls, rebuilds",
       "gridPos": {
@@ -3525,7 +3602,7 @@
       "collapsed": true,
       "panels": [
         {
-          "id": 42,
+          "id": 43,
           "type": "timeseries",
           "title": "Netbox requests / min",
           "description": "",
@@ -3590,7 +3667,7 @@
           }
         },
         {
-          "id": 43,
+          "id": 44,
           "type": "timeseries",
           "title": "Netdisco requests / min",
           "description": "",
@@ -3655,7 +3732,7 @@
           }
         },
         {
-          "id": 44,
+          "id": 45,
           "type": "timeseries",
           "title": "Rebuilds / h",
           "description": "",
@@ -3720,7 +3797,7 @@
           }
         },
         {
-          "id": 45,
+          "id": 46,
           "type": "timeseries",
           "title": "HA VIP redirections / h",
           "description": "",
@@ -3785,7 +3862,7 @@
           }
         },
         {
-          "id": 46,
+          "id": 47,
           "type": "timeseries",
           "title": "Deprecated endpoint calls / h",
           "description": "Callers still using an old endpoint; should stay empty.",
@@ -3852,7 +3929,7 @@
       ]
     },
     {
-      "id": 49,
+      "id": 50,
       "type": "row",
       "title": "Per device",
       "gridPos": {
@@ -3864,7 +3941,7 @@
       "collapsed": true,
       "panels": [
         {
-          "id": 48,
+          "id": 49,
           "type": "table",
           "title": "Devices: last sync",
           "datasource": {
