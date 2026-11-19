@@ -1,7 +1,6 @@
 """Interfaces: Netdisco port → Netbox interface, matching, PoE, orphan removal."""
 
 import logging
-import re
 from typing import Optional
 
 from .netbox import NetboxClient
