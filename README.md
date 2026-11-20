@@ -79,8 +79,8 @@ A Grafana dashboard for the metrics is in [`grafana-dashboard.json`](grafana-das
 - **DeviceType enrichment**: fill-blank from the devicetype-library, `GET`/`POST /types/library` ([features](docs/features.md))
 - **Housekeeping**: stale template device bays and empty dummy interfaces removed ([features](docs/features.md))
 - **Orphaned interfaces**: interfaces Netdisco doesn't report removed, with a mass-deletion brake ([features](docs/features.md))
-- **Interface defaults**: fill empty interface custom fields by device custom field, e.g. `interface_severity` per team ([below](#interface-defaults))
-- **Gaps and discover-missing**: Netbox devices Netdisco doesn't know get enqueued for discovery; `reconcile.exclude` rules and `require_auth_tag` keep devices out ([operations](docs/operations.md#jobs))
+- **Interface defaults**: fill empty interface custom fields by device custom field, e.g. `interface_severity` per team ([device rules](docs/device-rules.md#interface-defaults))
+- **Gaps and discover-missing**: Netbox devices Netdisco doesn't know get enqueued for discovery; `reconcile.exclude` rules and `require_auth_tag` keep devices out ([operations](docs/operations.md#jobs), [device rules](docs/device-rules.md#reconcile-exclude))
 - **Auth tag fixes**: `fix-tags` re-discovers devices whose Netdisco auth tag differs from Netbox's ([operations](docs/operations.md#jobs))
 - **Primary IP refresh**: `/refresh-ip` sets the primary IPv4 from DNS, else Netdisco ([endpoints](docs/operations.md#server-endpoints))
 - **Rebuild**: `/rebuild` and `/rebuild/all` match a device's inventory exactly to Netdisco, with dry run and a delete brake ([endpoints](docs/operations.md#server-endpoints))
@@ -140,61 +140,10 @@ hooks:
 
 ---
 
-## Interface defaults
-
-`interface_defaults` fills interface custom fields where they're empty, on every sync of a device that matches a rule. The rules work like the ones in [snmp-modulator](https://github.com/zebbra/snmp-modulator): `match` maps a dotted path on the NetBox device (`status.value`, `role.slug`, `site.slug`, `device_type.manufacturer.slug`, `custom_fields.<name>`, `tags`, ...) to a regex. Every key must match (`re.fullmatch`, case-insensitive). A list field (tags by slug, multi-select) matches when any element does. An object custom field needs its attribute, e.g. `custom_fields.team.slug`.
-
-`set` maps interface custom fields to their value. A value already set is never overwritten, a deliberate `none` included; a value cleared by hand is filled again on the next sync, so set `none` to opt a port out. Per field, the first rule that matches and covers the interface wins. `physical_only` (default `true`) skips virtual (SVI, tunnel, loopback), LAG, bridge and wireless interfaces. A field that doesn't exist on Interface is skipped with a warning, and a value must be a valid choice of its field.
-
-One severity for two teams:
-
-```yaml
-interface_defaults:
-  - name: team severity
-    match:
-      custom_fields.service_team: "netops|campus"
-    set:
-      interface_severity: warning
-```
-
-Tiered, the first matching rule wins (active core switches get `critical` and a monitoring profile, the rest of netops `warning`):
-
-```yaml
-interface_defaults:
-  - name: core
-    match:
-      role.slug: "core-.*"
-      status.value: active
-    set:
-      interface_severity: critical
-      monitoring_profile: full
-  - name: netops
-    match:
-      custom_fields.service_team: netops
-    set:
-      interface_severity: warning
-```
-
-By tag, including virtual interfaces:
-
-```yaml
-interface_defaults:
-  - name: branch
-    match:
-      tags: branch
-      site.slug: "br-.*"
-    set:
-      monitoring_profile: standard
-    physical_only: false
-```
-
-Existing devices get their values on their next sync; to backfill right away: `curl -X POST "http://discobox:8080/sync/all?cf_service_team=netops&force=true"` (extra parameters are NetBox device filters). Metric `discobox_interface_defaults_total{field}`. A debug sync (`/sync?host=...&force=true&debug=true`) logs every rule key as `MATCH`/`MISS` with its pattern and value.
-
----
-
 ## Documentation
 
 - [Configuration](docs/configuration.md): environment variables, `discobox.yaml` sections
 - [Features](docs/features.md): what a sync does, per feature
+- [Device rules](docs/device-rules.md): `match` syntax, `interface_defaults`, `reconcile.exclude`
 - [Netbox Mapping](docs/netbox-mapping.md): field mapping, supported topologies, custom fields, type aliases
 - [Operations](docs/operations.md): jobs, server endpoints, overload protection, metrics, sample log output
