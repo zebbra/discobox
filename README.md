@@ -11,7 +11,7 @@ In production with 10,000+ devices: Cisco StackWise, VSS, ACI and vPC, Wireless 
 
 Devices are matched by management IP. Hostnames are verified and a warning is logged on mismatch, but the sync proceeds regardless.
 
-Netbox is written to directly via [pynetbox](https://github.com/netbox-community/pynetbox) for simplicity. Migration to [Netbox Diode](https://github.com/netbox-community/netbox-diode) is a future consideration once its entity coverage matures.
+Netbox is written to directly via [pynetbox](https://github.com/netbox-community/pynetbox). [Netbox Diode](https://github.com/netbox-community/netbox-diode) was evaluated and not adopted: it adds about eight services (database, cache, auth, ingester, reconciler, proxy) plus a Netbox plugin, but takes none of the domain logic off discobox (HA/VIP resolution, stacks, the degraded-poll guard, the orphan brake, cooldowns), which a Diode producer would still need.
 
 ---
 
