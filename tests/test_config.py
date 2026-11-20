@@ -25,6 +25,12 @@ def test_repo_example_config_is_valid() -> None:
     assert settings.jobs.types_bare.interval == 3600
 
 
+@pytest.mark.parametrize("path", sorted((REPO / "examples").glob("*.yaml")), ids=lambda p: p.name)
+def test_examples_are_valid(path) -> None:
+    settings, _ = load_settings(str(path))
+    assert settings is not None
+
+
 def test_defaults() -> None:
     s = parse_settings({})
     assert s.sync.cooldown == 3600 and s.sync.max_concurrent == 3 and s.sync.retry.delay == 480

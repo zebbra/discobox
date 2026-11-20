@@ -94,7 +94,7 @@ A Grafana dashboard for the metrics is in [`grafana-dashboard.json`](grafana-das
 
 A FastAPI server that receives webhook calls from Netdisco after each discovery and runs syncs in the background. Exposes a status page, Prometheus metrics and a Swagger UI. One process: jobs, in-flight tracking and metrics live in it. At runtime it needs no internet access: the devicetype-library and the Swagger UI assets are baked into the image at build time (build args `DEVICETYPE_LIBRARY_*`, `SWAGGER_UI_VERSION` / `SWAGGER_UI_SHA256`).
 
-Connections and secrets come from the environment (`.env.example`), everything else from `discobox.yaml` (the annotated [`discobox.yaml`](discobox.yaml) in this repo lists every key with its default). See [Configuration](docs/configuration.md).
+Connections and secrets come from the environment (`.env.example`), everything else from `discobox.yaml` (the annotated [`discobox.yaml`](discobox.yaml) lists every key with its default, [`examples/production.yaml`](examples/production.yaml) shows a typical production setup). See [Configuration](docs/configuration.md).
 
 ```env
 NETDISCO_URL=https://netdisco.example.com

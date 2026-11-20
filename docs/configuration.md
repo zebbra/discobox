@@ -2,7 +2,7 @@
 
 Environment variables and `discobox.yaml`.
 
-Connections and secrets come from the environment (`.env.example`), everything else from `discobox.yaml` (path in `DISCOBOX_CONFIG`; the annotated `discobox.yaml` in this repo lists every key with its default). The file is checked at startup: an unknown key or a wrong type stops discobox with the offending path, e.g. `sync.cooldwn: Extra inputs are not permitted`. `GET /config` shows the effective settings, secrets masked.
+Connections and secrets come from the environment (`.env.example`), everything else from `discobox.yaml` (path in `DISCOBOX_CONFIG`; the annotated `discobox.yaml` in this repo lists every key with its default, [`examples/production.yaml`](../examples/production.yaml) shows a typical production setup with only what differs from the defaults). The file is checked at startup: an unknown key or a wrong type stops discobox with the offending path, e.g. `sync.cooldwn: Extra inputs are not permitted`. `GET /config` shows the effective settings, secrets masked.
 
 ```env
 NETDISCO_URL=https://netdisco.example.com
@@ -27,13 +27,13 @@ The main `discobox.yaml` sections:
 | Section | What it sets |
 |---|---|
 | `sync` | Feature defaults per sync (`no_mac`, `no_ip`, `no_modules`, `no_sfp`, `no_poe`, `housekeeping`, `lldp_clear_stale`; per request overridable), cooldown, VIP handling (`vip_mode`, `vip_mode_by_vendor`), concurrency (`max_concurrent`, `max_queue`), `retry`, `circuit_breaker`, `pause_on_error`, orphan removal, Fortinet HA resolution (`ha_resolve`) |
-| `custom_fields`, `cabling` | Custom field names discobox writes and reads; null disables one |
+| `custom_fields`, `cabling` | Custom field names discobox writes and reads; null disables one. Cable scope and ownership, see [Cables](netbox-mapping.md#cables) |
 | `types`, `library` | DeviceType resolution (aliases, `create_missing`) and devicetype-library enrichment |
 | `refresh_ip` | DNS suffixes (`domains`) and role blacklist (`exclude_roles`, default `lwapp-ap`) for `/refresh-ip` |
 | `rebuild` | Limits of the bulk rebuild `/rebuild/all`: devices per run (`max_devices`, 20) and the delete brake (`max_delete_percent`, 50; `null` = off) |
 | `aps` | WLC access point pass |
-| `reconcile`, `auto_create` | Device selection for the gaps job, the `liveness` gate, discover-missing limits, auto-created devices |
-| `interface_defaults` | Rules (`match` device paths by regex, `set` interface custom fields) that fill empty interface custom fields, e.g. `interface_severity: warning` where `custom_fields.service_team` matches `netops\|campus`; see [Features](features.md) |
+| `reconcile`, `auto_create` | Device selection for the gaps job (`roles`, `statuses`, `exclude` rules, `require_auth_tag`), the `liveness` gate, discover-missing limits, auto-created devices; see [Device rules](device-rules.md#reconcile-exclude) |
+| `interface_defaults` | Rules (`match` device paths by regex, `set` interface custom fields) that fill empty interface custom fields, e.g. `interface_severity: warning` where `custom_fields.service_team` matches `netops\|campus`; see [Device rules](device-rules.md#interface-defaults) |
 | `jobs` | Job schedules (see [Jobs](operations.md#jobs)) |
 | `netdisco` | Per-request SNMP timeout of the discover jobs discobox enqueues |
 | `auth` | `metrics_path`; `token` (prefer `DISCOBOX_AUTH_TOKEN`) |

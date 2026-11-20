@@ -1,0 +1,71 @@
+# A typical production setup: a few thousand to 10,000+ devices, Netdisco
+# discovering on its own schedule, discobox syncing on its hook and closing the
+# gaps once an hour. Only what differs from the defaults is set; the annotated
+# discobox.yaml in the repo root lists every key with its default.
+
+sync:
+  max_concurrent: 4           # parallel syncs; Netbox is usually the bottleneck
+  vip_mode: soft              # a VSS/HSRP floating IP goes to the interface that answers it
+  vip_mode_by_vendor:
+    fortinet: threenode       # FortiGate HA: the cluster IP stays on its own VIP device
+  no_ip: true                 # IP addresses come from IPAM, not from discovery
+  no_mac: true
+  housekeeping: true          # stale template bays and empty dummy interfaces
+  remove_orphaned_interfaces: false   # keep source-less (imported, manual) interfaces until reviewed
+
+jobs:
+  discover-missing:
+    interval: 3600            # hourly instead of daily; max_enqueue below keeps each run small
+
+reconcile:
+  max_enqueue: 10             # discovery jobs per discover-missing run
+  roles: [router, switch, firewall, appliance, wlc]
+  statuses: [active, maintenance]    # maintenance devices still answer SNMP
+  require_auth_tag: true      # without snmp_auth_profile Netdisco has no credentials to try
+  exclude:                    # never pushed to Netdisco (see docs/device-rules.md)
+    - name: appliances without SNMP inventory
+      match:
+        device_type.manufacturer.slug: "vendor-a|vendor-b"
+    - name: dns and proxy hosts
+      match:
+        name: '(proxy-|ns)\w+\.example\.net'
+    - name: identity appliances
+      match:
+        device_type.slug: "ise.*"
+  liveness:                   # skip devices the SNMP scrape reports down
+    url: http://vmselect.monitoring.svc:8481/select/0/prometheus
+    query: 'max_over_time(up{job="snmp"}[6h])'
+    label: netbox_primary_ip
+    key: ip
+
+rebuild:
+  max_devices: 50             # /rebuild/all: about 30-40 s per device
+
+types:
+  create_missing: true        # unknown models get a bare DeviceType (source=netdisco)
+  alias_cf: snmp_models       # DeviceType custom field with extra raw SNMP model names
+  device_aliases:             # raw SNMP model (Netdisco) → Netbox part_number, model or slug
+    cisco:
+      N9KC93180YCFX3: N9K-C93180YC-FX3
+      C9800CLK9: C9800-CL-K9
+      ASR1001X: ASR1001-X
+    fortinet:
+      fgt101F: FGT_101F
+      '.105': fortimail-generic     # OID fragment: only unique within the vendor, so scoped
+
+library:
+  roles: [wlc-ap]             # roles /types/library?role= reports by default
+  device_types:               # Netbox type → devicetype-library entry, where names differ
+    FGT_101F: FG-101F
+    WS-C3850-24S-S: WS-C3850-24S
+
+aps:
+  prune_interfaces: true
+  type_confirmed_untag: [fixme-model]   # tag removed once an AP's model resolves
+
+interface_defaults:           # see docs/device-rules.md
+  - name: team severity
+    match:
+      custom_fields.service_team: "netops|campus"
+    set:
+      interface_severity: warning
