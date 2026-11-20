@@ -31,6 +31,32 @@ flowchart LR
     DB -. "gaps: liveness check" .-> VM
 ```
 
+### Sync and reconcile loop
+
+A sync is triggered by Netdisco's hook after each discovery. The jobs close the loop for devices Netdisco never discovers on its own: `gaps` compares both sides, `discover-missing` enqueues the Netbox devices Netdisco doesn't know, and their discovery triggers the hook again.
+
+```mermaid
+sequenceDiagram
+    participant ND as Netdisco
+    participant DB as discobox
+    participant NB as Netbox
+
+    ND->>DB: POST /sync?host=IP (hook after discovery)
+    DB->>ND: device, ports, modules, IPs, APs
+    DB->>NB: write inventory
+    Note over DB: jobs
+    DB->>NB: gaps: devices (roles, statuses, minus reconcile.exclude)
+    DB->>ND: gaps: known devices
+    DB->>ND: discover-missing: enqueue discovery (auth tag, liveness, max_enqueue)
+    ND-->>DB: hook after that discovery
+```
+
+The status page (`/`) shows the jobs, the gap lists and the actions (sync, rebuild, discover, sync all):
+
+![Status page](docs/status-page.png)
+
+A Grafana dashboard for the metrics is in [`grafana-dashboard.json`](grafana-dashboard.json) (Prometheus datasource uid `platform`; change it on import).
+
 ---
 
 ## Features
@@ -51,7 +77,13 @@ flowchart LR
 - **DeviceType enrichment**: fill-blank from the devicetype-library, `GET`/`POST /types/library` ([features](docs/features.md))
 - **Housekeeping**: stale template device bays and empty dummy interfaces removed ([features](docs/features.md))
 - **Orphaned interfaces**: interfaces Netdisco doesn't report removed, with a mass-deletion brake ([features](docs/features.md))
-- **Interface defaults**: fill empty interface custom fields by device custom field, e.g. `interface_severity` per team ([features](docs/features.md))
+- **Interface defaults**: fill empty interface custom fields by device custom field, e.g. `interface_severity` per team ([below](#interface-defaults))
+- **Gaps and discover-missing**: Netbox devices Netdisco doesn't know get enqueued for discovery; `reconcile.exclude` rules and `require_auth_tag` keep devices out ([operations](docs/operations.md#jobs))
+- **Auth tag fixes**: `fix-tags` re-discovers devices whose Netdisco auth tag differs from Netbox's ([operations](docs/operations.md#jobs))
+- **Primary IP refresh**: `/refresh-ip` sets the primary IPv4 from DNS, else Netdisco ([endpoints](docs/operations.md#server-endpoints))
+- **Rebuild**: `/rebuild` and `/rebuild/all` match a device's inventory exactly to Netdisco, with dry run and a delete brake ([endpoints](docs/operations.md#server-endpoints))
+- **Pinned devices**: a `sync.skip_tags` tag (default `pin-inventory`) keeps a device out of every sync and rebuild ([operations](docs/operations.md))
+- **Metrics and alerts**: Prometheus metrics for syncs, jobs, gaps and types; Grafana dashboard ([operations](docs/operations.md))
 
 ---
 
