@@ -71,6 +71,7 @@ A Grafana dashboard for the metrics is in [`grafana-dashboard.json`](grafana-das
 - **Module bays & modules**: chassis members as module bays with modules ([mapping](docs/netbox-mapping.md#module-bays--modules))
 - **Blades**: linecards, supervisors, fabric modules as module bays ([mapping](docs/netbox-mapping.md#blades-linecards--supervisors))
 - **Device type auto-creation**: manufacturer and device type if missing, [type aliases](docs/netbox-mapping.md#type-aliases) first ([features](docs/features.md))
+- **Cables**: from CDP/LLDP neighbors within a site, resolved by IP, MAC, name or FDB; manual cables are never touched ([mapping](docs/netbox-mapping.md#cables))
 - **SFP / transceiver inventory**: inventory items linked to their interface ([mapping](docs/netbox-mapping.md#sfp--transceivers))
 - **PSU inventory**: inventory items for power supplies ([features](docs/features.md))
 - **HA / VIP detection**: VIP by hostname mismatch, Virtual Chassis of the HA members ([topologies](docs/netbox-mapping.md#supported-topologies))

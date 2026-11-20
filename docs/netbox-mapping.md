@@ -137,9 +137,24 @@ keeps its current type (auto-create skips the device instead).
 
 ### Written by discobox on Interfaces (Netdisco → Netbox)
 
-CDP/LLDP neighbor data from Netdisco, written on every interface sync. Text fields — no dependency on the neighbor existing in Netbox.
+CDP/LLDP neighbor data from Netdisco, written on every interface sync. Names configurable in `custom_fields`; null disables one.
 
-| Slug | Type | Object | Description |
+| Default slug | Type | Object | Description |
 |---|---|---|---|
-| `lldp_neighbor` | Text | `dcim.interface` | Neighbor device hostname as reported by CDP/LLDP |
-| `lldp_neighbor_port` | Text | `dcim.interface` | Neighbor port name as reported by CDP/LLDP |
+| `neighbor` | Text | `dcim.interface` | Neighbor chassis/device ID as reported by CDP/LLDP |
+| `neighbor_port` | Text | `dcim.interface` | Neighbor port as reported by CDP/LLDP |
+| `neighbor_device` | Object (Device) | `dcim.interface` | The neighbor device in Netbox, when resolved |
+| `neighbor_iface` | Object (Interface) | `dcim.interface` | The neighbor interface in Netbox, when resolved |
+
+A port without a neighbor keeps its old values unless `sync.lldp_clear_stale` is on.
+
+## Cables
+
+From the CDP/LLDP neighbors: a cable between a port and the neighbor's interface in Netbox (`cabling.scope: site`, the default; null turns cabling off).
+
+- **Neighbor resolution**, in this order: the neighbor's IP (primary IP, then any IP assigned in Netbox) plus its port name, also abbreviated (`Gi0` → `GigabitEthernet0`); the LLDP chassis ID as a MAC on exactly one Netbox interface (e.g. a Cisco AP's Ethernet MAC from the WLC sync); a CDP device ID / LLDP system name as the name of exactly one Netbox device; the switch's own FDB for that port (at most 4 MACs) when nothing else resolved
+- **Scope**: `site` only cables two devices in the same Netbox site
+- **Ports**: physical only, no virtual, LAG or bridge interfaces. Cable type `cat5e` for copper interface types, else `smf`
+- **Ownership**: a created cable gets `source=netdisco` (`cabling.source_cf` / `source_value`). An existing cable between exactly these two interfaces is kept (an unowned one is claimed). A cable discobox owns that leads elsewhere (re-patched) or a dangling one (one end deleted) is replaced. Any other cable that leads elsewhere (manual, another source) is a `conflict` and never touched
+- **Stale cables**: discobox-owned cables on ports that report no neighbor at all are deleted only with `sync.lldp_clear_stale: true`. A port whose neighbor just couldn't be resolved this run keeps its cable
+- **Log**: `Cables : created: N conflict: N deleted: N` per sync (debug); a cable error is a warning and doesn't count as a sync error
