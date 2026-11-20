@@ -545,6 +545,8 @@ def _job_gaps() -> JobResult:
     parts.append(f"{c['tag_mismatches']} tag mismatches")
     if c.get("excluded"):
         parts.append(f"{c['excluded']} excluded")
+    if c.get("no_auth_tag"):
+        parts.append(f"{c['no_auth_tag']} without auth tag")
     return JobResult(summary=", ".join(parts), data=c)
 
 
