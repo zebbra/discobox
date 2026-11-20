@@ -7,6 +7,8 @@
 
 Syncs network device inventory from [Netdisco](https://github.com/netdisco/netdisco) into [Netbox](https://netbox.dev/), enriching existing Netbox device records with live data discovered by Netdisco.
 
+In production with 10,000+ devices: Cisco StackWise, VSS, ACI and vPC, Wireless LAN controllers with their APs, Fortinet FortiGate HA pairs and other appliances.
+
 Devices are matched by management IP. Hostnames are verified and a warning is logged on mismatch, but the sync proceeds regardless.
 
 Netbox is written to directly via [pynetbox](https://github.com/netbox-community/pynetbox) for simplicity. Migration to [Netbox Diode](https://github.com/netbox-community/netbox-diode) is a future consideration once its entity coverage matures.

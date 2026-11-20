@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="400" viewBox="0 0 1280 400">
+  <defs>
+    <radialGradient id="bg" cx="22%" cy="45%" r="85%">
+      <stop offset="0" stop-color="#2a1f4d"/>
+      <stop offset="0.55" stop-color="#14112a"/>
+      <stop offset="1" stop-color="#0a0915"/>
+    </radialGradient>
+    <radialGradient id="ballShade" cx="38%" cy="32%" r="70%">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.35"/>
+      <stop offset="0.6" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.45"/>
+    </radialGradient>
+    <linearGradient id="title" x1="0" x2="1">
+      <stop offset="0" stop-color="#c9b8ff"/>
+      <stop offset="1" stop-color="#5fe0b5"/>
+    </linearGradient>
+    <clipPath id="ballClip"><circle cx="230" cy="200" r="110"/></clipPath>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="400" fill="url(#bg)"/>
+
+  <!-- light beams -->
+  <g opacity="0.16">
+    <polygon points="230,200 760,-40 900,-40" fill="#a78bfa"/>
+    <polygon points="230,200 1280,60 1280,150" fill="#5fe0b5"/>
+    <polygon points="230,200 1280,330 1280,420" fill="#f472b6"/>
+    <polygon points="230,200 700,440 840,440" fill="#60a5fa"/>
+    <polygon points="230,200 -40,440 60,440" fill="#facc15"/>
+  </g>
+
+  <!-- stars -->
+  <g fill="#ffffff">
+    <circle cx="520" cy="40" r="1.4" opacity="0.6"/><circle cx="610" cy="355" r="1.2" opacity="0.5"/>
+    <circle cx="1180" cy="45" r="1.6" opacity="0.7"/><circle cx="1220" cy="360" r="1.2" opacity="0.5"/>
+    <circle cx="90" cy="60" r="1.3" opacity="0.6"/><circle cx="430" cy="370" r="1.1" opacity="0.4"/>
+    <circle cx="980" cy="25" r="1.2" opacity="0.5"/><circle cx="60" cy="340" r="1.4" opacity="0.6"/>
+  </g>
+
+  <!-- string -->
+  <line x1="230" y1="0" x2="230" y2="90" stroke="#8b7fc7" stroke-width="2" stroke-dasharray="4 4"/>
+
+  <!-- disco ball -->
+  <circle cx="230" cy="200" r="122" fill="#a78bfa" opacity="0.35" filter="url(#glow)"/>
+  <g clip-path="url(#ballClip)">
+    <rect x="110" y="80" width="240" height="240" fill="#3b2f73"/>
+    <g id="tiles" stroke="#1d1740" stroke-width="2">
+      <!-- rows of mirror tiles -->
+      <g fill="#6d5bd0">
+        <rect x="110" y="90" width="24" height="18"/><rect x="158" y="90" width="24" height="18" fill="#9f8cf0"/><rect x="206" y="90" width="24" height="18"/><rect x="254" y="90" width="24" height="18" fill="#c4b5fd"/><rect x="302" y="90" width="24" height="18"/>
+        <rect x="134" y="108" width="24" height="18" fill="#c4b5fd"/><rect x="182" y="108" width="24" height="18"/><rect x="230" y="108" width="24" height="18" fill="#9f8cf0"/><rect x="278" y="108" width="24" height="18"/><rect x="326" y="108" width="24" height="18" fill="#5fe0b5"/>
+        <rect x="110" y="126" width="24" height="18"/><rect x="158" y="126" width="24" height="18" fill="#ede9fe"/><rect x="206" y="126" width="24" height="18" fill="#9f8cf0"/><rect x="254" y="126" width="24" height="18"/><rect x="302" y="126" width="24" height="18" fill="#9f8cf0"/>
+        <rect x="134" y="144" width="24" height="18"/><rect x="182" y="144" width="24" height="18" fill="#c4b5fd"/><rect x="230" y="144" width="24" height="18"/><rect x="278" y="144" width="24" height="18" fill="#5fe0b5"/><rect x="326" y="144" width="24" height="18"/>
+        <rect x="110" y="162" width="24" height="18" fill="#9f8cf0"/><rect x="158" y="162" width="24" height="18"/><rect x="206" y="162" width="24" height="18" fill="#ede9fe"/><rect x="254" y="162" width="24" height="18"/><rect x="302" y="162" width="24" height="18" fill="#c4b5fd"/>
+        <rect x="134" y="180" width="24" height="18" fill="#5fe0b5"/><rect x="182" y="180" width="24" height="18"/><rect x="230" y="180" width="24" height="18" fill="#9f8cf0"/><rect x="278" y="180" width="24" height="18"/><rect x="326" y="180" width="24" height="18" fill="#9f8cf0"/>
+        <rect x="110" y="198" width="24" height="18"/><rect x="158" y="198" width="24" height="18" fill="#9f8cf0"/><rect x="206" y="198" width="24" height="18"/><rect x="254" y="198" width="24" height="18" fill="#c4b5fd"/><rect x="302" y="198" width="24" height="18"/>
+        <rect x="134" y="216" width="24" height="18" fill="#c4b5fd"/><rect x="182" y="216" width="24" height="18"/><rect x="230" y="216" width="24" height="18" fill="#5fe0b5"/><rect x="278" y="216" width="24" height="18"/><rect x="326" y="216" width="24" height="18"/>
+        <rect x="110" y="234" width="24" height="18"/><rect x="158" y="234" width="24" height="18"/><rect x="206" y="234" width="24" height="18" fill="#9f8cf0"/><rect x="254" y="234" width="24" height="18"/><rect x="302" y="234" width="24" height="18" fill="#9f8cf0"/>
+        <rect x="134" y="252" width="24" height="18" fill="#9f8cf0"/><rect x="182" y="252" width="24" height="18"/><rect x="230" y="252" width="24" height="18"/><rect x="278" y="252" width="24" height="18" fill="#c4b5fd"/><rect x="326" y="252" width="24" height="18"/>
+        <rect x="110" y="270" width="24" height="18"/><rect x="158" y="270" width="24" height="18" fill="#5fe0b5"/><rect x="206" y="270" width="24" height="18"/><rect x="254" y="270" width="24" height="18"/><rect x="302" y="270" width="24" height="18"/>
+        <rect x="134" y="288" width="24" height="18"/><rect x="182" y="288" width="24" height="18" fill="#9f8cf0"/><rect x="230" y="288" width="24" height="18"/><rect x="278" y="288" width="24" height="18"/><rect x="326" y="288" width="24" height="18"/>
+      </g>
+      <g fill="#4c3fa0">
+        <rect x="134" y="90" width="24" height="18"/><rect x="182" y="90" width="24" height="18"/><rect x="230" y="90" width="24" height="18"/><rect x="278" y="90" width="24" height="18"/><rect x="326" y="90" width="24" height="18"/>
+        <rect x="110" y="108" width="24" height="18"/><rect x="158" y="108" width="24" height="18"/><rect x="206" y="108" width="24" height="18"/><rect x="254" y="108" width="24" height="18"/><rect x="302" y="108" width="24" height="18"/>
+        <rect x="134" y="126" width="24" height="18"/><rect x="182" y="126" width="24" height="18"/><rect x="230" y="126" width="24" height="18"/><rect x="278" y="126" width="24" height="18"/><rect x="326" y="126" width="24" height="18"/>
+        <rect x="110" y="144" width="24" height="18"/><rect x="158" y="144" width="24" height="18"/><rect x="206" y="144" width="24" height="18"/><rect x="254" y="144" width="24" height="18"/><rect x="302" y="144" width="24" height="18"/>
+        <rect x="134" y="162" width="24" height="18"/><rect x="182" y="162" width="24" height="18"/><rect x="230" y="162" width="24" height="18"/><rect x="278" y="162" width="24" height="18"/><rect x="326" y="162" width="24" height="18"/>
+        <rect x="110" y="180" width="24" height="18"/><rect x="158" y="180" width="24" height="18"/><rect x="206" y="180" width="24" height="18"/><rect x="254" y="180" width="24" height="18"/><rect x="302" y="180" width="24" height="18"/>
+        <rect x="134" y="198" width="24" height="18"/><rect x="182" y="198" width="24" height="18"/><rect x="230" y="198" width="24" height="18"/><rect x="278" y="198" width="24" height="18"/><rect x="326" y="198" width="24" height="18"/>
+        <rect x="110" y="216" width="24" height="18"/><rect x="158" y="216" width="24" height="18"/><rect x="206" y="216" width="24" height="18"/><rect x="254" y="216" width="24" height="18"/><rect x="302" y="216" width="24" height="18"/>
+        <rect x="134" y="234" width="24" height="18"/><rect x="182" y="234" width="24" height="18"/><rect x="230" y="234" width="24" height="18"/><rect x="278" y="234" width="24" height="18"/><rect x="326" y="234" width="24" height="18"/>
+        <rect x="110" y="252" width="24" height="18"/><rect x="158" y="252" width="24" height="18"/><rect x="206" y="252" width="24" height="18"/><rect x="254" y="252" width="24" height="18"/><rect x="302" y="252" width="24" height="18"/>
+        <rect x="134" y="270" width="24" height="18"/><rect x="182" y="270" width="24" height="18"/><rect x="230" y="270" width="24" height="18"/><rect x="278" y="270" width="24" height="18"/><rect x="326" y="270" width="24" height="18"/>
+        <rect x="110" y="288" width="24" height="18"/><rect x="158" y="288" width="24" height="18"/><rect x="206" y="288" width="24" height="18"/><rect x="254" y="288" width="24" height="18"/><rect x="302" y="288" width="24" height="18"/>
+      </g>
+    </g>
+    <circle cx="230" cy="200" r="110" fill="url(#ballShade)"/>
+  </g>
+  <circle cx="230" cy="200" r="110" fill="none" stroke="#c4b5fd" stroke-opacity="0.5" stroke-width="2"/>
+  <!-- sparkle -->
+  <g fill="#ffffff" transform="translate(190 140)">
+    <polygon points="0,-16 3,-3 16,0 3,3 0,16 -3,3 -16,0 -3,-3"/>
+  </g>
+
+  <!-- text -->
+  <g font-family="DejaVu Sans Mono, Menlo, Consolas, monospace">
+    <text x="420" y="185" font-size="96" font-weight="bold" fill="url(#title)" letter-spacing="2">discobox</text>
+    <text x="424" y="233" font-size="30" fill="#e9e4ff">Keeps NetBox in step with Netdisco</text>
+    <text x="424" y="277" font-size="20" fill="#9a93c4">Netdisco <tspan fill="#5fe0b5">→</tspan> NetBox inventory sync</text>
+  </g>
+</svg>
