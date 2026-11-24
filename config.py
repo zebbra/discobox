@@ -198,6 +198,14 @@ class ExcludeRule(_Section):
                                       # all must match: name, device_type.model, site.slug, tags
 
 
+class Expire(_Section):
+    statuses: StrList = []            # Netbox statuses whose device is deleted from Netdisco, e.g. decommissioning
+    stale_days: Optional[float] = None    # Netdisco devices not in Netbox and not discovered for this long
+    archive: bool = True              # keep the device's MAC/ARP history (Netdisco's "Archive Nodes")
+    max_delete: Optional[int] = 10    # delete jobs per run
+    dry_run: bool = True              # only log and list what would be deleted
+
+
 class Reconcile(_Section):
     max_queued: Optional[int] = None
     max_failed: Optional[int] = None
@@ -210,6 +218,7 @@ class Reconcile(_Section):
     not_in_netbox_stale_hours: Optional[float] = 24
     exclude: list[ExcludeRule] = []   # Netbox devices never pushed to Netdisco (gaps, discover-missing, fix-tags)
     liveness: Liveness = Liveness()
+    expire: Expire = Expire()         # delete gone devices from Netdisco (the expire job)
 
 
 class AutoCreate(_Section):
@@ -231,6 +240,7 @@ class Jobs(_Section):
     gaps: GapsSchedule = GapsSchedule(interval=3600)
     discover_missing: JobSchedule = Field(default=JobSchedule(interval=86400), alias="discover-missing")
     types_bare: JobSchedule = Field(default=JobSchedule(interval=3600), alias="types-bare")
+    expire: JobSchedule = JobSchedule(interval=0)
 
 
 class InterfaceDefault(_Section):

@@ -360,6 +360,8 @@ def find_gaps(
     not_in_netbox_stale_hours: Optional[float] = 24,   # see _stale_cutoff; None/0 = off
     exclude: Optional[list] = None,    # [{"name", "match"}]: Netbox devices left out entirely
     require_auth_tag: bool = False,    # unknown to Netdisco and no auth tag: counted, not listed
+    expire_statuses: Optional[list] = None,     # Netbox statuses whose Netdisco device expire deletes
+    expire_stale_days: Optional[float] = None,  # not in Netbox and not discovered for this long: expire
 ) -> dict:
     """
     Compare Netbox with Netdisco (read-only on both): Netbox devices (roles,
@@ -380,6 +382,13 @@ def find_gaps(
     in no list, so neither discover-missing nor fix-tags pushes them. With
     require_auth_tag, Netbox devices Netdisco doesn't know and that have no
     auth tag are only counted (no_auth_tag): discover-missing can't enqueue them.
+
+    The expire list holds the Netdisco devices the expire job deletes: those
+    whose Netbox device has one of expire_statuses (matched by primary IP, else
+    by name), and those missing from Netbox whose last discovery is more than
+    expire_stale_days older than Netdisco's newest. Pseudo devices, excluded
+    Netbox devices and IPs that are the primary IP of another Netbox device
+    (a new device on an old address) are never listed.
 
     Raises when Netdisco's device list can't be fetched.
     """
@@ -433,11 +442,16 @@ def find_gaps(
 
     # Deliberately NOT role/status-scoped: a device under any other role or
     # status still counts as "in Netbox" for the not-in-Netbox list.
-    nb_all_ips = {
-        str(d.primary_ip4).split("/")[0]
-        for d in nb.nb.dcim.devices.filter(primary_ip4__isnull=False)
-        if d.primary_ip4
-    }
+    expire_status_set = {str(s).lower() for s in expire_statuses or []}
+    nb_all_ips: set = set()
+    nb_kept_ips: set = set()   # primary IPs of devices expire leaves alone
+    for d in nb.nb.dcim.devices.filter(primary_ip4__isnull=False):
+        if d.primary_ip4:
+            ip = str(d.primary_ip4).split("/")[0]
+            nb_all_ips.add(ip)
+            status = getattr(d, "status", None)
+            if not expire_status_set or str(getattr(status, "value", status) or "").lower() not in expire_status_set:
+                nb_kept_ips.add(ip)
     cutoff = _stale_cutoff(nd_all_devices, not_in_netbox_stale_hours)
     not_in_netbox: list[dict] = []
     for d in nd_all_devices:
@@ -459,9 +473,117 @@ def find_gaps(
     log.info("Gaps: not_in_netdisco=%d (+%d offline)  not_in_netbox=%d (+%d stale)  tag_mismatches=%d  excluded=%d  no_auth_tag=%d",
              counts["not_in_netdisco"], offline, counts["not_in_netbox"], stale, len(tag_mismatches),
              counts["excluded"], counts["no_auth_tag"])
+    expire = _expire_candidates(nb, nd_all_devices, not_in_netbox, nb_kept_ips, expire_statuses,
+                                expire_stale_days, exclude, log)
+    counts["expire"] = len(expire)
+    if expire:
+        log.info("Gaps: %d Netdisco device(s) to expire", len(expire))
+    counts["expire_list"] = expire
     counts["not_in_netdisco_list"] = not_in_netdisco
     counts["not_in_netbox_list"] = not_in_netbox
     counts["tag_mismatches_list"] = tag_mismatches
+    return counts
+
+
+def _is_pseudo(d: dict) -> bool:
+    return str(d.get("is_pseudo")).lower() in ("1", "true") or (d.get("vendor") or "").lower() == "netdisco"
+
+
+def _expire_candidates(
+    nb: "NetboxClient",
+    nd_all_devices: list[dict],
+    not_in_netbox: list[dict],
+    nb_kept_ips: set,
+    statuses: Optional[list],
+    stale_days: Optional[float],
+    exclude: Optional[list],
+    log: logging.Logger,
+) -> list[dict]:
+    """The expire list of find_gaps: [{ip, name, reason, last_discover}], oldest discovery first."""
+    if not statuses and not stale_days:
+        return []
+    nd_by_ip = {d["ip"]: d for d in nd_all_devices if d.get("ip") and not _is_pseudo(d)}
+    out: dict[str, dict] = {}
+
+    if statuses:
+        by_name: dict[str, set] = {}
+        for d in nd_by_ip.values():
+            for n in {(d.get("name") or "").lower(), (d.get("dns") or "").lower()} - {""}:
+                for key in {n, n.split(".")[0]}:
+                    by_name.setdefault(key, set()).add(d["ip"])
+        for device in nb.nb.dcim.devices.filter(status=list(statuses)):
+            if first_matching_rule(device, exclude):
+                continue
+            primary = str(device.primary_ip4).split("/")[0] if device.primary_ip4 else None
+            ip = primary if primary in nd_by_ip else None
+            if not ip and device.name:
+                name = str(device.name).lower()
+                found = by_name.get(name) or by_name.get(name.split(".")[0]) or set()
+                ip = next(iter(found)) if len(found) == 1 else None
+            if not ip:
+                continue
+            status = getattr(device.status, "value", device.status)
+            seen = _parse_nd_time(nd_by_ip[ip].get("last_discover"))
+            out[ip] = {"ip": ip, "name": device.name, "reason": f"Netbox status {status}",
+                       "last_discover": seen.strftime("%Y-%m-%d %H:%M") if seen else None}
+        # an address another Netbox device has as its primary IP belongs to that one now
+        for ip in [ip for ip in out if ip in nb_kept_ips]:
+            log.info("Expire: %s (%s) kept, the IP is the primary IP of another Netbox device",
+                     ip, out.pop(ip)["name"])
+
+    cutoff = _stale_cutoff(nd_all_devices, stale_days * 24 if stale_days else None)
+    if cutoff:
+        for e in not_in_netbox:
+            seen = _parse_nd_time(e.get("last_discover"))
+            if e["ip"] in out or e["ip"] not in nd_by_ip or seen is None or seen >= cutoff:
+                continue
+            out[e["ip"]] = {"ip": e["ip"], "name": e["name"], "last_discover": e["last_discover"],
+                            "reason": f"not in Netbox, not discovered for {stale_days:g}d"}
+    return sorted(out.values(), key=lambda e: (e["last_discover"] or "", e["ip"]))
+
+
+def expire_devices(
+    nd: "NetdiscoClient",
+    candidates: list[dict],
+    max_delete: Optional[int] = 10,
+    archive: bool = True,
+    dry_run: bool = True,
+    max_queued: Optional[int] = 500,
+    max_failed: Optional[int] = 500,
+) -> dict:
+    """
+    Act on find_gaps' expire list: enqueue a Netdisco delete job per device;
+    archive keeps its nodes (MAC/ARP history) as inactive ones. dry_run only
+    logs what would be deleted. max_delete caps the delete jobs per run.
+
+    Returns counts: deleted (would_delete on a dry run) / capped / errors / aborted.
+    """
+    log = logging.getLogger("discobox.reconcile")
+    key = "would_delete" if dry_run else "deleted"
+    counts = {"aborted": False, key: 0, "capped": 0, "errors": 0}
+    if not dry_run and not _netdisco_queue_ok(nd, max_queued, max_failed, log, "Expire"):
+        counts["aborted"] = True
+        return counts
+    for entry in candidates:
+        ip, name, reason = entry["ip"], entry.get("name"), entry.get("reason")
+        if max_delete is not None and counts[key] >= max_delete:
+            counts["capped"] += 1
+            continue
+        if dry_run:
+            log.info("Expire (dry run): would delete %s (%s): %s, last discover %s",
+                     ip, name, reason, entry.get("last_discover"))
+            counts[key] += 1
+            continue
+        try:
+            nd.enqueue_delete(ip, archive=archive, log_msg=f"discobox expire: {reason}")
+            log.info("Expire: delete enqueued for %s (%s): %s, last discover %s%s",
+                     ip, name, reason, entry.get("last_discover"), ", nodes archived" if archive else "")
+            counts[key] += 1
+        except Exception as exc:
+            log.error("Expire: failed to enqueue delete for %s: %s", ip, exc)
+            counts["errors"] += 1
+    if counts["capped"]:
+        log.info("Expire cap reached (%d): %d left for the next run", max_delete, counts["capped"])
     return counts
 
 

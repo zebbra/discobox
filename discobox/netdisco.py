@@ -137,7 +137,7 @@ class NetdiscoClient:
         limit = 1000
         offset = 0
         while True:
-            page = self._get(f"/api/v1/search/device?fields=ip,dns,name,device_auth_tag,last_discover&limit={limit}&offset={offset}")
+            page = self._get(f"/api/v1/search/device?fields=ip,dns,name,vendor,is_pseudo,device_auth_tag,last_discover&limit={limit}&offset={offset}")
             if not page:
                 break
             devices.extend(page)
@@ -158,3 +158,12 @@ class NetdiscoClient:
         if device_auth_tag_hint:
             extra["device_auth_tag_hint"] = device_auth_tag_hint
         self._post("/api/v1/queue/jobs", [{"action": "discover", "device": ip, "extra": json.dumps(extra)}])
+
+    def enqueue_delete(self, ip: str, archive: bool = True, log_msg: str = "") -> None:
+        """Netdisco delete job; archive keeps the device's nodes as inactive (the UI's "Archive Nodes", sent as port)."""
+        job: dict = {"action": "delete", "device": ip}
+        if archive:
+            job["port"] = "1"
+        if log_msg:
+            job["extra"] = log_msg
+        self._post("/api/v1/queue/jobs", [job])

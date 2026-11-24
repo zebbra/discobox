@@ -96,7 +96,8 @@ def _gaps_env(monkeypatch, find_gaps):
     monkeypatch.setattr(server, "_get_netbox_client", lambda: object())
     monkeypatch.setattr(server, "_LIVENESS_URL", None)
     for attr, name in (("_GAPS_COUNTS_FILE", "gaps"), ("_NOT_IN_NETDISCO_FILE", "nind"),
-                       ("_NOT_IN_NETBOX_FILE", "ninb"), ("_TAG_MISMATCHES_FILE", "tm")):
+                       ("_NOT_IN_NETBOX_FILE", "ninb"), ("_TAG_MISMATCHES_FILE", "tm"),
+                       ("_EXPIRE_FILE", "exp")):
         monkeypatch.setattr(server, attr, os.path.join(state, name + ".json"))
     return jobs
 
@@ -112,7 +113,8 @@ def test_gaps_view_runs_the_gaps_job_read_only(monkeypatch) -> None:
     _gaps_env(monkeypatch, fake_find_gaps)
     monkeypatch.setattr(server, "_is_paused", lambda: True)          # read-only: runs while paused
     r = server.gaps_view(lists=False, refresh=False, wait=True)     # GET /gaps?wait=true
-    assert set(seen) == {"roles", "statuses", "liveness", "liveness_key", "not_in_netbox_stale_hours", "exclude", "require_auth_tag"}
+    assert set(seen) == {"roles", "statuses", "liveness", "liveness_key", "not_in_netbox_stale_hours", "exclude", "require_auth_tag",
+                         "expire_statuses", "expire_stale_days"}
     assert {k: r[k] for k in GAP_COUNTS} == GAP_COUNTS
     assert r["last_run"]["status"] == "ok" and r["running"] is False and r["refresh_started"] is False
     # lists come from the saved gap files

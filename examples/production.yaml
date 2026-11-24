@@ -16,6 +16,8 @@ sync:
 jobs:
   discover-missing:
     interval: 3600            # hourly instead of daily; max_enqueue below keeps each run small
+  expire:
+    interval: 86400
 
 reconcile:
   max_enqueue: 10             # discovery jobs per discover-missing run
@@ -37,6 +39,10 @@ reconcile:
     query: 'max_over_time(up{job="snmp"}[6h])'
     label: netbox_primary_ip
     key: ip
+  expire:                     # delete gone devices from Netdisco, MAC/ARP history archived
+    statuses: [decommissioning]
+    stale_days: 30            # not in Netbox and not discovered for 30 days
+    dry_run: false            # after checking /expire on a dry run
 
 rebuild:
   max_devices: 50             # /rebuild/all: about 30-40 s per device

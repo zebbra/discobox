@@ -171,6 +171,8 @@ jobs:                       # schedules in seconds (status page, /jobs); 0 = on 
     interval: 86400
   types-bare:               # discobox_types_bare from Netbox (also right after a dummy is created or an apply)
     interval: 3600
+  expire:                   # from the last gaps result: delete gone devices from Netdisco (reconcile.expire)
+    interval: 0
 
 reconcile:                  # gaps selection and discover-missing limits
   max_queued: null          # abort reconcile if Netdisco queue exceeds this
@@ -209,6 +211,13 @@ reconcile:                  # gaps selection and discover-missing limits
     key: ip                 # device attribute compared to the label: ip | name
     timeout: 15             # query timeout, seconds
     tls_verify: true
+  expire:                   # the expire job: delete devices from Netdisco that are gone
+    statuses: []            # Netbox statuses whose device goes, e.g. [decommissioning, offline];
+                            # matched by primary IP, else by name
+    stale_days: null        # also Netdisco devices not in Netbox and not discovered for this many days
+    archive: true           # keep their MAC/ARP history as inactive nodes (Netdisco's "Archive Nodes")
+    max_delete: 10          # delete jobs per run
+    dry_run: true           # only log and list (/expire) what would be deleted
 
 # interface_defaults:       # fill interface custom fields where they're empty (never overwritten,
 #                           # a deliberate value like "none" included), on every sync of a matching

@@ -14,9 +14,10 @@ Endpoints (see /docs):
   POST     /sync/pause       Hold queued syncs from starting
   POST     /sync/resume      Release the pause gate
   POST     /discover         Enqueue a Netdisco discover for one device (Netbox SNMP profile/timeout)
-  GET      /jobs             Jobs: gaps, discover-missing, fix-tags, types-bare
+  GET      /jobs             Jobs: gaps, discover-missing, fix-tags, expire, types-bare
   POST     /jobs/<name>/run  Run a job now
   GET      /gaps             The last gaps result (Netbox ↔ Netdisco)
+  GET      /expire           Netdisco devices the expire job deletes (last gaps run)
   GET/POST /refresh-ip        Primary IPv4 of Netbox devices from DNS / Netdisco (dry-run unless POST dry_run=false)
   GET/POST /types/library    Enrich DeviceTypes from the devicetype-library (dry-run unless POST apply=true)
   GET      /config, /stats, /metrics, /health
@@ -60,6 +61,7 @@ from discobox import (
     configure_read_fields,
     discover_missing,
     discover_snmptimeout_us,
+    expire_devices,
     fetch_liveness,
     find_gaps,
     fix_tag_mismatches,
@@ -80,8 +82,10 @@ from metrics import (
     device_sync_failed,
     device_sync_timestamp,
     discover_missing_enqueued_total,
+    expire_deleted_total,
     fix_tags_enqueued_total,
     gaps_excluded,
+    gaps_expire,
     gaps_netbox_devices,
     gaps_netdisco_devices,
     gaps_no_auth_tag,
@@ -300,6 +304,8 @@ _RECONCILE_DEFER_SECONDS:   int          = _S.reconcile.defer_seconds
 # Netdisco devices not in Netbox whose last discovery lags Netdisco's newest by
 # more than this are listed as stale, not counted (and never auto-created).
 _NOT_IN_NETBOX_STALE_HOURS: Optional[float] = _S.reconcile.not_in_netbox_stale_hours
+_EXPIRE = _S.reconcile.expire
+_EXPIRE_INTERVAL: int = _S.jobs.expire.interval
 
 # Liveness gate: before enqueueing discovery, ask a Prometheus-compatible API
 # (VictoriaMetrics vmselect) which devices actually respond, and skip the dead
@@ -500,6 +506,8 @@ def _run_gaps() -> dict:
         not_in_netbox_stale_hours=_NOT_IN_NETBOX_STALE_HOURS,
         exclude=_RECONCILE_EXCLUDE,
         require_auth_tag=_RECONCILE_REQUIRE_AUTH_TAG,
+        expire_statuses=list(_EXPIRE.statuses),
+        expire_stale_days=_EXPIRE.stale_days,
     )
     gaps_netbox_devices.set(counts["netbox_total"])
     gaps_netdisco_devices.set(counts["netdisco_total"])
@@ -510,11 +518,13 @@ def _run_gaps() -> dict:
     gaps_tag_mismatches.set(counts["tag_mismatches"])
     gaps_excluded.set(counts.get("excluded", 0))
     gaps_no_auth_tag.set(counts.get("no_auth_tag", 0))
+    gaps_expire.set(counts.get("expire", 0))
     summary = {k: v for k, v in counts.items() if not k.endswith("_list")}
     with _reconcile_gaps_lock:
         _save_gap(_NOT_IN_NETDISCO_FILE, counts["not_in_netdisco_list"])
         _save_gap(_NOT_IN_NETBOX_FILE, counts["not_in_netbox_list"])
         _save_gap(_TAG_MISMATCHES_FILE, counts["tag_mismatches_list"])
+        _save_gap(_EXPIRE_FILE, counts.get("expire_list", []))
         _save_gaps_counts(summary)
     return summary
 
@@ -547,6 +557,8 @@ def _job_gaps() -> JobResult:
         parts.append(f"{c['excluded']} excluded")
     if c.get("no_auth_tag"):
         parts.append(f"{c['no_auth_tag']} without auth tag")
+    if c.get("expire"):
+        parts.append(f"{c['expire']} to expire")
     return JobResult(summary=", ".join(parts), data=c)
 
 
@@ -619,6 +631,36 @@ def _job_fix_tags(max_enqueue: Optional[int] = None) -> JobResult:
                              f"{result.get('errors', 0)} errors")
 
 
+def _job_expire(max_delete: Optional[int] = None) -> JobResult:
+    if _is_paused():
+        return JobResult("skipped", "sync is paused")
+    too_old = _gaps_too_old()
+    if too_old:
+        return JobResult("skipped", too_old, retry_in=_RECONCILE_DEFER_SECONDS)
+    with _reconcile_gaps_lock:
+        candidates = _load_gap(_EXPIRE_FILE)
+    c = expire_devices(
+        _get_netdisco_client(), candidates,
+        max_delete=max_delete if max_delete is not None else _EXPIRE.max_delete,
+        archive=_EXPIRE.archive,
+        dry_run=_EXPIRE.dry_run,
+        max_queued=_RECONCILE_MAX_QUEUED,
+        max_failed=_RECONCILE_MAX_FAILED,
+    )
+    if c["aborted"]:
+        return JobResult("aborted", "Netdisco queue too busy or its status unreachable (see log)")
+    expire_deleted_total.inc(c.get("deleted", 0))
+    if _EXPIRE.dry_run:
+        parts = [f"dry run: {c['would_delete']} would be deleted"]
+    else:
+        parts = [f"{c['deleted']} deleted" + (" (nodes archived)" if _EXPIRE.archive else "")]
+    if c["capped"]:
+        parts.append(f"{c['capped']} left for the next run")
+    if c["errors"]:
+        parts.append(f"{c['errors']} errors")
+    return JobResult(summary=", ".join(parts), data=c)
+
+
 def _job_types_bare() -> JobResult:
     n = _refresh_types_bare()
     available = sum(1 for m in types_bare.collect() for smp in m.samples
@@ -633,6 +675,9 @@ _jobs.register(Job("discover-missing", _job_discover_missing, interval=_DISCOVER
                                "know, auto-create Netbox devices (auto_create)"))
 _jobs.register(Job("fix-tags", _job_fix_tags,
                    description="From the last gaps result: re-enqueue discovery with Netbox's auth tag for tag mismatches"))
+_jobs.register(Job("expire", _job_expire, interval=_EXPIRE_INTERVAL, startup_delay=600,
+                   description="From the last gaps result: delete gone devices from Netdisco (reconcile.expire; "
+                               "nodes archived)"))
 if _IFACE_SOURCE_CF:
     _jobs.register(Job("types-bare", _job_types_bare, interval=_LIBRARY_METRICS_INTERVAL,
                        description="Refresh discobox_types_bare (dummy types and what the library can fill)"))
@@ -821,6 +866,7 @@ _reconcile_gaps_lock = threading.Lock()
 # discover-missing rotation: per IP when it was last enqueued and how often
 # (devices no longer missing are dropped on the next run).
 _DISCOVER_ATTEMPTS_FILE: str = os.path.join(_STATE_DIR, "discobox.discover_attempts.json")
+_EXPIRE_FILE: str = os.path.join(_STATE_DIR, "discobox.expire.json")
 
 # WLC AP pass: skip the APs while the WLC's AP list is unchanged (per-WLC state
 # file here), full pass every aps.full_pass_days and on every rebuild.
@@ -1861,7 +1907,8 @@ def jobs_run(
     name: str,
     response: Response,
     wait: Annotated[bool, Query(description="Run in this request and answer with the result")] = False,
-    max_enqueue: Annotated[Optional[int], Query(description="discover-missing / fix-tags: max devices to enqueue")] = None,
+    max_enqueue: Annotated[Optional[int], Query(description="discover-missing / fix-tags: max devices to enqueue; "
+                                                            "expire: max delete jobs")] = None,
     offset: Annotated[Optional[int], Query(description="discover-missing: skip the first N missing devices")] = None,
 ) -> dict:
     # Plain def: a ?wait=true run blocks FastAPI's threadpool, not the event loop.
@@ -1872,6 +1919,8 @@ def jobs_run(
         kwargs = {"max_enqueue": max_enqueue, "offset": offset, "manual": True}
     elif name == "fix-tags":
         kwargs = {"max_enqueue": max_enqueue}
+    elif name == "expire":
+        kwargs = {"max_delete": max_enqueue}
     if wait:
         run = _jobs.run(name, **kwargs)
         if run is None:
@@ -2106,6 +2155,7 @@ def gaps_view(
             result["not_in_netdisco_list"] = _load_gap(_NOT_IN_NETDISCO_FILE)
             result["not_in_netbox_list"] = _load_gap(_NOT_IN_NETBOX_FILE)
             result["tag_mismatches_list"] = _load_gap(_TAG_MISMATCHES_FILE)
+            result["expire_list"] = _load_gap(_EXPIRE_FILE)
     return result
 
 
@@ -2168,6 +2218,12 @@ async def not_in_netbox() -> list:
 async def tag_mismatches() -> list:
     with _reconcile_gaps_lock:
         return _load_gap(_TAG_MISMATCHES_FILE)
+
+
+@app.get("/expire", summary="Netdisco devices the expire job deletes (last reconcile), with reason and last_discover")
+async def expire_list() -> list:
+    with _reconcile_gaps_lock:
+        return _load_gap(_EXPIRE_FILE)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

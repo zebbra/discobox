@@ -208,6 +208,17 @@ gaps_no_auth_tag = Gauge(
     "Netbox devices not in Netdisco without an auth tag, left out with reconcile.require_auth_tag (last gaps run)",
     **_reg,
 )
+gaps_expire = Gauge(
+    "discobox_gaps_expire",
+    "Netdisco devices the expire job deletes: Netbox status in reconcile.expire.statuses, or not in Netbox "
+    "and not discovered for reconcile.expire.stale_days (last gaps run)",
+    **_reg,
+)
+expire_deleted_total = Counter(
+    "discobox_expire_deleted_total",
+    "Netdisco delete jobs enqueued by the expire job (not counted on a dry run)",
+    **_reg,
+)
 interface_defaults_total = Counter(
     "discobox_interface_defaults_total",
     "Interface custom fields filled from interface_defaults (empty ones only), by field",

@@ -12,6 +12,7 @@ Periodic and on-demand work runs as jobs, listed on the status page and at `/job
 | `discover-missing` | every 24h | From the last gaps result: enqueue Netdisco discovery for the Netbox devices it doesn't know (not those liveness reports down; with `reconcile.require_auth_tag` only those with an auth tag; at most `reconcile.max_enqueue`, least recently enqueued first so a device that never comes in, e.g. an ACL, doesn't hold the cap every run; the status page shows how often and when each was enqueued), and with `auto_create` create Netbox devices for the non-stale Netdisco-only ones. Skipped when the gaps result is missing or older than `jobs.gaps.max_age` and while paused, deferred while syncs are queued (`reconcile.defer_if_queued`, retried after `reconcile.defer_seconds`), aborted while Netdisco's queue is over `reconcile.max_queued` / `max_failed` |
 | `fix-tags` | on demand | From the last gaps result: re-enqueue discovery with Netbox's auth tag for the tag mismatches (same freshness rule) |
 | `types-bare` | every 1h | Refresh `discobox_types_bare` (only with `custom_fields.source` set) |
+| `expire` | on demand | From the last gaps result: delete gone devices from Netdisco, see [Expire](#expire) |
 
 ```yaml
 jobs:
@@ -22,7 +23,30 @@ jobs:
     interval: 86400
   types-bare:
     interval: 3600
+  expire:
+    interval: 0         # e.g. 86400 once the dry run looks right
 ```
+
+### Expire
+
+Netdisco's own `expire_devices` deletes devices after N days without discovery, and without archiving their nodes, so their MAC/ARP history is lost. The `expire` job deletes them earlier and keeps that history: it enqueues a Netdisco `delete` job with "Archive Nodes" (the nodes stay as inactive ones until Netdisco's `expire_nodes_archive`). The gaps job lists the candidates (`GET /expire`, `discobox_gaps_expire`):
+
+- Netdisco devices whose Netbox device has a status in `reconcile.expire.statuses` (e.g. `decommissioning`), matched by primary IP, else by name (with or without domain, only if exactly one Netdisco device matches)
+- with `stale_days`: Netdisco devices not in Netbox (by primary IP, any status) whose last discovery is more than that many days older than Netdisco's newest
+
+Never listed: Netdisco pseudo devices, Netbox devices matching a `reconcile.exclude` rule, and an address that is the primary IP of a Netbox device with another status (a new device on an old address). Devices in Netbox with a kept status (active, …) that stopped answering are left to Netdisco's `expire_devices`.
+
+```yaml
+reconcile:
+  expire:
+    statuses: [decommissioning]
+    stale_days: 30
+    archive: true       # default
+    max_delete: 10      # delete jobs per run (default), oldest discovery first
+    dry_run: true       # default: only log "would delete" and list them
+```
+
+Start with the dry run: run the job (`POST /jobs/expire/run?wait=true`), check `/expire` and the log, then set `dry_run: false` and an interval. Each delete is logged with its reason and counted in `discobox_expire_deleted_total`; the Netdisco job carries `discobox expire: <reason>` as its log message. Skipped while paused or when the gaps result is too old (`jobs.gaps.max_age`), aborted while Netdisco's queue is over `reconcile.max_queued` / `max_failed`. Needs a Netdisco API user with the `api_admin` role.
 
 Each job's last result (start, end, status `ok | deferred | skipped | aborted | error`, summary) is kept in `discobox.jobs.json` in the state dir, so after a restart the next run follows the last one; an overdue job runs shortly after startup (gaps after 1 minute, discover-missing after 5 minutes, types-bare after 30 s). Any job also runs on demand: the status page's "run now", or `POST /jobs/<name>/run` (e.g. from an external scheduler). Metrics per job (label `name`, since `job` would collide with the scrape job): `discobox_job_last_run_timestamp_seconds`, `discobox_job_last_success_timestamp_seconds`, `discobox_job_duration_seconds`, `discobox_job_next_run_timestamp_seconds`, `discobox_job_runs_total{name,status}`. Per-device metrics carry the device in `device`.
 
@@ -45,9 +69,9 @@ Actions are POST. `GET /sync` and `GET /rebuild` still work but are deprecated: 
 | `/sync/resume` | POST | yes | Resume queued syncs |
 | `/discover` | POST | yes | Enqueue a Netdisco discover for one device: `?host=<ip or Netbox name>`, tag hint from `snmp_auth_profile` and per-request SNMP timeout derived from `snmp_polling_timeout` (`netdisco.discover_snmptimeout`), or `&tag=` / `&timeout=` (per-request, used as-is) |
 | `/jobs` | GET | no | Every job: schedule, last run and result, next run; plus the retry queue (JSON) |
-| `/jobs/<name>/run` | POST | yes | Run a job now: `202` in the background, `?wait=true` answers with the result; `409` while it's running. discover-missing and fix-tags take `?max_enqueue=N`, discover-missing `&offset=N` |
+| `/jobs/<name>/run` | POST | yes | Run a job now: `202` in the background, `?wait=true` answers with the result; `409` while it's running. discover-missing and fix-tags take `?max_enqueue=N`, discover-missing `&offset=N`; for expire `?max_enqueue=N` caps the delete jobs |
 | `/gaps` | GET | yes | The last gaps result as JSON, answered immediately. `?refresh=true` starts the gaps job in the background (`running` shows it's in progress; the first call without a result starts one too), `?lists=true` adds the device lists, `?wait=true` runs it synchronously (may exceed proxy timeouts) |
-| `/not-in-netdisco`, `/not-in-netbox`, `/tag-mismatches`, `/unknown-devices` | GET | no | The gap lists (JSON) |
+| `/not-in-netdisco`, `/not-in-netbox`, `/tag-mismatches`, `/expire`, `/unknown-devices` | GET | no | The gap lists (JSON) |
 | `/refresh-ip` | GET, POST | yes | Primary IPv4 of Netbox devices from their name: DNS (`refresh_ip.domains`), else the Netdisco device by that name. `?device=<name or id>` (repeatable) and/or any Netbox device filter (`?has_primary_ip=false&role=switch`). `dry_run=true` (default) reports per device `set` / `replace` / `unchanged` / `error`; `POST …&dry_run=false` writes, also over a differing primary IP. The address stays on the device's interface that holds it, else goes on the dummy interface `main` until the next sync moves it; one held by another device is an error, or with `&move=true` (exactly one `device=`, no filter) a `move`: taken off that device's interface, clearing its primary IP if this was it. Roles in `refresh_ip.exclude_roles` (default `lwapp-ap`) are never written: `error` for a `device=`, left out and counted as `excluded` for a filter |
 | `/types/library` | GET, POST | yes | DeviceType enrichment report; `POST …&apply=true` writes (see [Features](features.md)) |
 | `/config` | GET | yes | Effective settings (secrets masked) and the env vars in use |

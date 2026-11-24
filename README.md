@@ -83,6 +83,7 @@ A Grafana dashboard for the metrics is in [`grafana-dashboard.json`](grafana-das
 - **Interface defaults**: fill empty interface custom fields by device custom field, e.g. `interface_severity` per team ([device rules](docs/device-rules.md#interface-defaults))
 - **Gaps and discover-missing**: Netbox devices Netdisco doesn't know get enqueued for discovery; `reconcile.exclude` rules and `require_auth_tag` keep devices out ([operations](docs/operations.md#jobs), [device rules](docs/device-rules.md#reconcile-exclude))
 - **Auth tag fixes**: `fix-tags` re-discovers devices whose Netdisco auth tag differs from Netbox's ([operations](docs/operations.md#jobs))
+- **Expire**: deletes devices from Netdisco whose Netbox device is decommissioned or that are long gone, keeping their MAC/ARP history archived; dry run by default ([operations](docs/operations.md#expire))
 - **Primary IP refresh**: `/refresh-ip` sets the primary IPv4 from DNS, else Netdisco ([endpoints](docs/operations.md#server-endpoints))
 - **Rebuild**: `/rebuild` and `/rebuild/all` match a device's inventory exactly to Netdisco, with dry run and a delete brake ([endpoints](docs/operations.md#server-endpoints))
 - **Pinned devices**: a `sync.skip_tags` tag (default `pin-inventory`) keeps a device out of every sync and rebuild ([operations](docs/operations.md))
