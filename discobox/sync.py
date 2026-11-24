@@ -621,6 +621,19 @@ def _sync_device(
 
                 if vip_device:
                     _handle_vip_device(nb, vip_device, vip_mode, log, active_device=nb_device)
+            elif not real_device and nd_ip != ip:
+                # Reached via another of the Netdisco device's IPs, and that device
+                # isn't in Netbox: not a cluster address but an old device that still
+                # holds it (e.g. on a subinterface) in Netdisco. Syncing would write
+                # that device onto this one.
+                log.warning(
+                    "%s is an address of Netdisco device %r (%s), which isn't in Netbox: "
+                    "not syncing it onto %r (an old device still holding the address? "
+                    "delete it from Netdisco, or let the expire job)",
+                    ip, nd_hostname, nd_ip, nb_device.name,
+                )
+                return {"ok": False, "reason": "ip_held_by_other_device", "hostname": nd_hostname,
+                        "netdisco_ip": nd_ip, "interfaces": {}, "ips": {}, "modules": {}, "sfps": {}}
             else:
                 log.warning(
                     "Hostname mismatch for %s: Netdisco=%r  Netbox=%r",

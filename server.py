@@ -1092,7 +1092,7 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             skip_tags=_SYNC_SKIP_TAGS,
         )
         status = "success" if result.get("ok") else "error"
-        if result.get("reason") in ("discovery_incomplete", "recently_touched", "pinned"):
+        if result.get("reason") in ("discovery_incomplete", "recently_touched", "pinned", "ip_held_by_other_device"):
             syncs_skipped_total.labels(reason=result["reason"]).inc()
         if result.get("reason") == "discovery_incomplete":
             # Transient: Netdisco still shows ifIndex placeholders as port names.
@@ -1106,6 +1106,10 @@ def _run_sync(host: str, sync_mac: bool, sync_ip: bool, sync_modules: bool, sync
             status = "skipped"
         if result.get("reason") == "pinned":
             # A tag from sync.skip_tags on the Netbox device: left alone on purpose.
+            status = "skipped"
+        if result.get("reason") == "ip_held_by_other_device":
+            # Netdisco has the address on another device that isn't in Netbox
+            # (logged): nothing this sync can fix, so no failed flag or auto-pause.
             status = "skipped"
         if result.get("reason") == "not_in_netdisco":
             # Netdisco 404s the IP (a /sync for a Netbox device Netdisco doesn't
