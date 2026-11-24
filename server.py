@@ -1023,10 +1023,11 @@ class RebuildResponse(BaseModel):
     status: str
     host: str
     dry_run: bool
-    hostname: Optional[str] = None
+    hostname: Optional[str] = None          # the Netdisco device's name
     prune: dict = {}
     new_stack_members: Optional[int] = None
     reason: Optional[str] = None
+    netdisco_ip: Optional[str] = None       # ip_held_by_other_device: the Netdisco device holding the address
 
 
 # ── Background sync ────────────────────────────────────────────────────────────
@@ -1368,6 +1369,7 @@ def _rebuild_outcome(result: dict, host: str, dry_run: bool) -> RebuildResponse:
         hostname=result.get("hostname"), prune=prune_result,
         new_stack_members=(prune_result.get("stack_members") or {}).get("now"),
         reason=reason,
+        netdisco_ip=result.get("netdisco_ip"),
     )
 
 
@@ -1510,7 +1512,10 @@ def _rebuild_all_worker(run: dict, sleep=time.sleep) -> None:
             out = _rebuild_outcome(_rebuild_device(host, dry_run, _REBUILD_MAX_DELETE_PERCENT), host, dry_run)
             fields = {"status": out.status, "reason": out.reason, "prune": out.prune,
                       "new_stack_members": out.new_stack_members}
-            if out.hostname:
+            if out.netdisco_ip:
+                # the Netdisco device holding the address: hostname stays the Netbox device's
+                fields.update(netdisco_ip=out.netdisco_ip, netdisco_hostname=out.hostname)
+            elif out.hostname:
                 fields["hostname"] = out.hostname
         except Exception as exc:
             logger.error("rebuild failed for %s%s: %s", host, " [dry-run]" if dry_run else "", exc)
