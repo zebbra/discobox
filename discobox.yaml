@@ -185,7 +185,8 @@ reconcile:                  # gaps selection and discover-missing limits
                                         # treat active|maintenance as reachable) — add "maintenance"
                                         # here to reconcile those too.
   require_auth_tag: false    # true: only enqueue discovery for devices whose custom_fields.auth_profile
-                             # is set (without it Netdisco may have no credentials to try)
+                             # is set (without it Netdisco may have no credentials to try); devices
+                             # without it aren't reported as tag mismatches either
   defer_if_queued: true      # postpone reconcile (re-checked every defer_seconds) while any sync
                              # is still queued/in-flight, instead of piling more work on top of
                              # a backlog (e.g. a large hook burst) that's still draining

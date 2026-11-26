@@ -431,3 +431,10 @@ def test_find_gaps_without_auth_tag_only_counts_with_require_auth_tag() -> None:
     assert [e["name"] for e in gaps["not_in_netdisco_list"]] == ["sw-1"] and gaps["no_auth_tag"] == 1
     gaps = find_gaps(FakeND(), FakeNB([tagged, untagged]))
     assert len(gaps["not_in_netdisco_list"]) == 2 and gaps["no_auth_tag"] == 0
+
+
+def test_require_auth_tag_leaves_untagged_known_devices_out_of_tag_mismatches() -> None:
+    untagged = FakeDevice("sw-2", "10.0.0.2")
+    nd = FakeNDInventory([{"ip": "10.0.0.2", "name": "sw-2", "device_auth_tag": None}])
+    assert find_gaps(nd, FakeNB([untagged]), require_auth_tag=True)["tag_mismatches_list"] == []
+    assert find_gaps(nd, FakeNB([untagged]))["tag_mismatches_list"][0]["reason"] == "missing"

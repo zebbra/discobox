@@ -381,7 +381,8 @@ def find_gaps(
     Netbox devices matching an exclude rule are counted as excluded and land
     in no list, so neither discover-missing nor fix-tags pushes them. With
     require_auth_tag, Netbox devices Netdisco doesn't know and that have no
-    auth tag are only counted (no_auth_tag): discover-missing can't enqueue them.
+    auth tag are only counted (no_auth_tag): discover-missing can't enqueue them;
+    the ones Netdisco knows aren't tag mismatches either.
 
     The expire list holds the Netdisco devices the expire job deletes: those
     whose Netbox device has one of expire_statuses (matched by primary IP, else
@@ -423,7 +424,9 @@ def find_gaps(
             counts["already_known"] += 1
             nd_tag = nd_by_ip[ip].get("device_auth_tag") or None
             # carried along so fix-tags' re-discover uses the device's own SNMP timeout
-            if not nd_tag:
+            if require_auth_tag and not nb_tag:
+                pass    # no auth profile in Netbox: not a device we push, so no mismatch either
+            elif not nd_tag:
                 tag_mismatches.append({"ip": ip, "name": device.name, "netbox_tag": nb_tag, "netdisco_tag": nd_tag,
                                        "reason": "missing", "snmp_polling_timeout": snmp_timeout})
             elif nb_tag and nd_tag != nb_tag:
